@@ -1,0 +1,30 @@
+[package]
+name = "xslt2"
+version = "0.1.0"
+edition = "2021"
+authors = ["semyonc"]
+description = "Schema-aware XSLT 2.0 processor built on the xsd-schema validator and its XPath 2.0 engine"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["xslt", "xml", "xpath", "transformation", "schema-aware"]
+categories = ["parser-implementations", "text-processing"]
+
+[dependencies]
+# Foundation: XPath 2.0 engine, XDM type tower, PSVI, BufferDocument.
+# The `xsd11` feature is required for the XPath engine and BufferDocument.
+xsd-schema = { path = "../xsd-schema", features = ["xsd11"] }
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+roxmltree = "0.19"           # W3C test-suite catalog parsing (same as xsd-schema's XQTS driver)
+
+[lib]
+name = "xslt2"
+path = "src/lib.rs"
+
+# W3C XSLT conformance harness (XSLT 2.0-applicable subset of the public XSLT 3.0 suite).
+# Always run in --release:  cargo test --test xslts --release -- -s ../../xslt30-test
+[[test]]
+name = "xslts"
+path = "tests/xslts/driver.rs"
+harness = false
