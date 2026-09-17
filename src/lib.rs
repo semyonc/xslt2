@@ -5,9 +5,20 @@
 //! `XSLT2_DESIGN_SKETCH.md` (workspace root) records the architecture, the
 //! roadmap and the open questions; `XSLT2_FEASIBILITY.md` is the original memo.
 //!
-//! Status: M0 — the conformance harness (`tests/xslts`) exists and runs the
-//! W3C suite against a stub engine; the processor itself is not implemented yet.
+//! Status: M0b — the conformance harness (`tests/xslts`) runs the W3C suite
+//! against a stub engine, and the architecture prototype of §14 is in place:
+//! [`store`] (document ownership, `doc()`), [`receiver`] (the §5.7.1 push
+//! pipeline) and [`proto`] (frames, a stand-in compiled stylesheet, pattern
+//! predicates). The instruction set itself is M1.
 
 pub mod error;
+pub mod proto;
+pub mod receiver;
+pub mod store;
 
 pub use error::{ErrorKind, Location, XsltError};
+pub use receiver::{
+    Annotations, ComplexContentNormalizer, EventSerializer, Name, Receiver, ResultBuilder,
+    SequenceCollector,
+};
+pub use store::{DocId, DocumentStore, ProtoEvaluator, ProtoFunctions, StoredDocument, PROTO_NS};

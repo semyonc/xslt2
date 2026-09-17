@@ -1316,7 +1316,7 @@ checksum = "1e9df38ee2d2c3c5948ea468a8406ff0db0b29ae1ffde1bcf20ef305bcc95c51"
 
 [[package]]
 name = "xsd-schema"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "base64",
@@ -1342,8 +1342,10 @@ dependencies = [
 name = "xslt2"
 version = "0.1.0"
 dependencies = [
+ "bumpalo",
  "pretty_assertions",
  "roxmltree",
+ "slotmap",
  "xsd-schema",
 ]
 

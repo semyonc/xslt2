@@ -14,6 +14,11 @@ categories = ["parser-implementations", "text-processing"]
 # The `xsd11` feature is required for the XPath engine and BufferDocument.
 xsd-schema = { path = "../xsd-schema", features = ["xsd11"] }
 
+# The transformation arena (§6.1): nodes and the document structs themselves.
+bumpalo = "3"
+# Typed keys for the document store (DocId).
+slotmap = "1.0"
+
 [dev-dependencies]
 pretty_assertions = "1.4"
 roxmltree = "0.19"           # W3C test-suite catalog parsing (same as xsd-schema's XQTS driver)
