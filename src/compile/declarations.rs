@@ -62,6 +62,12 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         Ok(())
     }
 
+    /// The two passes over the top-level declarations of every module.
+    ///
+    /// §3.12 needs no check here: `Unit::decls` is filled by the loader through
+    /// [`Module::children`](crate::stylesheet::Module::children), so an excluded
+    /// declaration never reaches it — which is also why the "unimplemented
+    /// declaration" pass below could already do without one.
     pub(super) fn build_declarations(&mut self) -> Result<(), XsltError> {
         // Pass 1: the global variables and parameters, so that every
         // expression can be compiled against a complete global scope.
@@ -69,9 +75,6 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         for unit in &self.modules.units {
             for (module_id, nav, kind) in &unit.decls {
                 if *kind != DeclKind::Declaration || nav.namespace_uri() != XSLT_NS {
-                    continue;
-                }
-                if self.excluded(nav, *module_id) {
                     continue;
                 }
                 if matches!(nav.local_name(), "variable" | "param") {
@@ -107,9 +110,6 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             let decls: Vec<(ModuleId, Nav<'t>, DeclKind)> =
                 self.modules.units[unit_index].decls.clone();
             for (module_id, nav, kind) in decls {
-                if self.excluded(&nav, module_id) {
-                    continue;
-                }
                 let module = self.modules.module(module_id);
                 if kind == DeclKind::SimplifiedRoot {
                     self.simplified_template(module_id, &nav, precedence)?;
@@ -421,22 +421,16 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         self.frame_size = 0;
         let scope_mark = self.scope.len();
         let mut attributes = Vec::new();
-        let mut child = nav.clone();
-        if child.move_to_first_child() {
-            loop {
-                if child.node_type() == DomNodeType::Element && !self.excluded(&child, module_id) {
-                    if child.namespace_uri() == XSLT_NS && child.local_name() == "attribute" {
-                        attributes.push(self.instruction(&child, module_id)?);
-                    } else {
-                        return Err(XsltError::new(
-                            codes::XTSE0010,
-                            "the content of xsl:attribute-set must be xsl:attribute elements only",
-                        )
-                        .with_location(self.modules.module(module_id).location(&child)));
-                    }
-                }
-                if !child.move_to_next_sibling() {
-                    break;
+        for child in self.children(nav, module_id) {
+            if child.node_type() == DomNodeType::Element {
+                if child.namespace_uri() == XSLT_NS && child.local_name() == "attribute" {
+                    attributes.push(self.instruction(&child, module_id)?);
+                } else {
+                    return Err(XsltError::new(
+                        codes::XTSE0010,
+                        "the content of xsl:attribute-set must be xsl:attribute elements only",
+                    )
+                    .with_location(self.modules.module(module_id).location(&child)));
                 }
             }
         }
@@ -599,44 +593,37 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         module_id: ModuleId,
     ) -> Result<(Vec<ParamDecl>, Body), XsltError> {
         let mut params = Vec::new();
-        let mut child = nav.clone();
         let mut first_non_param: Option<Nav<'t>> = None;
-        if child.move_to_first_child() {
-            loop {
-                match child.node_type() {
-                    DomNodeType::Element if self.excluded(&child, module_id) => {}
-                    DomNodeType::Element => {
-                        let is_param =
-                            child.namespace_uri() == XSLT_NS && child.local_name() == "param";
-                        if is_param && first_non_param.is_none() {
-                            params.push(self.param_decl(&child, module_id, false)?);
-                        } else {
-                            if first_non_param.is_none() {
-                                first_non_param = Some(child.clone());
-                            }
-                            if is_param {
-                                let module = self.modules.module(module_id);
-                                return Err(XsltError::new(
-                                    codes::XTSE0010,
-                                    "xsl:param must come before any other content of a template",
-                                )
-                                .with_location(module.location(&child)));
-                            }
+        for child in self.children(nav, module_id) {
+            match child.node_type() {
+                DomNodeType::Element => {
+                    let is_param =
+                        child.namespace_uri() == XSLT_NS && child.local_name() == "param";
+                    if is_param && first_non_param.is_none() {
+                        params.push(self.param_decl(&child, module_id, false)?);
+                    } else {
+                        if first_non_param.is_none() {
+                            first_non_param = Some(child.clone());
+                        }
+                        if is_param {
+                            let module = self.modules.module(module_id);
+                            return Err(XsltError::new(
+                                codes::XTSE0010,
+                                "xsl:param must come before any other content of a template",
+                            )
+                            .with_location(module.location(&child)));
                         }
                     }
-                    // Whitespace before the first instruction is stripped;
-                    // significant text opens the sequence constructor.
-                    kind if kind.is_text_like()
-                        && first_non_param.is_none()
-                        && !is_stripped_stylesheet_text(&child) =>
-                    {
-                        first_non_param = Some(child.clone());
-                    }
-                    _ => {}
                 }
-                if !child.move_to_next_sibling() {
-                    break;
+                // Whitespace before the first instruction is stripped;
+                // significant text opens the sequence constructor.
+                kind if kind.is_text_like()
+                    && first_non_param.is_none()
+                    && !is_stripped_stylesheet_text(&child) =>
+                {
+                    first_non_param = Some(child.clone());
                 }
+                _ => {}
             }
         }
         let body = self.sequence_constructor_skipping(nav, module_id, "param")?;

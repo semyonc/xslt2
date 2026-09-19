@@ -11,7 +11,7 @@
 
 use crate::error::{codes, XsltError};
 use crate::model::ExprId;
-use crate::names::{is_ncname, split_qname, QName};
+use crate::names::{is_ncname, split_qname, QName, XSD_NS};
 use crate::whitespace;
 
 /// A compiled pattern: one or more alternatives, each an independent rule for
@@ -92,12 +92,59 @@ pub enum NodeTest {
     Element(Option<QName>),
     /// `attribute()` / `attribute(a)`
     Attribute(Option<QName>),
+    /// `element(*, T)` / `element(a, T)` where `T` is a type **every** element
+    /// has in a basic processor, so the type part decides nothing and the test
+    /// reduces to the name test.
+    ///
+    /// §4.3: a processor with no schema treats the source "as if no schema
+    /// processing had been performed, that is, effectively to strip all type
+    /// annotations from elements and attributes on input, marking them instead
+    /// as having type `xs:untyped` and `xs:untypedAtomic` respectively." An
+    /// `element(N, xs:untyped)` test therefore matches exactly the elements
+    /// `element(N)` matches — but §6.4 gives the two-argument form a *higher*
+    /// default priority, which is the only reason this is a variant of its own.
+    UntypedElement(Option<QName>),
+    /// `attribute(*, T)` / `attribute(a, T)` for `T` in `xs:untypedAtomic`,
+    /// `xs:anySimpleType`, `xs:anyAtomicType` — see [`NodeTest::UntypedElement`].
+    UntypedAttribute(Option<QName>),
     /// `document-node()` / `document-node(element(a))`
     DocumentNode(Option<Box<NodeTest>>),
 }
 
+/// Whether a type name is one that every element of a basic processor's source
+/// tree carries, so that `element(N, T)` reduces to the name test `N` (§4.3).
+///
+/// `xs:untyped` is the annotation itself; `xs:anyType` is the type it is
+/// derived from, and an `ElementTest` matches "a type that is `T` or is derived
+/// from `T`" (XPath 2.0 §2.5.4.3).
+fn is_universal_element_type(uri: &str, local: &str) -> bool {
+    uri == XSD_NS && matches!(local, "untyped" | "anyType")
+}
+
+/// The attribute counterpart: `xs:untypedAtomic` is the annotation, and
+/// `xs:anySimpleType` and `xs:anyAtomicType` are the types it derives from.
+fn is_universal_attribute_type(uri: &str, local: &str) -> bool {
+    uri == XSD_NS && matches!(local, "untypedAtomic" | "anySimpleType" | "anyAtomicType")
+}
+
 impl NodeTest {
     /// The default priority §6.4 gives a one-step pattern with this test.
+    ///
+    /// §6.4's table for an `ElementTest` or `AttributeTest`, where `E`, `A` and
+    /// `T` stand for an element name, an attribute name and a type name:
+    ///
+    /// > | Format | Priority | Notes |
+    /// > | `element()`, `element(*)` | −0.5 | (equivalent to `*`) |
+    /// > | `attribute()`, `attribute(*)` | −0.5 | (equivalent to `@*`) |
+    /// > | `element(E)` | 0 | (equivalent to `E`) |
+    /// > | `element(*, T)` | 0 | (matches by type only) |
+    /// > | `attribute(A)` | 0 | (equivalent to `@A`) |
+    /// > | `attribute(*, T)` | 0 | (matches by type only) |
+    /// > | `element(E, T)` | 0.25 | (matches by name and type) |
+    /// > | `attribute(A, T)` | 0.25 | (matches by name and type) |
+    ///
+    /// > The presence or absence of the symbol `?` following a type name does
+    /// > not affect the priority.
     fn priority(&self) -> f64 {
         match self {
             // "a QName preceded by an optional PatternAxis" and
@@ -105,6 +152,10 @@ impl NodeTest {
             NodeTest::Name(_) | NodeTest::Pi(Some(_)) => 0.0,
             // "element(E)", "attribute(A)".
             NodeTest::Element(Some(_)) | NodeTest::Attribute(Some(_)) => 0.0,
+            // "element(*, T)", "attribute(*, T)" — "matches by type only".
+            NodeTest::UntypedElement(None) | NodeTest::UntypedAttribute(None) => 0.0,
+            // "element(E, T)", "attribute(A, T)" — "matches by name and type".
+            NodeTest::UntypedElement(Some(_)) | NodeTest::UntypedAttribute(Some(_)) => 0.25,
             // "NCName:*" and "*:NCName".
             NodeTest::NsWildcard(_) | NodeTest::LocalWildcard(_) => -0.25,
             // "document-node(ElementTest)" takes the priority of the test.
@@ -148,8 +199,12 @@ impl PathPattern {
         match (&last.test, last.axis) {
             (NodeTest::Name(q), PatternAxis::Child) => IndexKey::Element(q.clone()),
             (NodeTest::Name(q), PatternAxis::Attribute) => IndexKey::Attribute(q.clone()),
-            (NodeTest::Element(Some(q)), _) => IndexKey::Element(q.clone()),
-            (NodeTest::Attribute(Some(q)), _) => IndexKey::Attribute(q.clone()),
+            (NodeTest::Element(Some(q)) | NodeTest::UntypedElement(Some(q)), _) => {
+                IndexKey::Element(q.clone())
+            }
+            (NodeTest::Attribute(Some(q)) | NodeTest::UntypedAttribute(Some(q)), _) => {
+                IndexKey::Attribute(q.clone())
+            }
             (NodeTest::NsWildcard(uri), PatternAxis::Child) => IndexKey::Namespace(uri.clone()),
             (NodeTest::LocalWildcard(local), PatternAxis::Child) => IndexKey::Local(local.clone()),
             _ => IndexKey::Other,
@@ -485,16 +540,40 @@ fn parse_kind_test(
             }
         }
         "element" | "attribute" => {
-            let axis = if kind == "element" {
+            let is_element = kind == "element";
+            let axis = if is_element {
                 PatternAxis::Child
             } else {
                 PatternAxis::Attribute
             };
-            if arg.contains(',') {
-                return Err(XsltError::not_implemented(
-                    format!("the typed node test {kind}({arg}) in a pattern"),
-                    "M4",
-                ));
+            // `element(N, T)` / `attribute(N, T)`: a basic processor can decide
+            // the type part only when `T` is a type every node of that kind
+            // carries anyway (§4.3), in which case the test is the name test.
+            let (arg, type_name) = match arg.split_once(',') {
+                Some((name, type_name)) => {
+                    (whitespace::trim(name), Some(whitespace::trim(type_name)))
+                }
+                None => (arg, None),
+            };
+            if let Some(type_name) = type_name {
+                // §6.4: "The presence or absence of the symbol `?` following a
+                // type name does not affect the priority"; nor, with no schema,
+                // does nillability affect what matches.
+                let type_name = whitespace::trim(type_name.trim_end_matches('?'));
+                let (prefix, local) = split_qname(type_name);
+                let uri = sink.resolve_prefix(prefix).unwrap_or_default();
+                let universal = if is_element {
+                    is_universal_element_type(&uri, local)
+                } else {
+                    is_universal_attribute_type(&uri, local)
+                };
+                if !universal {
+                    // Every other type name needs a schema (M4).
+                    return Err(XsltError::not_implemented(
+                        format!("the typed node test {kind}({arg}, {type_name}) in a pattern"),
+                        "M4",
+                    ));
+                }
             }
             let name = match arg {
                 "" | "*" => None,
@@ -503,10 +582,11 @@ fn parse_kind_test(
                     Some(expand(prefix, local, axis, source, sink)?)
                 }
             };
-            Ok(if kind == "element" {
-                NodeTest::Element(name)
-            } else {
-                NodeTest::Attribute(name)
+            Ok(match (is_element, type_name.is_some()) {
+                (true, false) => NodeTest::Element(name),
+                (true, true) => NodeTest::UntypedElement(name),
+                (false, false) => NodeTest::Attribute(name),
+                (false, true) => NodeTest::UntypedAttribute(name),
             })
         }
         "document-node" => {
@@ -515,7 +595,12 @@ fn parse_kind_test(
             }
             let inner = parse_node_test(arg, PatternAxis::Child, source, sink)?;
             match inner {
-                NodeTest::Element(_) => Ok(NodeTest::DocumentNode(Some(Box::new(inner)))),
+                // §6.4: "if it does include an ElementTest … the priority is
+                // the same as the priority of that ElementTest", which
+                // `NodeTest::priority` reads off the boxed test.
+                NodeTest::Element(_) | NodeTest::UntypedElement(_) => {
+                    Ok(NodeTest::DocumentNode(Some(Box::new(inner))))
+                }
                 _ => Err(bad_pattern(
                     source,
                     "document-node() takes an ElementTest or nothing",

@@ -212,8 +212,8 @@ pub struct Module<'t> {
     /// Computed once, by [`Loader`], **before** `xsl:include` and `xsl:import`
     /// are resolved and before anything else looks at the tree, so that no part
     /// of the compiler has to remember `use-when`: every walk over a module's
-    /// children asks [`Module::is_excluded`] and an excluded element — with its
-    /// whole subtree — is simply not there.
+    /// children goes through [`Module::children`], and an excluded element —
+    /// with its whole subtree — is simply not yielded.
     excluded: HashSet<u32>,
 }
 
@@ -236,7 +236,7 @@ impl<'t> Module<'t> {
         }
     }
 
-    /// Whether §3.12 effectively excludes this element of **this** module.
+    /// The children of `nav` that §3.12 leaves in the stylesheet module.
     ///
     /// > If the attribute is present and the effective boolean value of the
     /// > expression is false, then the element, together with all the nodes
@@ -244,9 +244,34 @@ impl<'t> Module<'t> {
     /// > stylesheet module. … the stylesheet module has the same effect as if
     /// > the node were not there.
     ///
+    /// This is the **only** way anything walks the children of a stylesheet
+    /// element after loading: an element `use-when` excluded — and with it its
+    /// whole subtree, which the walk never descends into — is simply not
+    /// yielded, so a traversal cannot forget the check by omitting a guard.
+    /// Text, comments and processing instructions pass through untouched;
+    /// §3.12 puts `use-when` on elements only.
+    ///
+    /// The one traversal that cannot use this is the §3.12 pass that *computes*
+    /// the exclusion set ([`use_when_exclusions`]) together with the §3.11
+    /// fragment lookup that runs beside it in [`Loader::parse`]: both run before
+    /// the set exists. They are in this module, next to the set itself.
+    pub fn children(&self, nav: &Nav<'t>) -> Children<'_, 't> {
+        let mut first = nav.clone();
+        Children {
+            module: self,
+            next: first.move_to_first_child().then_some(first),
+        }
+    }
+
+    /// Whether §3.12 effectively excludes this element of **this** module.
+    ///
     /// Only the excluded element itself is recorded; because every traversal
     /// starts at the module root and stops at an excluded element, its
     /// descendants are never reached.
+    ///
+    /// Prefer [`Module::children`]: a hand-written sibling walk plus this
+    /// predicate is what §3.12 exclusion used to be applied by, and what one
+    /// forgotten call made wrong.
     pub fn is_excluded(&self, nav: &Nav<'t>) -> bool {
         !self.excluded.is_empty() && self.excluded.contains(&nav.current_ref())
     }
@@ -259,6 +284,31 @@ impl<'t> Module<'t> {
         };
         let column = offset - self.line_starts[line] + 1;
         (line as u32 + 1, column as u32)
+    }
+}
+
+/// The §3.12-filtered child sequence of one stylesheet element, in document
+/// order (see [`Module::children`]).
+pub struct Children<'m, 't> {
+    module: &'m Module<'t>,
+    /// The next candidate, already positioned; `None` once the siblings run out.
+    next: Option<Nav<'t>>,
+}
+
+impl<'t> Iterator for Children<'_, 't> {
+    type Item = Nav<'t>;
+
+    fn next(&mut self) -> Option<Nav<'t>> {
+        loop {
+            let candidate = self.next.take()?;
+            let mut following = candidate.clone();
+            self.next = following.move_to_next_sibling().then_some(following);
+            if candidate.node_type() == DomNodeType::Element && self.module.is_excluded(&candidate)
+            {
+                continue;
+            }
+            return Some(candidate);
+        }
     }
 }
 
@@ -552,47 +602,45 @@ impl<'a, 't> Loader<'a, 't> {
         check_version(&version, &module_uri)?;
 
         let mut seen_non_import = false;
-        let mut child = root.clone();
-        if child.move_to_first_child() {
-            loop {
-                // §3.12: an excluded declaration is not there — in particular an
-                // excluded `xsl:include`/`xsl:import` never loads its module.
-                if child.node_type() == DomNodeType::Element
-                    && !self.modules[id.0 as usize].is_excluded(&child)
-                {
-                    let xslt = child.namespace_uri() == XSLT_NS;
-                    let local = child.local_name().to_string();
-                    match (xslt, local.as_str()) {
-                        (true, "import") => {
-                            if seen_non_import {
-                                // §3.10.2: "The xsl:import element children must
-                                // precede all other element children of an
-                                // xsl:stylesheet element".
-                                return Err(XsltError::new(
-                                    codes::XTSE0200,
-                                    "xsl:import must precede every other declaration of a module",
-                                ));
-                            }
-                            let href = require_href(&child, "xsl:import")?;
-                            let target =
-                                resolver::resolve_uri(&base_uri_of(&child, &module_uri), &href);
-                            self.visit(&target, None, Inclusion::Import, false)?;
-                        }
-                        (true, "include") => {
-                            seen_non_import = true;
-                            let href = require_href(&child, "xsl:include")?;
-                            let target =
-                                resolver::resolve_uri(&base_uri_of(&child, &module_uri), &href);
-                            self.visit_include(&target, out)?;
-                        }
-                        _ => {
-                            seen_non_import = true;
-                            out.push((id, child.clone(), DeclKind::Declaration));
-                        }
+        // §3.12: an excluded declaration is not there — in particular an
+        // excluded `xsl:include`/`xsl:import` never loads its module. That is
+        // `Module::children`'s job, so the walk here cannot forget it.
+        //
+        // The children are materialized first because the loop body loads more
+        // modules, which both borrows `self` mutably and can reallocate
+        // `self.modules`; the exclusion set of *this* module is fixed by
+        // `parse` before `collect` runs, so the list cannot go stale.
+        let children: Vec<Nav<'t>> = self.modules[id.0 as usize].children(&root).collect();
+        for child in children {
+            if child.node_type() != DomNodeType::Element {
+                continue;
+            }
+            let xslt = child.namespace_uri() == XSLT_NS;
+            let local = child.local_name().to_string();
+            match (xslt, local.as_str()) {
+                (true, "import") => {
+                    if seen_non_import {
+                        // §3.10.2: "The xsl:import element children must
+                        // precede all other element children of an
+                        // xsl:stylesheet element".
+                        return Err(XsltError::new(
+                            codes::XTSE0200,
+                            "xsl:import must precede every other declaration of a module",
+                        ));
                     }
+                    let href = require_href(&child, "xsl:import")?;
+                    let target = resolver::resolve_uri(&base_uri_of(&child, &module_uri), &href);
+                    self.visit(&target, None, Inclusion::Import, false)?;
                 }
-                if !child.move_to_next_sibling() {
-                    break;
+                (true, "include") => {
+                    seen_non_import = true;
+                    let href = require_href(&child, "xsl:include")?;
+                    let target = resolver::resolve_uri(&base_uri_of(&child, &module_uri), &href);
+                    self.visit_include(&target, out)?;
+                }
+                _ => {
+                    seen_non_import = true;
+                    out.push((id, child.clone(), DeclKind::Declaration));
                 }
             }
         }
@@ -644,6 +692,16 @@ impl<'a, 't> Loader<'a, 't> {
 /// inside an excluded subtree is never evaluated — §3.12 promises that "no
 /// static or dynamic errors will be reported in respect of the element and its
 /// contents, other than errors in the `use-when` attribute itself".
+///
+/// **The escape hatch.** This is the one walk over a stylesheet element's
+/// children that must *not* go through [`Module::children`], because it is what
+/// builds the set `Module::children` filters by: at this point
+/// `module.excluded` is still empty, so the filtered iterator would yield
+/// everything and the recursion would be the same walk with an extra indirection
+/// — while `Module::children` would silently start returning different nodes
+/// halfway through the pass as the set grows under it. It walks raw, top-down,
+/// and never descends into an element it has just excluded, which is what makes
+/// the set complete for every later traversal.
 fn use_when_exclusions(
     module: &Module<'_>,
     names: &NameTable,
@@ -801,6 +859,10 @@ fn require_href(nav: &Nav<'_>, what: &str) -> Result<String, XsltError> {
 /// attributes an external DTD declared to be of type ID; embedded stylesheet
 /// modules are conventionally marked with a plain `id` attribute, so both are
 /// accepted.
+///
+/// Walks raw rather than through [`Module::children`]: this runs inside
+/// [`Loader::parse`], which needs the module root before there is a `Module` to
+/// compute a §3.12 exclusion set for.
 fn find_by_id(doc: &BufferDocument<'_>, id: &str) -> Option<u32> {
     if let Some(node) = doc.get_element_by_id(id) {
         return Some(node);

@@ -15,7 +15,7 @@
 //! [`XsltEvaluator`](crate::runtime::XsltEvaluator), a `FunctionEvaluator`
 //! that holds the running transformation (M0b, Q8).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use xsd_schema::types::sequence::{ItemType, SequenceType};
 use xsd_schema::xpath::functions::{
@@ -69,6 +69,15 @@ pub enum XsltFn {
     CurrentGroupingKey,
     /// `regex-group($n)` (§15).
     RegexGroup,
+    /// `format-number($value, $picture)` / with a decimal-format name (§16.4).
+    FormatNumber,
+    /// `format-dateTime($value, $picture)` / with language, calendar and
+    /// country (§16.5).
+    FormatDateTime,
+    /// `format-date(…)` (§16.5).
+    FormatDate,
+    /// `format-time(…)` (§16.5).
+    FormatTime,
 }
 
 impl XsltFn {
@@ -93,6 +102,10 @@ impl XsltFn {
             XsltFn::CurrentGroup => "current-group",
             XsltFn::CurrentGroupingKey => "current-grouping-key",
             XsltFn::RegexGroup => "regex-group",
+            XsltFn::FormatNumber => "format-number",
+            XsltFn::FormatDateTime => "format-dateTime",
+            XsltFn::FormatDate => "format-date",
+            XsltFn::FormatTime => "format-time",
         }
     }
 }
@@ -109,6 +122,9 @@ pub struct XsltFunctions {
     set: FunctionSet<RoXmlNavigator<'static>>,
     by_handle: HashMap<FunctionHandle, XsltFn>,
     names: HashMap<(&'static str, usize), XsltFn>,
+    /// The handles registered by [`Self::add_stub`]: in the catalog so that a
+    /// call compiles and reaches the evaluator, but **not** available (§18.1.2).
+    stubs: HashSet<FunctionHandle>,
 }
 
 impl Default for XsltFunctions {
@@ -124,6 +140,7 @@ impl XsltFunctions {
             set: FunctionSet::with_builtins(),
             by_handle: HashMap::new(),
             names: HashMap::new(),
+            stubs: HashSet::new(),
         };
         let string = SequenceType::string;
         let string_opt = SequenceType::string_optional;
@@ -251,6 +268,71 @@ impl XsltFunctions {
             vec![SequenceType::integer()],
             string(),
         );
+
+        // ── §16.4, §16.5: registered, not implemented ────────────────────
+        //
+        // M3d owns these four. They are in the catalog with their spec
+        // signatures so that a stylesheet calling one *compiles* and fails at
+        // evaluation with `XSLT2-NOTIMPL`; without them the call fails to bind
+        // with XPST0017, which is indistinguishable from a wrong answer.
+        // `function-available()` still says false — see `add_stub`.
+
+        // §16.4:
+        //   format-number($value as numeric?, $picture as xs:string)
+        //     as xs:string
+        //   format-number($value as numeric?, $picture as xs:string,
+        //                 $decimal-format-name as xs:string) as xs:string
+        //
+        // `numeric?` is a union type the upstream signature model spells
+        // `xs:double?`, exactly as it does for `fn:abs` and `fn:round`.
+        let numeric_opt = SequenceType::double_optional;
+        this.add_stub(
+            XsltFn::FormatNumber,
+            "format-number",
+            vec![numeric_opt(), string()],
+            string(),
+        );
+        this.add_stub(
+            XsltFn::FormatNumber,
+            "format-number",
+            vec![numeric_opt(), string(), string()],
+            string(),
+        );
+
+        // §16.5, each in a 2-argument and a 5-argument form:
+        //   format-dateTime($value as xs:dateTime?, $picture as xs:string)
+        //     as xs:string?
+        //   format-dateTime($value as xs:dateTime?, $picture as xs:string,
+        //                   $language as xs:string?, $calendar as xs:string?,
+        //                   $country as xs:string?) as xs:string?
+        // and likewise format-date over xs:date? and format-time over xs:time?.
+        for (which, local, value) in [
+            (
+                XsltFn::FormatDateTime,
+                "format-dateTime",
+                SequenceType::optional(ItemType::AtomicType(
+                    xsd_schema::types::XmlTypeCode::DateTime,
+                )),
+            ),
+            (
+                XsltFn::FormatDate,
+                "format-date",
+                SequenceType::optional(ItemType::AtomicType(xsd_schema::types::XmlTypeCode::Date)),
+            ),
+            (
+                XsltFn::FormatTime,
+                "format-time",
+                SequenceType::optional(ItemType::AtomicType(xsd_schema::types::XmlTypeCode::Time)),
+            ),
+        ] {
+            this.add_stub(which, local, vec![value.clone(), string()], string_opt());
+            this.add_stub(
+                which,
+                local,
+                vec![value, string(), string_opt(), string_opt(), string_opt()],
+                string_opt(),
+            );
+        }
         this
     }
 
@@ -260,7 +342,7 @@ impl XsltFunctions {
         local: &'static str,
         params: Vec<SequenceType>,
         result: SequenceType,
-    ) {
+    ) -> FunctionHandle {
         let arity = params.len();
         let handle = self.set.register(
             DynamicFunctionSignature::new(FN_NS, local, params, result),
@@ -272,6 +354,28 @@ impl XsltFunctions {
         );
         self.by_handle.insert(handle, which);
         self.names.insert((local, arity), which);
+        handle
+    }
+
+    /// Registers a §16 function this processor does **not** implement.
+    ///
+    /// The signature is the spec's, so a call binds and type-checks as it
+    /// would against a complete processor, and the evaluator turns it into
+    /// `XSLT2-NOTIMPL` naming the milestone that owns it. The handle is
+    /// remembered as a stub so that [`Self::is_available`] — and with it
+    /// `function-available()` (§18.1.2: "returns true if and only if there is
+    /// a function available with the given name and arity") — keeps answering
+    /// **false**, and so that a `use-when` expression cannot come to depend on
+    /// a function that does not work.
+    fn add_stub(
+        &mut self,
+        which: XsltFn,
+        local: &'static str,
+        params: Vec<SequenceType>,
+        result: SequenceType,
+    ) {
+        let handle = self.add(which, local, params, result);
+        self.stubs.insert(handle);
     }
 
     /// Pass this to `XPathContext::with_function_catalog`.
@@ -286,8 +390,15 @@ impl XsltFunctions {
 
     /// Whether a name and arity in the standard function namespace resolves —
     /// what `function-available()` answers (§18.1.2).
+    ///
+    /// A function registered by [`Self::add_stub`] is in the catalog but is not
+    /// *available*: it exists only so that a call to it is classified as a
+    /// missing feature rather than as an unknown function.
     pub fn is_available(&self, namespace: &str, local: &str, arity: usize) -> bool {
-        self.set.lookup(namespace, local, arity).is_some()
+        match self.set.lookup(namespace, local, arity) {
+            Some(handle) => !self.stubs.contains(&handle),
+            None => false,
+        }
     }
 }
 

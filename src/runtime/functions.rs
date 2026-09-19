@@ -226,6 +226,16 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                 Err(XsltError::not_implemented(which.name(), "M2"))
             }
             XsltFn::RegexGroup => Err(XsltError::not_implemented("regex-group()", "M2")),
+            // §16.4, §16.5. These are in the catalog as stubs only, so that a
+            // call to one is reported as a missing feature rather than as an
+            // unknown function (XPST0017) at compile time.
+            XsltFn::FormatNumber
+            | XsltFn::FormatDateTime
+            | XsltFn::FormatDate
+            | XsltFn::FormatTime => Err(XsltError::not_implemented(
+                format!("{}()", which.name()),
+                "M3d",
+            )),
         }
     }
 

@@ -264,13 +264,19 @@ fn node_test_matches(test: &NodeTest, axis: PatternAxis, nav: &Nav<'_>) -> bool 
         NodeTest::Pi(Some(target)) => {
             kind == DomNodeType::ProcessingInstruction && nav.local_name() == target
         }
-        NodeTest::Element(name) => {
+        // The two-argument forms carry a type name that is `xs:untyped` or one
+        // of its supertypes for elements, `xs:untypedAtomic` or one of its
+        // supertypes for attributes — which, with no schema, every node of that
+        // kind is annotated with (§4.3). They therefore match exactly what the
+        // one-argument form matches; only their default priority differs
+        // (§6.4, `NodeTest::priority`).
+        NodeTest::Element(name) | NodeTest::UntypedElement(name) => {
             kind == DomNodeType::Element
                 && name
                     .as_ref()
                     .is_none_or(|q| nav.local_name() == q.local && nav.namespace_uri() == q.uri)
         }
-        NodeTest::Attribute(name) => {
+        NodeTest::Attribute(name) | NodeTest::UntypedAttribute(name) => {
             kind == DomNodeType::Attribute
                 && name
                     .as_ref()

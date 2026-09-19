@@ -6,7 +6,7 @@ PSVI, `BufferDocument`). Separate git repository.
 ## Source of truth
 
 - `../../xslt20.html` — W3C XSLT 2.0 (Second Edition). Cite sections as §N.N and quote the text.
-- `../../XSLT2_DESIGN_SKETCH.md` — architecture, roadmap (M0–M5), open questions Q1–Q36.
+- `../../XSLT2_DESIGN_SKETCH.md` — architecture, roadmap (M0–M5), open questions Q1–Q43.
 - `../../XSLT2_M1_REPORT.md` — what M1 built, the per-set numbers and the classified failures.
 - `../../XSLT2_M1_REVIEW_FIXES.md`, `../../XSLT2_M1_HARNESS_FIX_REPORT.md` — the 16 defects an
   independent review found in M0–M1, their root causes and fixes; regression tests in `tests/m1_review.rs`.
@@ -26,8 +26,8 @@ PSVI, `BufferDocument`). Separate git repository.
 | `src/stylesheet.rs` | §3.10 module graph, import precedence, §5.4.1 lexical static contexts, §4.2 whitespace |
 | `src/model.rs` | The `Instruction` tree (§7.4), declaration tables (§7.3), `CompiledStylesheet` |
 | `src/pattern.rs` | Pattern grammar (§5.5.2), the §6.4 default priorities, the dispatch-index key |
-| `src/compile.rs` | `Compiler`: modules → declarations and instructions; AVTs, `use-when`, attribute sets |
-| `src/runtime.rs` | `Transformation`: dynamic context (§5.4), dispatch (§6), pattern matching, the XSLT functions |
+| `src/compile/` | `Compiler`: modules → declarations and instructions. `mod.rs` (builder core), `declarations`, `instructions`, `literal`, `expressions`, `avt`, `patterns`, `modes`, `attributes`, `tree`. Walk stylesheet children **only** through `Module::children()` / `Builder::children()` — it applies §3.12 `use-when` exclusion by construction |
+| `src/runtime/` | `Transformation`: `mod.rs` (entry points), `context` (§5.4), `dispatch` (§6), `patterns`, `eval` (instructions), `content`, `variables`, `documents` (loading, §4.4 admission), `functions` (the §16 evaluator), `expressions`, `serialize` |
 | `src/receiver.rs` | `Receiver`, `ComplexContentNormalizer` (§5.7.1), `ResultBuilder`, `SequenceCollector` |
 | `src/store.rs` | `DocumentStore`: arena-allocated documents, URI identity, `generate-id()` |
 | `src/output.rs` | `xsl:output` merged by import precedence → `SerializeOptions` |
@@ -38,7 +38,7 @@ PSVI, `BufferDocument`). Separate git repository.
 ```bash
 cargo build
 cargo clippy --all-targets         # 0 warnings expected
-cargo test                         # unit + m0b_invariants + m1_context + m1_smoke + m1_review
+cargo test                         # unit + m0b_invariants + m1_context + m1_smoke + m1_review + m2a_groundwork
                                    # (the W3C harness skips itself in a debug build)
 ```
 
@@ -87,6 +87,16 @@ println!("{}", sheet.serialize_primary(&outcome)?);
 
 A deeply recursive stylesheet needs `xslt2::run_on_large_stack(DEFAULT_STACK_SIZE, || …)` around
 the whole job (compile included): everything involved is `!Send`, so the closure has to own it.
+
+## Local `regexml` fork (optional, untracked)
+
+`regexml` (third-party, comes in through `xsd-schema`) has a fork at `../regexml` for regex work
+(`xsl:analyze-string`, category memoization). A developer machine may have an **untracked**
+`.cargo/config.toml` here with `[patch.crates-io] regexml = { path = "../regexml/regexml" }`; it is
+listed in `.git/info/exclude`. Check with `cargo tree -i regexml`. While it is active `Cargo.lock`
+shows as modified (the `regexml` entry loses its registry source and checksum) — **never commit
+`Cargo.lock` in that state**; stage files by name, not with `git add -A`/`-u`. To switch back,
+delete the config and `git checkout Cargo.lock`.
 
 ## Upstream (`../xsd-schema`)
 

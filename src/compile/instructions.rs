@@ -32,39 +32,33 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     ) -> Result<Body, XsltError> {
         let scope_mark = self.scope.len();
         let mut out = Vec::new();
-        let mut child = parent.clone();
-        if child.move_to_first_child() {
-            loop {
-                match child.node_type() {
-                    DomNodeType::Element => {
-                        let skipped = !skip.is_empty()
-                            && child.namespace_uri() == XSLT_NS
-                            && child.local_name() == skip;
-                        if !skipped && !self.excluded(&child, module_id) {
-                            out.push(self.instruction(&child, module_id)?);
-                        }
+        for child in self.children(parent, module_id) {
+            match child.node_type() {
+                DomNodeType::Element => {
+                    let skipped = !skip.is_empty()
+                        && child.namespace_uri() == XSLT_NS
+                        && child.local_name() == skip;
+                    if !skipped {
+                        out.push(self.instruction(&child, module_id)?);
                     }
-                    // §4.2: whitespace-only text nodes are stripped.
-                    kind if kind.is_text_like() && !is_stripped_stylesheet_text(&child) => {
-                        let module = self.modules.module(module_id);
-                        let ctx = self.context_of(parent, module)?;
-                        out.push(self.wrap(
-                            InstructionKind::Text {
-                                text: child.value(),
-                                disable_output_escaping: false,
-                            },
-                            ctx,
-                            module_id,
-                            &child,
-                        ));
-                    }
-                    // Comments and processing instructions in a stylesheet are
-                    // not part of the result (§4.1).
-                    _ => {}
                 }
-                if !child.move_to_next_sibling() {
-                    break;
+                // §4.2: whitespace-only text nodes are stripped.
+                kind if kind.is_text_like() && !is_stripped_stylesheet_text(&child) => {
+                    let module = self.modules.module(module_id);
+                    let ctx = self.context_of(parent, module)?;
+                    out.push(self.wrap(
+                        InstructionKind::Text {
+                            text: child.value(),
+                            disable_output_escaping: false,
+                        },
+                        ctx,
+                        module_id,
+                        &child,
+                    ));
                 }
+                // Comments and processing instructions in a stylesheet are
+                // not part of the result (§4.1).
+                _ => {}
             }
         }
         self.scope.truncate(scope_mark);
@@ -149,20 +143,13 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     ) -> Result<Option<Body>, XsltError> {
         let mut found = false;
         let mut out = Vec::new();
-        let mut child = nav.clone();
-        if child.move_to_first_child() {
-            loop {
-                if child.node_type() == DomNodeType::Element
-                    && child.namespace_uri() == XSLT_NS
-                    && child.local_name() == "fallback"
-                    && !self.excluded(&child, module_id)
-                {
-                    found = true;
-                    out.extend(self.sequence_constructor(&child, module_id)?.0);
-                }
-                if !child.move_to_next_sibling() {
-                    break;
-                }
+        for child in self.children(nav, module_id) {
+            if child.node_type() == DomNodeType::Element
+                && child.namespace_uri() == XSLT_NS
+                && child.local_name() == "fallback"
+            {
+                found = true;
+                out.extend(self.sequence_constructor(&child, module_id)?.0);
             }
         }
         Ok(found.then_some(Body(out)))
@@ -250,7 +237,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     .transpose()?
                     .unwrap_or(false);
                 Ok(InstructionKind::Text {
-                    text: text_content(nav),
+                    text: self.text_content(nav, module_id),
                     disable_output_escaping: doe,
                 })
             }
@@ -442,55 +429,48 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     ) -> Result<InstructionKind, XsltError> {
         let mut whens = Vec::new();
         let mut otherwise = None;
-        let mut child = nav.clone();
-        if child.move_to_first_child() {
-            loop {
-                if child.node_type() == DomNodeType::Element && !self.excluded(&child, module_id) {
-                    let module = self.modules.module(module_id);
-                    let child_loc = module.location(&child);
-                    if child.namespace_uri() != XSLT_NS {
-                        return Err(XsltError::new(
-                            codes::XTSE0010,
-                            "only xsl:when and xsl:otherwise may appear inside xsl:choose",
-                        )
-                        .with_location(child_loc));
-                    }
-                    match child.local_name() {
-                        "when" => {
-                            if otherwise.is_some() {
-                                return Err(XsltError::new(
-                                    codes::XTSE0010,
-                                    "xsl:when must not follow xsl:otherwise",
-                                )
-                                .with_location(child_loc));
-                            }
-                            let child_ctx =
-                                self.context_of(&child, self.modules.module(module_id))?;
-                            let test = self.required_expr(&child, "test", child_ctx, &child_loc)?;
-                            let body = self.sequence_constructor(&child, module_id)?;
-                            whens.push((test, body));
-                        }
-                        "otherwise" => {
-                            if otherwise.is_some() {
-                                return Err(XsltError::new(
-                                    codes::XTSE0010,
-                                    "xsl:choose may have only one xsl:otherwise child",
-                                )
-                                .with_location(child_loc));
-                            }
-                            otherwise = Some(self.sequence_constructor(&child, module_id)?);
-                        }
-                        other => {
+        for child in self.children(nav, module_id) {
+            if child.node_type() == DomNodeType::Element {
+                let module = self.modules.module(module_id);
+                let child_loc = module.location(&child);
+                if child.namespace_uri() != XSLT_NS {
+                    return Err(XsltError::new(
+                        codes::XTSE0010,
+                        "only xsl:when and xsl:otherwise may appear inside xsl:choose",
+                    )
+                    .with_location(child_loc));
+                }
+                match child.local_name() {
+                    "when" => {
+                        if otherwise.is_some() {
                             return Err(XsltError::new(
                                 codes::XTSE0010,
-                                format!("xsl:{other} may not appear inside xsl:choose"),
+                                "xsl:when must not follow xsl:otherwise",
                             )
-                            .with_location(child_loc))
+                            .with_location(child_loc));
                         }
+                        let child_ctx = self.context_of(&child, self.modules.module(module_id))?;
+                        let test = self.required_expr(&child, "test", child_ctx, &child_loc)?;
+                        let body = self.sequence_constructor(&child, module_id)?;
+                        whens.push((test, body));
                     }
-                }
-                if !child.move_to_next_sibling() {
-                    break;
+                    "otherwise" => {
+                        if otherwise.is_some() {
+                            return Err(XsltError::new(
+                                codes::XTSE0010,
+                                "xsl:choose may have only one xsl:otherwise child",
+                            )
+                            .with_location(child_loc));
+                        }
+                        otherwise = Some(self.sequence_constructor(&child, module_id)?);
+                    }
+                    other => {
+                        return Err(XsltError::new(
+                            codes::XTSE0010,
+                            format!("xsl:{other} may not appear inside xsl:choose"),
+                        )
+                        .with_location(child_loc))
+                    }
                 }
             }
         }
@@ -503,21 +483,15 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         }
         Ok(InstructionKind::Choose { whens, otherwise })
     }
+
     fn reject_sort(&self, nav: &Nav<'t>, module_id: ModuleId) -> Result<(), XsltError> {
-        let mut child = nav.clone();
-        if child.move_to_first_child() {
-            loop {
-                if child.node_type() == DomNodeType::Element
-                    && child.namespace_uri() == XSLT_NS
-                    && child.local_name() == "sort"
-                    && !self.excluded(&child, module_id)
-                {
-                    return Err(XsltError::not_implemented("xsl:sort", "M2")
-                        .with_location(self.modules.module(module_id).location(&child)));
-                }
-                if !child.move_to_next_sibling() {
-                    break;
-                }
+        for child in self.children(nav, module_id) {
+            if child.node_type() == DomNodeType::Element
+                && child.namespace_uri() == XSLT_NS
+                && child.local_name() == "sort"
+            {
+                return Err(XsltError::not_implemented("xsl:sort", "M2")
+                    .with_location(self.modules.module(module_id).location(&child)));
             }
         }
         Ok(())
@@ -529,42 +503,35 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         module_id: ModuleId,
     ) -> Result<Vec<WithParam>, XsltError> {
         let mut out = Vec::new();
-        let mut child = nav.clone();
-        if child.move_to_first_child() {
-            loop {
-                if child.node_type() == DomNodeType::Element
-                    && child.namespace_uri() == XSLT_NS
-                    && child.local_name() == "with-param"
-                    && !self.excluded(&child, module_id)
-                {
-                    let module = self.modules.module(module_id);
-                    let ctx = self.context_of(&child, module)?;
-                    let name = self
-                        .qname_attr(&child, "name", ctx, module)?
-                        .ok_or_else(|| {
-                            XsltError::new(codes::XTSE0010, "xsl:with-param has no name attribute")
-                                .with_location(module.location(&child))
-                        })?;
-                    let as_type = match attr_local(&child, "as") {
-                        Some(text) => Some(self.compile_type(&text, ctx)?),
-                        None => None,
-                    };
-                    let tunnel = attr_local(&child, "tunnel")
-                        .map(|v| parse_yes_no(&v, "tunnel"))
-                        .transpose()?
-                        .unwrap_or(false);
-                    let value = self.var_value(&child, module_id, ctx, as_type.is_some())?;
-                    out.push(WithParam {
-                        name,
-                        value,
-                        as_type,
-                        tunnel,
-                        loc: self.modules.module(module_id).location(&child),
-                    });
-                }
-                if !child.move_to_next_sibling() {
-                    break;
-                }
+        for child in self.children(nav, module_id) {
+            if child.node_type() == DomNodeType::Element
+                && child.namespace_uri() == XSLT_NS
+                && child.local_name() == "with-param"
+            {
+                let module = self.modules.module(module_id);
+                let ctx = self.context_of(&child, module)?;
+                let name = self
+                    .qname_attr(&child, "name", ctx, module)?
+                    .ok_or_else(|| {
+                        XsltError::new(codes::XTSE0010, "xsl:with-param has no name attribute")
+                            .with_location(module.location(&child))
+                    })?;
+                let as_type = match attr_local(&child, "as") {
+                    Some(text) => Some(self.compile_type(&text, ctx)?),
+                    None => None,
+                };
+                let tunnel = attr_local(&child, "tunnel")
+                    .map(|v| parse_yes_no(&v, "tunnel"))
+                    .transpose()?
+                    .unwrap_or(false);
+                let value = self.var_value(&child, module_id, ctx, as_type.is_some())?;
+                out.push(WithParam {
+                    name,
+                    value,
+                    as_type,
+                    tunnel,
+                    loc: self.modules.module(module_id).location(&child),
+                });
             }
         }
         Ok(out)
@@ -607,21 +574,19 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             )),
         }
     }
-}
 
-/// The concatenated text of an element's children (`xsl:text`).
-fn text_content(nav: &Nav<'_>) -> String {
-    let mut out = String::new();
-    let mut child = nav.clone();
-    if child.move_to_first_child() {
-        loop {
+    /// The concatenated text of an element's children (`xsl:text`).
+    ///
+    /// Only text children contribute, so §3.12 cannot change the answer — but
+    /// the walk goes through the filtered iterator anyway, so that this stays
+    /// true if it ever grows a case for elements.
+    fn text_content(&self, nav: &Nav<'t>, module_id: ModuleId) -> String {
+        let mut out = String::new();
+        for child in self.children(nav, module_id) {
             if child.node_type().is_text_like() {
                 out.push_str(&child.value());
             }
-            if !child.move_to_next_sibling() {
-                break;
-            }
         }
+        out
     }
-    out
 }
