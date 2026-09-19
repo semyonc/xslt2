@@ -114,7 +114,9 @@ pub fn execute(engine: &dyn Engine, run: &TestRun<'_>) -> Execution {
     }
 }
 
-fn panic_message(p: Box<dyn Any + Send>) -> String {
+/// The text of a caught panic. Shared with `compare`, which guards assertion evaluation the
+/// same way `execute` guards the engine call.
+pub fn panic_message(p: Box<dyn Any + Send>) -> String {
     if let Some(s) = p.downcast_ref::<&str>() {
         s.to_string()
     } else if let Some(s) = p.downcast_ref::<String>() {

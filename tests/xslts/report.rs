@@ -20,13 +20,17 @@ pub enum Status {
     NotApplicable,
     /// On the exclusion list.
     Excluded,
+    /// The engine reported its own `XSLT2-NOTIMPL` code: the case is runnable
+    /// and fails, but it fails because a feature is not built yet rather than
+    /// because the answer is wrong.
+    NotImplemented,
 }
 
 impl Status {
     pub fn w3c_name(self) -> &'static str {
         match self {
             Status::Pass => "pass",
-            Status::Fail | Status::HarnessError => "fail",
+            Status::Fail | Status::HarnessError | Status::NotImplemented => "fail",
             Status::WrongError => "wrongError",
             Status::NotRun | Status::NotApplicable | Status::Excluded => "notRun",
         }
@@ -53,6 +57,7 @@ pub struct Counts {
     pub fail: usize,
     pub wrong_error: usize,
     pub harness_error: usize,
+    pub not_implemented: usize,
     pub not_run: usize,
     pub excluded: usize,
 }
@@ -79,6 +84,10 @@ impl Counts {
             Status::HarnessError => {
                 self.runnable += 1;
                 self.harness_error += 1
+            }
+            Status::NotImplemented => {
+                self.runnable += 1;
+                self.not_implemented += 1
             }
             Status::NotRun => self.not_run += 1,
             Status::Excluded => self.excluded += 1,
@@ -149,7 +158,10 @@ impl Report {
                         pass += 1;
                         runnable += 1
                     }
-                    Status::Fail | Status::WrongError | Status::HarnessError => runnable += 1,
+                    Status::Fail
+                    | Status::WrongError
+                    | Status::HarnessError
+                    | Status::NotImplemented => runnable += 1,
                     _ => {}
                 }
             }
@@ -158,7 +170,10 @@ impl Report {
     }
 
     pub fn print_summary(&self) {
-        let hdr = format!("{:<34} {:>8} {:>6} {:>6} {:>8} {:>10} {:>7} {:>7}", "", "runnable", "pass", "fail", "wrongErr", "harnessErr", "notRun", "rate");
+        let hdr = format!(
+            "{:<34} {:>8} {:>6} {:>6} {:>8} {:>10} {:>8} {:>7} {:>7}",
+            "", "runnable", "pass", "fail", "wrongErr", "harnessErr", "notImpl", "notRun", "rate"
+        );
         println!("\n== Per test-set (applicable cases only) ==");
         println!("{hdr}");
         for (name, c) in &self.by_set {
@@ -194,7 +209,10 @@ impl Report {
         println!("  excluded (documented):    {}", t.excluded);
         println!("  not run (dependencies):   {}", t.not_run);
         println!("  runnable:                 {}", t.runnable);
-        println!("  pass / fail / wrongError / harnessError: {} / {} / {} / {}", t.pass, t.fail, t.wrong_error, t.harness_error);
+        println!(
+            "  pass / fail / wrongError / harnessError / notImplemented: {} / {} / {} / {} / {}",
+            t.pass, t.fail, t.wrong_error, t.harness_error, t.not_implemented
+        );
         println!("  pass rate (runnable):     {:.2}%", t.rate());
         println!(
             "  headline (basic, non-regex): {} / {} = {:.2}%",
@@ -230,6 +248,10 @@ impl Report {
                 Status::NotApplicable => Some(format!("spec dependency: {}", r.message.clone().unwrap_or_default())),
                 Status::Excluded => Some(format!("excluded: {}", r.message.clone().unwrap_or_default())),
                 Status::HarnessError => Some(format!("harness: {}", r.message.clone().unwrap_or_default())),
+                Status::NotImplemented => Some(format!(
+                    "not implemented: {}",
+                    r.message.clone().unwrap_or_default()
+                )),
                 Status::Fail | Status::WrongError => r.message.clone(),
                 Status::Pass => None,
             };
@@ -248,13 +270,14 @@ impl Report {
 
 fn print_row(name: &str, c: &Counts) {
     println!(
-        "{:<34} {:>8} {:>6} {:>6} {:>8} {:>10} {:>7} {:>6.1}%",
+        "{:<34} {:>8} {:>6} {:>6} {:>8} {:>10} {:>8} {:>7} {:>6.1}%",
         clip(name, 34),
         c.runnable,
         c.pass,
         c.fail,
         c.wrong_error,
         c.harness_error,
+        c.not_implemented,
         c.not_run,
         c.rate()
     );

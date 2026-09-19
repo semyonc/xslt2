@@ -205,7 +205,7 @@ pub enum Assertion {
     AssertEq { xpath: String, ns: NsBindings },
     AssertDeepEq { xpath: String, ns: NsBindings },
     AssertPermutation { xpath: String, ns: NsBindings },
-    AssertCount(usize),
+    AssertCount(String),
     AssertEmpty,
     AssertTrue,
     AssertFalse,
@@ -421,7 +421,10 @@ fn parse_assertion(n: Node) -> Assertion {
             expected: text_of(n),
             normalize_space: attr_bool(n, "normalize-space").unwrap_or(false),
         },
-        "error" => Error { code: n.attribute("code").unwrap_or("*").to_string() },
+        // `@code` is optional in the schema; keep an absent one distinguishable from the
+        // documented `code="*"` ("any error code is allowed") instead of silently conflating
+        // the two, which would make a codeless <error> match every error.
+        "error" => Error { code: n.attribute("code").unwrap_or("").to_string() },
         "serialization-matches" => SerializationMatches {
             regex: text_of(n),
             flags: n.attribute("flags").unwrap_or("").to_string(),
@@ -433,7 +436,7 @@ fn parse_assertion(n: Node) -> Assertion {
             method: attr(n, "method"),
             ignore_prefixes: attr_bool(n, "ignore-prefixes").unwrap_or(false),
         },
-        "assert-serialization-error" => AssertSerializationError { code: n.attribute("code").unwrap_or("*").to_string() },
+        "assert-serialization-error" => AssertSerializationError { code: n.attribute("code").unwrap_or("").to_string() },
         "assert-result-document" => AssertResultDocument {
             uri: n.attribute("uri").unwrap_or("").to_string(),
             inner: Box::new(one_or_all(parse_assertions(n))),
@@ -444,7 +447,9 @@ fn parse_assertion(n: Node) -> Assertion {
         "assert-eq" => AssertEq { xpath: text_of(n), ns: ns_bindings(n) },
         "assert-deep-eq" => AssertDeepEq { xpath: text_of(n), ns: ns_bindings(n) },
         "assert-permutation" => AssertPermutation { xpath: text_of(n), ns: ns_bindings(n) },
-        "assert-count" => AssertCount(text_of(n).trim().parse().unwrap_or(0)),
+        // Kept verbatim: a malformed count used to become 0 silently, and the harness cannot
+        // check the count anyway (see `compare::evaluate`), so the text is only ever reported.
+        "assert-count" => AssertCount(text_of(n).trim().to_string()),
         "assert-empty" => AssertEmpty,
         "assert-true" => AssertTrue,
         "assert-false" => AssertFalse,

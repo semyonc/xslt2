@@ -11,11 +11,12 @@
 //! its slot map. [`DocumentStore::navigator`] borrows `'t`, not `&self`, which
 //! is what lets a caller keep a navigator across later loads.
 //!
-//! The module also carries the prototype's answer to §9.6 / Q8: `fn:doc()` does
-//! not exist upstream, so a `proto:doc($uri)` function is registered through
-//! [`FunctionSet`] and evaluated by [`ProtoEvaluator`], which holds the store.
+//! `fn:doc()` and `document()` do not exist upstream; they are implemented over
+//! this store by `XsltEvaluator` (`runtime.rs`), which holds it as
+//! `&RefCell<DocumentStore>` — the route §9.6 needs and the answer to Q8, since
+//! the `DynamicContext` extension slot is `&dyn Any` and cannot carry borrowed
+//! engine state.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use bumpalo::Bump;
@@ -23,26 +24,12 @@ use slotmap::{new_key_type, SlotMap};
 use xsd_schema::document::{BufferDocNavigator, BufferDocument};
 use xsd_schema::namespace::NameTable;
 use xsd_schema::navigator::{DomNavigator, DomNodeType};
-use xsd_schema::types::sequence::SequenceType;
-use xsd_schema::xpath::functions::{
-    BuiltinEvaluator, DynamicFunctionSignature, FunctionCatalog, FunctionEvaluator, FunctionHandle,
-    FunctionSet, XPathValue,
-};
-use xsd_schema::xpath::{DynamicContext, XPathError};
-
 use crate::error::{codes, XsltError};
 
 new_key_type! {
     /// Identifies one document inside a [`DocumentStore`].
     pub struct DocId;
 }
-
-/// The private namespace the prototype's XSLT-level functions live in.
-///
-/// The real processor puts `document()` in no namespace and `doc()` in the F&O
-/// namespace; M0b keeps them out of the way so nothing can collide with a
-/// built-in while the shape is being proven.
-pub const PROTO_NS: &str = "urn:xslt2:proto";
 
 /// One document known to a transformation.
 pub struct StoredDocument<'t> {
@@ -54,7 +41,8 @@ pub struct StoredDocument<'t> {
     /// [`BufferDocument::serial`], which is a process-wide counter, this is
     /// reproducible from run to run — see [`DocumentStore::generate_id`].
     pub ordinal: u32,
-    /// Whitespace stripping applied (§4.4). Never set in M0b.
+    /// Whether §4.4 whitespace stripping was applied to this tree, which the
+    /// transformation's admission path records.
     pub stripped: bool,
 }
 
@@ -126,8 +114,18 @@ impl<'t> DocumentStore<'t> {
     /// transformation-scoped arena and is the cost of the `&'t` shape; see the
     /// M0b report.
     pub fn insert(&mut self, doc: BufferDocument<'t>, uri: Option<&str>) -> DocId {
-        let serial = doc.serial();
         let doc: &'t BufferDocument<'t> = self.arena.alloc(doc);
+        self.insert_ref(doc, uri)
+    }
+
+    /// Registers a document that is **already** allocated in the arena.
+    ///
+    /// The admission path of a source document parses, then rebuilds the tree
+    /// without its stripped whitespace (§4.4), and only the survivor is
+    /// registered; both trees live in the arena, so the caller holds `&'t`
+    /// references rather than owned documents.
+    pub fn insert_ref(&mut self, doc: &'t BufferDocument<'t>, uri: Option<&str>) -> DocId {
+        let serial = doc.serial();
         let ordinal = self.next_ordinal;
         self.next_ordinal += 1;
         let id = self.docs.insert(StoredDocument {
@@ -143,6 +141,64 @@ impl<'t> DocumentStore<'t> {
         id
     }
 
+    /// Parses `xml` into the arena **without** registering it, recording
+    /// `base_uri` as the document's own base URI.
+    ///
+    /// Splitting the parse from the registration is what lets one admission
+    /// path apply §4.4 whitespace stripping: the raw tree is navigable but
+    /// never visible to `document()`, and only the stripped copy is inserted.
+    ///
+    /// `base_uri` becomes [`BufferDocument::set_document_base_uri`], so
+    /// `fn:base-uri` on a node of this document reports the document's URI
+    /// rather than falling back to the static base URI of whichever expression
+    /// happens to ask.
+    pub fn parse(
+        &self,
+        xml: &str,
+        base_uri: Option<&str>,
+    ) -> Result<&'t BufferDocument<'t>, XsltError> {
+        let mut doc = BufferDocument::from_reader_default(xml.as_bytes(), self.arena, self.names)
+            .map_err(|e| {
+                XsltError::new(
+                    codes::XTDE1170,
+                    match base_uri {
+                        Some(uri) => format!("could not read the document {uri:?}: {e}"),
+                        None => format!("could not read a document: {e}"),
+                    },
+                )
+            })?;
+        if let Some(uri) = base_uri {
+            doc.set_document_base_uri(Some(self.arena.alloc_str(uri)));
+        }
+        Ok(self.arena.alloc(doc))
+    }
+
+    /// Interns `uri` in the arena, for a caller that needs a `&'t str`.
+    pub fn intern_uri(&self, uri: &str) -> &'t str {
+        self.arena.alloc_str(uri)
+    }
+
+    /// The text [`register_source`](Self::register_source) recorded for `uri`.
+    pub fn source_text(&self, uri: &str) -> Option<&str> {
+        self.sources.get(uri).map(|text| &**text)
+    }
+
+    /// Records that §4.4 stripping produced this tree.
+    pub fn mark_stripped(&mut self, id: DocId) {
+        if let Some(stored) = self.docs.get_mut(id) {
+            stored.stripped = true;
+        }
+    }
+
+    /// The `document-uri()` of the document a navigator points into.
+    ///
+    /// `None` for a temporary tree, a result tree or a hidden fragment, which
+    /// §9.4 says have an empty `document-uri` property.
+    pub fn uri_of(&self, nav: &BufferDocNavigator<'t>) -> Option<&str> {
+        let id = self.by_serial.get(&nav.document().serial())?;
+        self.docs.get(*id)?.uri.as_deref()
+    }
+
     /// Registers the text a later [`load`](Self::load) of `uri` should parse.
     pub fn register_source(&mut self, uri: &str, xml: &str) {
         self.sources.insert(Box::from(uri), Box::from(xml));
@@ -155,21 +211,21 @@ impl<'t> DocumentStore<'t> {
     /// whose load is already in progress is
     /// [`XTDE1170`](crate::error::codes::XTDE1170) — an error, never a panic or
     /// a double borrow (§9.1).
+    ///
+    /// This is the **raw** store operation: it does not apply the §4.4
+    /// whitespace stripping a *source tree* is subject to.
+    /// [`Transformation::load_document`](crate::runtime::Transformation::load_document)
+    /// is the admission path that does.
     pub fn load_str(&mut self, uri: &str, xml: &str) -> Result<DocId, XsltError> {
         if let Some(&id) = self.by_uri.get(uri) {
             return Ok(id);
         }
         self.enter_load(uri)?;
-        let parsed = BufferDocument::from_reader_default(xml.as_bytes(), self.arena, self.names);
+        let parsed = self.parse(xml, Some(uri));
         self.leave_load(uri);
-        let doc = parsed.map_err(|e| {
-            XsltError::new(
-                codes::XTDE1170,
-                format!("could not read the document {uri:?}: {e}"),
-            )
-        })?;
+        let doc = parsed?;
         self.register_source(uri, xml);
-        Ok(self.insert(doc, Some(uri)))
+        Ok(self.insert_ref(doc, Some(uri)))
     }
 
     /// Loads a URI whose text was given to [`register_source`](Self::register_source).
@@ -272,122 +328,5 @@ impl<'t> DocumentStore<'t> {
             DomNodeType::Namespace => format!("{doc}n{node}ns{}", nav.local_name()),
             _ => format!("{doc}n{node}"),
         }
-    }
-}
-
-// ── The `doc()` function (§9.6, Q8) ──────────────────────────────────────
-
-/// Compile-time catalog for the prototype's XSLT functions.
-///
-/// [`FunctionHandle`]'s constructor is `pub(crate)` upstream, so a handle can
-/// only be minted by [`FunctionSet::register`] — a hand-written
-/// [`FunctionCatalog`] is not possible from outside `xsd-schema`. The set is
-/// therefore used as the catalog, and the closure it stores is a placeholder:
-/// the real implementation is [`ProtoEvaluator`], which can hold borrowed
-/// engine state that a `'static + Send + Sync` closure cannot.
-pub struct ProtoFunctions<'t> {
-    set: FunctionSet<BufferDocNavigator<'t>>,
-    doc_handle: FunctionHandle,
-}
-
-impl Default for ProtoFunctions<'_> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<'t> ProtoFunctions<'t> {
-    /// The built-ins plus `proto:doc($uri as xs:string) as node()`.
-    pub fn new() -> Self {
-        let mut set: FunctionSet<BufferDocNavigator<'t>> = FunctionSet::with_builtins();
-        let doc_handle = set.register(
-            DynamicFunctionSignature::new(
-                PROTO_NS,
-                "doc",
-                vec![SequenceType::string()],
-                SequenceType::node(),
-            ),
-            |_ctx, _args| {
-                Err(XPathError::internal(
-                    "proto:doc must be evaluated through xslt2::store::ProtoEvaluator, \
-                     which holds the DocumentStore",
-                ))
-            },
-        );
-        Self { set, doc_handle }
-    }
-
-    /// Pass this to [`XPathContext::with_function_catalog`].
-    ///
-    /// [`XPathContext::with_function_catalog`]: xsd_schema::xpath::XPathContext::with_function_catalog
-    pub fn catalog(&self) -> &dyn FunctionCatalog {
-        &self.set
-    }
-
-    /// The evaluator to install with `DynamicContext::set_function_evaluator`.
-    ///
-    /// The store is borrowed for `'s`, **not** for `'t`: `&'t RefCell<DocumentStore<'t>>`
-    /// — the shape §6.1 sketches — does not borrow-check, because the borrow
-    /// would have to outlive the value that carries `'t` in its own type. The
-    /// navigators the store hands out are `'t` regardless of how long the store
-    /// itself is borrowed, which is what makes the shorter borrow enough.
-    pub fn evaluator<'s>(
-        &'s self,
-        store: &'s RefCell<DocumentStore<'t>>,
-    ) -> ProtoEvaluator<'s, 't> {
-        ProtoEvaluator {
-            funcs: self,
-            store,
-        }
-    }
-}
-
-/// Runs the prototype's XSLT functions over a borrowed [`DocumentStore`].
-///
-/// This is the route §9.6 needs and the answer M0b gives to Q8: the
-/// `DynamicContext` extension slot is typed `&dyn Any`, and `Any` implies
-/// `'static`, so it cannot carry a `DocumentStore<'t>`. A `FunctionEvaluator`
-/// implementation can, because `&'a dyn FunctionEvaluator<N>` is only bounded
-/// by `'a`.
-pub struct ProtoEvaluator<'s, 't> {
-    funcs: &'s ProtoFunctions<'t>,
-    store: &'s RefCell<DocumentStore<'t>>,
-}
-
-impl<'t> FunctionEvaluator<BufferDocNavigator<'t>> for ProtoEvaluator<'_, 't> {
-    fn eval(
-        &self,
-        handle: FunctionHandle,
-        ctx: &mut DynamicContext<'_, BufferDocNavigator<'t>>,
-        args: Vec<XPathValue<BufferDocNavigator<'t>>>,
-    ) -> Result<XPathValue<BufferDocNavigator<'t>>, XPathError> {
-        if handle != self.funcs.doc_handle {
-            return BuiltinEvaluator.eval(handle, ctx, args);
-        }
-        let uri = single_string(args.first()).ok_or_else(|| {
-            XPathError::invalid_argument_type("proto:doc", "a single xs:string")
-        })?;
-        // The borrow ends with the statement; the navigator that comes out
-        // borrows `'t`, so it outlives every later load.
-        let id = self
-            .store
-            .borrow_mut()
-            .load(&uri)
-            // `XPathError` has no "host error with an arbitrary code" variant,
-            // so the XSLT code travels as text. See the M0b report.
-            .map_err(|e| XPathError::internal(e.to_string()))?;
-        let nav = self.store.borrow().navigator(id);
-        Ok(XPathValue::from_node(nav))
-    }
-}
-
-/// The string value of a singleton atomic argument.
-fn single_string<N: DomNavigator>(value: Option<&XPathValue<N>>) -> Option<String> {
-    match value? {
-        XPathValue::Item(item) => item.as_atomic().map(|v| v.to_string_value()),
-        XPathValue::Sequence(items) if items.len() == 1 => {
-            items[0].as_atomic().map(|v| v.to_string_value())
-        }
-        _ => None,
     }
 }

@@ -10,6 +10,29 @@ pub mod codes;
 
 use std::fmt;
 
+/// Codes that are **not** in Appendix E: this implementation's own.
+///
+/// The specification has no code for "the processor does not implement this
+/// yet", and M0b used the non-existent `"XTDE0000"` as a placeholder for
+/// builder and serializer failures. Both are replaced by the two constants
+/// below, which are documented, greppable and classified as
+/// [`ErrorKind::Other`], so the conformance harness can separate a missing
+/// feature from a wrong answer.
+pub mod codes_internal {
+    /// A construct the processor recognizes but has not implemented yet.
+    ///
+    /// The message always names the feature and the milestone that owns it,
+    /// e.g. `xsl:sort is not implemented in M1 (M2)`. The conformance harness
+    /// reports a case ending in this code as `not implemented` rather than as a
+    /// plain failure.
+    pub const NOT_IMPLEMENTED: &str = "XSLT2-NOTIMPL";
+
+    /// An internal failure: a broken invariant, or an error from a lower layer
+    /// (the tree builder, the serializer, the document store) that has no
+    /// specification code of its own.
+    pub const INTERNAL: &str = "XSLT2-INTERNAL";
+}
+
 /// Error family, derived from the code prefix (§2.9 Error Handling).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
@@ -58,6 +81,13 @@ pub struct Location {
     pub column: u32,
 }
 
+impl Location {
+    /// A location in a stylesheet module.
+    pub fn new(module_uri: impl Into<String>, line: u32, column: u32) -> Self {
+        Self { module_uri: Some(module_uri.into()), line, column }
+    }
+}
+
 /// An XSLT error: spec code + message + optional stylesheet location.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XsltError {
@@ -72,8 +102,39 @@ impl XsltError {
         Self { code: code.into(), message: message.into(), location: None }
     }
 
+    /// A feature this milestone does not implement (`XSLT2-NOTIMPL`).
+    ///
+    /// `feature` names the construct, `milestone` the roadmap entry that owns
+    /// it, so a harness failure reads as a plan item rather than as a bug.
+    pub fn not_implemented(feature: impl fmt::Display, milestone: &str) -> Self {
+        Self::new(
+            codes_internal::NOT_IMPLEMENTED,
+            format!("{feature} is not implemented in M1 ({milestone})"),
+        )
+    }
+
+    /// A broken invariant or a lower-layer failure with no spec code
+    /// (`XSLT2-INTERNAL`).
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(codes_internal::INTERNAL, message)
+    }
+
+    /// Whether this is the "not implemented" internal code.
+    pub fn is_not_implemented(&self) -> bool {
+        self.code == codes_internal::NOT_IMPLEMENTED
+    }
+
     pub fn with_location(mut self, location: Location) -> Self {
         self.location = Some(location);
+        self
+    }
+
+    /// Attaches `location` unless the error already carries one (the innermost
+    /// instruction that knew where it was wins).
+    pub fn or_location(mut self, location: &Location) -> Self {
+        if self.location.is_none() {
+            self.location = Some(location.clone());
+        }
         self
     }
 
@@ -130,6 +191,26 @@ mod tests {
         assert_eq!(ErrorKind::of_code("XPTY0004"), ErrorKind::XPath);
         assert_eq!(ErrorKind::of_code("FORG0001"), ErrorKind::XPath);
         assert_eq!(ErrorKind::of_code("nonsense"), ErrorKind::Other);
+    }
+
+    #[test]
+    fn internal_codes_are_not_spec_codes() {
+        let e = XsltError::not_implemented("xsl:sort", "M2");
+        assert_eq!(e.code, codes_internal::NOT_IMPLEMENTED);
+        assert_eq!(e.kind(), ErrorKind::Other);
+        assert!(e.is_not_implemented());
+        assert!(e.message.contains("xsl:sort") && e.message.contains("M2"));
+        assert!(codes::describe(codes_internal::NOT_IMPLEMENTED).is_none());
+        assert!(codes::describe(codes_internal::INTERNAL).is_none());
+        assert!(!XsltError::internal("boom").is_not_implemented());
+    }
+
+    #[test]
+    fn or_location_keeps_the_innermost() {
+        let inner = Location::new("a.xsl", 1, 2);
+        let outer = Location::new("a.xsl", 9, 9);
+        let e = XsltError::internal("x").with_location(inner.clone()).or_location(&outer);
+        assert_eq!(e.location, Some(inner));
     }
 
     #[test]

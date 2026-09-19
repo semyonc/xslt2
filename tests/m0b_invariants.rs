@@ -16,19 +16,16 @@ use xsd_schema::ids::TypeKey;
 use xsd_schema::namespace::NameTable;
 use xsd_schema::navigator::{DomNavigator, DomNodeType, TypedValue};
 use xsd_schema::pipeline::load_and_process_schema;
-use xsd_schema::xpath::functions::XPathValue;
 use xsd_schema::xpath::{XPathExpr, XmlItem};
 use xsd_schema::SchemaSet;
 
 use xslt2::error::codes;
-use xslt2::proto::{
-    pattern_step_matches, recursive_collect, CompiledStylesheet, Frame, Transformation,
-};
 use xslt2::receiver::{
     serialize_document, Annotations, ComplexContentNormalizer, EventSerializer, Name, Nav, Receiver,
     ResultBuilder, SequenceCollector,
 };
-use xslt2::store::{DocumentStore, ProtoFunctions};
+use xslt2::store::DocumentStore;
+use xslt2::{Compiler, TransformOptions, XsltFunctions};
 
 const SOURCE: &str = concat!(
     r#"<catalog><item id="a" enabled="no"><t>A</t></item>"#,
@@ -41,6 +38,36 @@ const SECOND: &str = r#"<extra><note>second</note></extra>"#;
 /// A store over a caller-owned arena and name table (§6.1, §6.6).
 fn store<'t>(arena: &'t Bump, names: &'t NameTable) -> RefCell<DocumentStore<'t>> {
     RefCell::new(DocumentStore::new(arena, names))
+}
+
+/// Compiles `body` as a stylesheet and runs it over `SOURCE`, with `extra.xml`
+/// registered so that `document()` can reach it.
+///
+/// M1 replaced M0b's stand-ins, so the invariants below are asserted through
+/// the real compiler and runtime wherever a stylesheet can express the claim.
+fn run_sheet(body: &str) -> String {
+    let mut memory = xslt2::MemoryResolver::new();
+    memory.insert("extra.xml", SECOND);
+    let resolver = std::sync::Arc::new(memory);
+    let names = NameTable::new();
+    let functions = XsltFunctions::new();
+    let compiled = Compiler::new(&names, &functions)
+        .with_resolver(resolver.clone())
+        .compile_str(
+            &format!(
+                r#"<xsl:stylesheet version="2.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">{body}</xsl:stylesheet>"#
+            ),
+            "urn:invariants:sheet.xsl",
+        )
+        .expect("compile");
+    let arena = Bump::new();
+    let run = compiled
+        .transformation(&arena, TransformOptions::default())
+        .with_resolver(resolver);
+    let outcome = run
+        .transform_source("urn:invariants:catalog.xml", SOURCE)
+        .expect("run");
+    compiled.serialize_primary(&outcome).expect("serialize")
 }
 
 /// The `n`-th `item` element of the principal source.
@@ -62,104 +89,53 @@ fn item<'t>(nav: &Nav<'t>, index: usize) -> Nav<'t> {
 
 // ── Invariant 1 ──────────────────────────────────────────────────────────
 
-/// An existing node passed through a typed variable, a stylesheet-function
-/// argument and result, and a template parameter keeps its identity (`is`), its
-/// parent, and its `generate-id()`.
+/// An existing node passed through a typed variable, a template parameter and
+/// a recursive named template keeps its identity (`is`), its parent and its
+/// `generate-id()`.
 #[test]
 fn inv1_node_identity_survives_variables_parameters_and_functions() {
-    let arena = Bump::new();
-    let names = NameTable::new();
-    let docs = store(&arena, &names);
+    let out = run_sheet(
+        r#"<xsl:template match="/">
+             <!-- (1) a typed variable holds the node itself -->
+             <xsl:variable name="n" as="element()" select="/catalog/item[2]"/>
+             <!-- (2, 3) a template parameter, through two levels of recursion -->
+             <xsl:call-template name="down">
+               <xsl:with-param name="node" select="$n"/>
+               <xsl:with-param name="depth" select="2"/>
+             </xsl:call-template>
+           </xsl:template>
 
-    let id = docs
-        .borrow_mut()
-        .load_str("catalog.xml", SOURCE)
-        .expect("load");
-    let root = docs.borrow().navigator(id);
-    let original = item(&root, 1);
-    let original_id = docs.borrow().generate_id(&original);
-
-    // (1) through a typed variable: a frame slot holds the item itself.
-    let mut frame = Frame::with_slots(1);
-    frame.set(0, XPathValue::from_node(original.clone()));
-    let from_variable = match frame.get(0) {
-        Some(XPathValue::Item(XmlItem::Node(n))) => n.clone(),
-        _ => panic!("expected a node in the slot"),
-    };
-
-    // (2) through a stylesheet-function argument and result, and (3) through a
-    // template parameter — both are a frame handed to a call in this prototype.
-    let mut run = Transformation::new(&docs);
-    let collected = recursive_collect(
-        &mut run,
-        Frame {
-            slots: vec![XPathValue::from_node(from_variable.clone())],
-        },
-        1,
-        "extra.xml",
+           <xsl:template name="down">
+             <xsl:param name="node" as="element()"/>
+             <xsl:param name="depth" as="xs:integer"
+                        xmlns:xs="http://www.w3.org/2001/XMLSchema"/>
+             <xsl:choose>
+               <xsl:when test="$depth > 0">
+                 <xsl:call-template name="down">
+                   <xsl:with-param name="node" select="$node"/>
+                   <xsl:with-param name="depth" select="$depth - 1"/>
+                 </xsl:call-template>
+               </xsl:when>
+               <xsl:otherwise>
+                 <!-- A copy of the same node, for the counterexample. -->
+                 <xsl:variable name="copy"><xsl:copy-of select="$node"/></xsl:variable>
+                 <out same="{$node is /catalog/item[2]}"
+                      parent="{name($node/..)}"
+                      id-kept="{generate-id($node) = generate-id(/catalog/item[2])}"
+                      copy-is-same="{$copy/item is $node}"
+                      copy-id-differs="{generate-id($copy/item) != generate-id($node)}"
+                      copy-parent="{name($copy/item/..)}"/>
+               </xsl:otherwise>
+             </xsl:choose>
+           </xsl:template>"#,
     );
-    // No source registered for "extra.xml": the error is the load, and the
-    // identity claims below are unaffected.
-    assert!(collected.is_err(), "the second document is not registered yet");
-
-    docs.borrow_mut().register_source("extra.xml", SECOND);
-    let mut run = Transformation::new(&docs);
-    let items = recursive_collect(
-        &mut run,
-        Frame {
-            slots: vec![XPathValue::from_node(from_variable.clone())],
-        },
-        1,
-        "extra.xml",
-    )
-    .expect("recursion");
-    let returned = items
-        .iter()
-        .filter_map(|i| i.as_node())
-        .find(|n| n.local_name() == "item")
-        .expect("the item came back out of the function");
-
-    assert!(
-        returned.is_same_position(&original),
-        "the node that came back is the node that went in"
-    );
-    let mut parent = returned.clone();
-    assert!(parent.move_to_parent());
-    assert_eq!(parent.local_name(), "catalog", "the parent is unchanged");
     assert_eq!(
-        docs.borrow().generate_id(returned),
-        original_id,
-        "generate-id() is unchanged"
-    );
-
-    // The negative: a *copy* is a different node with a different id.
-    let builder = ResultBuilder::new(&arena, &names, None).expect("builder");
-    let mut pipe = ComplexContentNormalizer::new(builder);
-    pipe.start_document().unwrap();
-    pipe.append_item(&XmlItem::Node(original.clone())).unwrap();
-    pipe.end_document().unwrap();
-    let copy_doc = pipe.into_inner().finish().expect("finish");
-    let copy_id = docs.borrow_mut().insert(copy_doc, None);
-    let copy_root = docs.borrow().navigator(copy_id);
-    let mut copy = copy_root.clone();
-    assert!(copy.move_to_first_child());
-    assert_eq!(copy.local_name(), "item", "the copy is the item subtree");
-    assert!(
-        !copy.is_same_position(&original),
-        "a copied node is NOT `is`-equal to its original"
-    );
-    assert_ne!(
-        docs.borrow().generate_id(&copy),
-        original_id,
-        "a copied node gets a different generate-id()"
-    );
-    // ... and it lost the parent the original has.
-    let mut copy_parent = copy.clone();
-    assert!(copy_parent.move_to_parent());
-    assert_eq!(
-        copy_parent.node_type(),
-        DomNodeType::Root,
-        "the copy's parent is its own new document node, not <catalog>"
+        out,
+        concat!(
+            r#"<out same="true" parent="catalog" id-kept="true" "#,
+            r#"copy-is-same="false" copy-id-differs="true" copy-parent=""/>"#
+        ),
+        "a node keeps its identity through variables and parameters, and a copy does not"
     );
 }
 
@@ -346,45 +322,60 @@ fn error_scripts() -> Vec<(&'static str, Script)> {
 
 // ── Invariant 3 ──────────────────────────────────────────────────────────
 
-/// Running a `CompiledStylesheet` twice leaks nothing, and the second run's
-/// `generate-id()` values are reproducible.
+/// Running one `CompiledStylesheet` twice leaks nothing, and the second run's
+/// `generate-id()` values repeat the first's.
 #[test]
 fn inv3_two_runs_of_one_compiled_stylesheet_are_isolated() {
     // Compiled once, shared by both runs; nothing below mutates it.
     let names = NameTable::new();
-    let functions = ProtoFunctions::new();
-    let sheet = CompiledStylesheet::compile(&names, &functions, &["count(//item)"]).expect("compile");
+    let functions = XsltFunctions::new();
+    let compiled = Compiler::new(&names, &functions)
+        .compile_str(
+            concat!(
+                r#"<xsl:stylesheet version="2.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">"#,
+                r#"<xsl:template match="/"><out n="{count(//item)}" "#,
+                r#"id="{generate-id(/catalog/item[3])}"/></xsl:template>"#,
+                r#"</xsl:stylesheet>"#
+            ),
+            "urn:invariants:sheet.xsl",
+        )
+        .expect("compile");
 
-    let mut ids = Vec::new();
+    let mut outputs = Vec::new();
     let mut serials = Vec::new();
-    let mut counts = Vec::new();
     for _ in 0..2 {
         // A fresh arena per run: a run's documents cannot outlive it.
         let arena = Bump::new();
-        let docs = store(&arena, &names);
-        let run = Transformation::new(&docs);
-        assert!(run.store().borrow().is_empty(), "a run starts with no documents");
-        assert!(run.messages().is_empty(), "a run starts with no messages");
-
-        let id = docs.borrow_mut().load_str("catalog.xml", SOURCE).expect("load");
-        let root = docs.borrow().navigator(id);
-        let third = item(&root, 2);
-        ids.push(docs.borrow().generate_id(&third));
-        serials.push(root.document().serial());
-        counts.push(
-            sheet
-                .expr(0)
-                .evaluator(sheet.context())
-                .run_with_node::<Nav<'_>>(root.clone())
-                .expect("eval")
-                .as_f64()
-                .expect("count(//item) is a number"),
+        let run = compiled.transformation(&arena, TransformOptions::default());
+        assert!(
+            run.store().borrow().is_empty(),
+            "a run starts with no documents"
         );
-        assert_eq!(docs.borrow().len(), 1, "only this run's document is visible");
+        let outcome = run
+            .transform_source("urn:invariants:catalog.xml", SOURCE)
+            .expect("run");
+        assert!(outcome.messages.is_empty(), "a run starts with no messages");
+        serials.push(
+            run.store()
+                .borrow()
+                .get(
+                    run.store()
+                        .borrow()
+                        .id_of_uri("urn:invariants:catalog.xml")
+                        .expect("the source is in the store"),
+                )
+                .expect("stored")
+                .doc
+                .serial(),
+        );
+        outputs.push(compiled.serialize_primary(&outcome).expect("serialize"));
     }
 
-    assert_eq!(ids[0], ids[1], "generate-id() repeats across runs");
-    assert_eq!(counts, vec![3.0, 3.0], "the compiled expression is reusable and correct in both runs");
+    assert_eq!(
+        outputs[0], outputs[1],
+        "both runs agree, generate-id() included"
+    );
+    assert!(outputs[0].contains(r#"n="3""#), "{}", outputs[0]);
     // Non-vacuous: the two runs really are two different documents. Their
     // process-wide serials differ, which is exactly why generate-id() is built
     // from the store ordinal instead.
@@ -396,57 +387,30 @@ fn inv3_two_runs_of_one_compiled_stylesheet_are_isolated() {
 
 // ── Invariant 4 ──────────────────────────────────────────────────────────
 
-/// `item[@enabled][1]` applies the second predicate to the sequence the first
-/// left behind — position 1 among *enabled* items.
+/// `item[@enabled='yes'][1]` applies the second predicate to the sequence the
+/// first left behind — position 1 among *enabled* items (§5.5.3).
 #[test]
 fn inv4_chained_pattern_predicates_apply_successively() {
-    let arena = Bump::new();
-    let names = NameTable::new();
-    let functions = ProtoFunctions::new();
-    let sheet = CompiledStylesheet::compile(&names, &functions, &["@enabled = 'yes'", "1"])
-        .expect("compile");
-    let docs = store(&arena, &names);
-    let id = docs.borrow_mut().load_str("catalog.xml", SOURCE).expect("load");
-    let root = docs.borrow().navigator(id);
-
-    let predicates = [sheet.expr(0).clone(), sheet.expr(1).clone()];
-    let matches: Vec<String> = (0..3)
-        .map(|i| item(&root, i))
-        .filter(|node| {
-            pattern_step_matches(node, "item", &predicates, sheet.context()).expect("match")
-        })
-        .map(|node| attribute_value(&node, "id"))
-        .collect();
-
+    let matched = run_sheet(
+        r#"<xsl:template match="/"><out><xsl:apply-templates select="catalog/item"/></out></xsl:template>
+           <xsl:template match="item[@enabled='yes'][1]"><hit id="{@id}"/></xsl:template>
+           <xsl:template match="item"/>"#,
+    );
     // item b is the first *enabled* item; item a is the first item overall and
     // is not enabled, so the naive reading would match nothing at all.
-    assert_eq!(matches, vec!["b".to_string()]);
+    assert_eq!(matched, r#"<out><hit id="b"/></out>"#);
 
     // Non-vacuous counterexample: reversing the predicates asks for "the first
     // item, if it is enabled", which selects nothing here.
-    let reversed = [sheet.expr(1).clone(), sheet.expr(0).clone()];
-    let reversed_matches: Vec<String> = (0..3)
-        .map(|i| item(&root, i))
-        .filter(|node| {
-            pattern_step_matches(node, "item", &reversed, sheet.context()).expect("match")
-        })
-        .map(|node| attribute_value(&node, "id"))
-        .collect();
-    assert!(
-        reversed_matches.is_empty(),
+    let reversed = run_sheet(
+        r#"<xsl:template match="/"><out><xsl:apply-templates select="catalog/item"/></out></xsl:template>
+           <xsl:template match="item[1][@enabled='yes']"><hit id="{@id}"/></xsl:template>
+           <xsl:template match="item"/>"#,
+    );
+    assert_eq!(
+        reversed, "<out/>",
         "item[1][@enabled='yes'] must select nothing: item a is first but not enabled"
     );
-}
-
-fn attribute_value(node: &Nav<'_>, name: &str) -> String {
-    let mut attr = node.clone();
-    assert!(attr.move_to_first_attribute());
-    loop {
-        if attr.local_name() == name {
-            return attr.value();
-        }
-        assert!(attr.move_to_next_attribute(), "no attribute {name}");
-    }
 }
 
 // ── Invariant 5 ──────────────────────────────────────────────────────────
@@ -558,75 +522,50 @@ fn copy_through<'a>(
 
 // ── Invariant 6 ──────────────────────────────────────────────────────────
 
-/// A global variable that loads a document via `document()`, whose evaluation
-/// recurses through a stylesheet function that touches a second document,
-/// returns nodes from both without dangling borrows (§6.1).
+/// A global variable that loads a second document with `document()`, whose
+/// nodes travel through a recursive named template together with nodes of the
+/// principal source, without dangling borrows (§6.1).
 #[test]
 fn inv6_global_variable_spans_two_documents_through_a_recursive_function() {
-    let arena = Bump::new();
-    let names = NameTable::new();
-    let functions = ProtoFunctions::new();
-    let sheet = CompiledStylesheet::compile(&names, &functions, &["proto:doc('catalog.xml')/catalog/item"])
-        .expect("compile");
-    let docs = store(&arena, &names);
-    docs.borrow_mut().register_source("catalog.xml", SOURCE);
-    docs.borrow_mut().register_source("extra.xml", SECOND);
-
-    // The global variable: evaluated through the XPath engine, loading its
-    // document from the store as it goes.
-    let evaluator = functions.evaluator(&docs);
-    let global = sheet
-        .expr(0)
-        .evaluator(sheet.context())
-        .run_with::<Nav<'_>, _>(|eval| {
-            let ctx = eval.context();
-            ctx.set_function_evaluator(Some(&evaluator));
-        })
-        .expect("the global variable evaluates");
-    let items = global.into_vec();
-    assert_eq!(items.len(), 3, "proto:doc() loaded the first document");
-
-    // The navigator obtained before the second load is still live after it —
-    // this is the borrow-check shape §6.1 asks M0b to prove.
-    let first = items[0].as_node().expect("node").clone();
-    let mut run = Transformation::new(&docs);
-    let collected = recursive_collect(
-        &mut run,
-        Frame {
-            slots: vec![XPathValue::from_node(first.clone())],
-        },
-        2,
-        "extra.xml",
-    )
-    .expect("recursion");
-
-    let nodes: Vec<&Nav<'_>> = collected.iter().filter_map(|i| i.as_node()).collect();
-    let from_first = nodes
-        .iter()
-        .filter(|n| std::ptr::eq(n.document(), first.document()))
-        .count();
-    let from_second = nodes
-        .iter()
-        .filter(|n| !std::ptr::eq(n.document(), first.document()))
-        .count();
-    assert!(from_first > 0, "nodes from the first document came back");
-    assert_eq!(from_second, 1, "and the node from the second document too");
-
-    // Both are still usable after every load: the first document's node still
-    // knows its parent, the second one's still has its name.
-    let mut parent = first.clone();
-    assert!(parent.move_to_parent());
-    assert_eq!(parent.local_name(), "catalog");
-    let second = nodes
-        .iter()
-        .find(|n| !std::ptr::eq(n.document(), first.document()))
-        .expect("second");
-    assert_eq!(second.local_name(), "extra");
-    // Non-vacuous: two documents, two identities.
-    assert!(!second.is_same_position(&first));
+    let out = run_sheet(
+        r#"<xsl:variable name="extra" select="document('extra.xml')/extra/note"/>
+           <xsl:template match="/">
+             <xsl:call-template name="down">
+               <xsl:with-param name="both" select="(/catalog/item[1], $extra)"/>
+               <xsl:with-param name="depth" select="2"/>
+             </xsl:call-template>
+           </xsl:template>
+           <xsl:template name="down">
+             <xsl:param name="both" as="node()*"/>
+             <xsl:param name="depth" as="xs:integer"
+                        xmlns:xs="http://www.w3.org/2001/XMLSchema"/>
+             <xsl:choose>
+               <xsl:when test="$depth > 0">
+                 <xsl:call-template name="down">
+                   <xsl:with-param name="both" select="$both"/>
+                   <xsl:with-param name="depth" select="$depth - 1"/>
+                 </xsl:call-template>
+               </xsl:when>
+               <xsl:otherwise>
+                 <out count="{count($both)}"
+                      first-parent="{name($both[1]/..)}"
+                      second="{$both[2]}"
+                      second-doc="{name($both[2]/..)}"
+                      distinct="{count($both[1] | $both[2])}"/>
+               </xsl:otherwise>
+             </xsl:choose>
+           </xsl:template>"#,
+    );
+    // Two nodes from two documents come back; the first still knows its parent
+    // after the second document was loaded, and the two are distinct nodes.
+    assert_eq!(
+        out,
+        concat!(
+            r#"<out count="2" first-parent="catalog" second="second" "#,
+            r#"second-doc="extra" distinct="2"/>"#
+        )
+    );
 }
-
-// ── Q6 / Q7 and the store's own contracts ────────────────────────────────
 
 /// Q7: a `DocumentKind::Full` document accepts several element children.
 #[test]
@@ -663,10 +602,15 @@ fn q7_full_document_accepts_several_element_children() {
     );
 }
 
-/// Q6: what `DocumentKind::Fragment` plus `new_assertion` actually does to a
-/// constructed, supposedly parentless element.
+/// Q6: a constructed node that lands in a sequence is parentless.
+///
+/// M0b recorded this as a gap: `DocumentKind::Fragment` plus `new_assertion`
+/// hid the synthetic root from `/` and `//`, but `parent::node()` and
+/// `fn:root()` still reached it. M1 closed it with the upstream
+/// `BufferDocNavigator::new_orphan`, and this test now pins the behaviour §6.3
+/// asks for.
 #[test]
-fn q6_fragment_scope_hides_the_root_from_paths_but_not_from_parent() {
+fn q6_a_constructed_node_in_a_sequence_is_parentless() {
     let arena = Bump::new();
     let names = NameTable::new();
     let docs = store(&arena, &names);
@@ -682,35 +626,31 @@ fn q6_fragment_scope_hides_the_root_from_paths_but_not_from_parent() {
     assert_eq!(node.local_name(), "made");
     assert_eq!(node.document().kind(), DocumentKind::Fragment);
 
-    // What fragment scope *does* give: `/` and `//` see the element, not the
-    // synthetic root, because the root's child axis is hidden.
+    // `/` and `//` see the element, not the hidden document node.
     let mut visible = node.clone();
     visible.move_to_visible_root();
     assert!(
         visible.is_same_position(&node),
         "move_to_visible_root lands on the constructed element"
     );
+
+    // `parent::node()` is empty and `fn:root()` is the element itself.
+    let mut parent = node.clone();
+    assert!(!parent.move_to_parent(), "a constructed node has no parent");
     let mut root = node.clone();
     root.move_to_root();
     assert!(
-        !root.move_to_first_child(),
-        "the synthetic root exposes no children in fragment scope"
+        root.is_same_position(&node),
+        "fn:root() returns the element, not the document that holds it"
     );
+    assert_ne!(root.node_type(), DomNodeType::Root);
 
-    // What it does NOT give (the deviation M1 must handle): `parent::node()`
-    // still reaches the synthetic document node, and `fn:root()` —
-    // `move_to_root` — still lands on it.
-    let mut parent = node.clone();
-    assert!(
-        parent.move_to_parent(),
-        "DocumentKind::Fragment does NOT make parent:: empty; \
-         move_to_parent ignores the assertion flags (xsd-schema navigator.rs:589)"
-    );
-    assert_eq!(parent.node_type(), DomNodeType::Root);
-    assert!(
-        !root.is_same_position(&node),
-        "fn:root() returns the synthetic root, not the element"
-    );
+    // Its own content is unaffected.
+    let mut child = node.clone();
+    assert!(child.move_to_first_child());
+    assert_eq!(child.value(), "x");
+    assert!(child.move_to_parent());
+    assert!(child.is_same_position(&node));
 }
 
 /// The same URI is the same document: one parse, one identity (§16.1).
@@ -771,10 +711,18 @@ fn store_reentrant_load_is_an_error_not_a_panic() {
 #[test]
 fn q35_one_name_table_serves_every_document_and_every_run() {
     let names = NameTable::new();
-    let functions = ProtoFunctions::new();
-    let sheet = CompiledStylesheet::compile(&names, &functions, &["1"]).expect("compile");
+    let functions = XsltFunctions::new();
+    let compiled = Compiler::new(&names, &functions)
+        .compile_str(
+            concat!(
+                r#"<xsl:stylesheet version="2.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">"#,
+                r#"<xsl:template match="/"><out/></xsl:template></xsl:stylesheet>"#
+            ),
+            "urn:invariants:sheet.xsl",
+        )
+        .expect("compile");
     assert!(
-        std::ptr::eq(sheet.names(), &names),
+        std::ptr::eq(compiled.names(), &names),
         "the compiled stylesheet borrows the caller's table"
     );
 
@@ -997,19 +945,24 @@ fn sequence_collector_keeps_identity_and_builds_parentless_nodes() {
     );
 }
 
-/// A guard on the expression cache: `XPathExpr` has no lifetimes, so a compiled
-/// stylesheet really is reusable across runs (Q14).
+/// A guard on the expression cache: `XPathExpr` has no lifetimes, so a
+/// compiled stylesheet really is reusable across runs (Q14).
 #[test]
 fn compiled_expressions_are_lifetime_free() {
     fn takes_owned(_: XPathExpr) {}
+    fn assert_send_sync<T: Send + Sync>() {}
     let names = NameTable::new();
-    let functions = ProtoFunctions::new();
-    let sheet = CompiledStylesheet::compile(&names, &functions, &["1 + 1"]).expect("compile");
-    takes_owned(sheet.expr(0).clone());
+    let ctx = xsd_schema::xpath::XPathContext::new(&names);
+    takes_owned(XPathExpr::compile("1 + 1", &ctx).expect("compile"));
+    assert_send_sync::<XPathExpr>();
 }
 
 /// What a deep copy of a namespaced subtree actually looks like — the exact
 /// text, so a change in upstream's declaration policy shows up here.
+///
+/// M1 made `copy-namespaces="yes"` the default the normalizer uses, as §11.9.2
+/// requires, so the copy now carries every in-scope namespace of the source
+/// element, not only the declarations written on it.
 #[test]
 fn deep_copy_of_a_namespaced_subtree_is_self_contained() {
     let arena = Bump::new();
@@ -1030,7 +983,7 @@ fn deep_copy_of_a_namespaced_subtree_is_self_contained() {
     copy_into(&mut pipe, &kid);
     assert_eq!(
         pipe.into_inner().into_string(),
-        r#"<p:kid xmlns:p="urn:x" k="1">t<!--c--><in xmlns="urn:d"/></p:kid>"#,
-        "the copy re-declares every prefix its own names need, and nothing else"
+        r#"<p:kid xmlns="urn:d" xmlns:p="urn:x" k="1">t<!--c--><in/></p:kid>"#,
+        "copy-namespaces=\"yes\": every in-scope namespace travels with the copy"
     );
 }

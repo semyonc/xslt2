@@ -5,20 +5,64 @@
 //! `XSLT2_DESIGN_SKETCH.md` (workspace root) records the architecture, the
 //! roadmap and the open questions; `XSLT2_FEASIBILITY.md` is the original memo.
 //!
-//! Status: M0b — the conformance harness (`tests/xslts`) runs the W3C suite
-//! against a stub engine, and the architecture prototype of §14 is in place:
-//! [`store`] (document ownership, `doc()`), [`receiver`] (the §5.7.1 push
-//! pipeline) and [`proto`] (frames, a stand-in compiled stylesheet, pattern
-//! predicates). The instruction set itself is M1.
+//! Status: M1 — stylesheet loading and compilation ([`compile`],
+//! [`stylesheet`], [`pattern`]), the instruction tree ([`model`]) and the
+//! transformation runtime ([`runtime`]) are in place, on top of the M0b
+//! architecture: [`store`] (document ownership, `doc()`) and [`receiver`] (the
+//! §5.7.1 push pipeline).
+//!
+//! # Example
+//!
+//! ```
+//! use std::sync::Arc;
+//! use xsd_schema::namespace::NameTable;
+//! use xslt2::{Compiler, MemoryResolver, TransformOptions, XsltFunctions};
+//!
+//! let names = NameTable::new();
+//! let functions = XsltFunctions::new();
+//! let sheet = Compiler::new(&names, &functions).compile_str(
+//!     r#"<xsl:stylesheet version="2.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+//!          <xsl:template match="/"><out><xsl:value-of select="/a/@n"/></out></xsl:template>
+//!        </xsl:stylesheet>"#,
+//!     "urn:sheet",
+//! )?;
+//!
+//! let arena = bumpalo::Bump::new();
+//! let run = sheet.transformation(&arena, TransformOptions::default());
+//! let outcome = run.transform_source("urn:in", r#"<a n="7"/>"#)?;
+//! assert_eq!(sheet.serialize_primary(&outcome)?, "<out>7</out>");
+//! # let _ = Arc::new(MemoryResolver::new());
+//! # Ok::<(), xslt2::XsltError>(())
+//! ```
 
+pub mod compile;
 pub mod error;
-pub mod proto;
+pub mod functions;
+pub mod model;
+pub mod names;
+pub mod output;
+pub mod pattern;
+pub mod resolver;
+pub mod runtime;
 pub mod receiver;
 pub mod store;
+pub mod stylesheet;
+pub mod whitespace;
 
+pub use compile::Compiler;
 pub use error::{ErrorKind, Location, XsltError};
+pub use functions::XsltFunctions;
+pub use model::{CompiledStylesheet, ModeKey};
+pub use names::QName;
+pub use receiver::Nav;
+pub use output::{OutputDefinition, OutputMethod};
+pub use resolver::{FileResolver, MemoryResolver, Resolver};
+pub use runtime::{
+    run_on_large_stack, Message, Outcome, TransformOptions, Transformation,
+    DEFAULT_MAX_RECURSION_DEPTH, DEFAULT_STACK_SIZE,
+};
 pub use receiver::{
     Annotations, ComplexContentNormalizer, EventSerializer, Name, Receiver, ResultBuilder,
     SequenceCollector,
 };
-pub use store::{DocId, DocumentStore, ProtoEvaluator, ProtoFunctions, StoredDocument, PROTO_NS};
+pub use store::{DocId, DocumentStore, StoredDocument};

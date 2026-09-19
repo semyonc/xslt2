@@ -9,7 +9,11 @@
 //! architecture invariant 2.
 //!
 //! [`SequenceCollector`] is the other destination: the `as=` cases, where an
-//! existing node keeps its identity instead of being copied (§6.3).
+//! existing node keeps its identity instead of being copied (§6.3). The
+//! distinction is drawn by *which* trait method an instruction calls —
+//! [`Receiver::append_item`] appends the item itself (`xsl:sequence`, §11.10)
+//! and [`Receiver::append_copy`] appends a new node that is a deep copy of it
+//! (`xsl:copy`, `xsl:copy-of`, §11.9) — never by the receiver guessing.
 
 use std::cell::RefCell;
 
@@ -18,7 +22,6 @@ use xsd_schema::document::{
     CopySource, DocumentKind, NamespaceFixup, NodeSchemaBinding,
 };
 use xsd_schema::navigator::{DomNavigator, DomNodeType, NamespaceAxisScope, TypedValue};
-use xsd_schema::types::XmlValue;
 use xsd_schema::xpath::XmlItem;
 use xsd_schema::SchemaSet;
 
@@ -64,6 +67,38 @@ impl Name {
             local: nav.local_name().to_string(),
             uri: nav.namespace_uri().to_string(),
             prefix: nav.prefix().to_string(),
+        }
+    }
+}
+
+/// Which namespace nodes a deep copy carries (§11.9.2 `copy-namespaces`).
+///
+/// > If this attribute is omitted, or takes the value `yes`, then all the
+/// > namespace nodes of the original element are copied to the new element. If
+/// > it takes the value `no`, then **none** of the namespace nodes are copied:
+/// > however, namespace nodes will still be created in the result tree as
+/// > required by the namespace fixup process … This attribute affects all
+/// > elements copied by this instruction: both elements selected directly by
+/// > the `select` expression, and elements that are descendants of nodes
+/// > selected by the `select` expression.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CopyNamespaces {
+    /// `copy-namespaces="yes"` (the default): every in-scope namespace node.
+    #[default]
+    All,
+    /// `copy-namespaces="no"`: **no** namespace node is copied — not even one
+    /// the source element declares itself. What the result ends up declaring
+    /// is exactly what namespace fixup (§5.7.3) adds for the element's own
+    /// name and its attributes' names.
+    FixupOnly,
+}
+
+impl CopyNamespaces {
+    /// The namespace axis a copy walks, or `None` when it copies none.
+    fn scope(self) -> Option<NamespaceAxisScope> {
+        match self {
+            CopyNamespaces::All => Some(NamespaceAxisScope::ExcludeXml),
+            CopyNamespaces::FixupOnly => None,
         }
     }
 }
@@ -118,6 +153,29 @@ pub trait Receiver<'t> {
     /// A sequence collector keeps the reference; a content receiver copies it.
     /// That decision belongs to the normalizer, never to an instruction.
     fn append_item(&mut self, item: &XmlItem<Nav<'t>>) -> Result<(), XsltError>;
+
+    /// Appends a **copy** of an item: what `xsl:copy-of` and `xsl:copy` do
+    /// (§11.9.1, §11.9.2), as opposed to [`append_item`](Receiver::append_item),
+    /// which appends the item itself (`xsl:sequence`, §11.10).
+    ///
+    /// The difference is only observable where a receiver would otherwise keep
+    /// a node by reference — a [`SequenceCollector`]. In element or document
+    /// content every node is copied anyway, so the two coincide there; what
+    /// the `namespaces` argument adds is the `copy-namespaces` setting of the
+    /// copying instruction.
+    ///
+    /// > If the item is an element node, a **new** element is constructed and
+    /// > appended to the result sequence.
+    ///
+    /// The default implementation forwards to `append_item`, which is right
+    /// for a receiver that decomposes every item into events regardless.
+    fn append_copy(
+        &mut self,
+        item: &XmlItem<Nav<'t>>,
+        _namespaces: CopyNamespaces,
+    ) -> Result<(), XsltError> {
+        self.append_item(item)
+    }
 }
 
 // ── ComplexContentNormalizer ─────────────────────────────────────────────
@@ -201,6 +259,7 @@ pub struct ComplexContentNormalizer<'t, R: Receiver<'t>> {
     text_pending: bool,
     fixup: NamespaceFixup,
     annotations: Annotations,
+    copy_namespaces: CopyNamespaces,
     _marker: std::marker::PhantomData<&'t ()>,
 }
 
@@ -220,8 +279,15 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
             text_pending: false,
             fixup: NamespaceFixup::new(),
             annotations,
+            copy_namespaces: CopyNamespaces::All,
             _marker: std::marker::PhantomData,
         }
+    }
+
+    /// The default `copy-namespaces` setting of this pipeline.
+    pub fn with_copy_namespaces(mut self, namespaces: CopyNamespaces) -> Self {
+        self.copy_namespaces = namespaces;
+        self
     }
 
     /// The destination, once the stream is finished.
@@ -395,13 +461,17 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
     /// and invariant 2 needs both destinations to see the *same* stream. The
     /// walk below is therefore the normalizer's own; its namespace handling is
     /// still upstream's ([`NamespaceFixup`]), applied at flush time.
-    fn copy_node(&mut self, nav: &Nav<'t>) -> Result<(), XsltError> {
+    pub(crate) fn copy_node(
+        &mut self,
+        nav: &Nav<'t>,
+        namespaces: CopyNamespaces,
+    ) -> Result<(), XsltError> {
         match nav.node_type() {
             DomNodeType::Root => {
                 let mut child = nav.clone();
                 if child.move_to_first_child() {
                     loop {
-                        self.copy_node(&child)?;
+                        self.copy_node(&child, namespaces)?;
                         if !child.move_to_next_sibling() {
                             break;
                         }
@@ -414,14 +484,18 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                 let nilled = self.annotations == Annotations::Preserve
                     && matches!(nav.typed_value(), TypedValue::Nilled);
                 self.start_element(&Name::of(nav), binding, nilled)?;
-                let mut ns = nav.clone();
-                if ns.move_to_first_namespace(NamespaceAxisScope::Local) {
-                    loop {
-                        // `local_name()` of a namespace node is its prefix.
-                        let (prefix, uri) = (ns.local_name().to_string(), ns.value());
-                        self.namespace(&prefix, &uri)?;
-                        if !ns.move_to_next_namespace(NamespaceAxisScope::Local) {
-                            break;
+                // §11.9.2: with `copy-namespaces="no"` none of the namespace
+                // nodes are copied and fixup supplies what the names need.
+                if let Some(scope) = namespaces.scope() {
+                    let mut ns = nav.clone();
+                    if ns.move_to_first_namespace(scope) {
+                        loop {
+                            // `local_name()` of a namespace node is its prefix.
+                            let (prefix, uri) = (ns.local_name().to_string(), ns.value());
+                            self.namespace(&prefix, &uri)?;
+                            if !ns.move_to_next_namespace(scope) {
+                                break;
+                            }
                         }
                     }
                 }
@@ -438,7 +512,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                 let mut child = nav.clone();
                 if child.move_to_first_child() {
                     loop {
-                        self.copy_node(&child)?;
+                        self.copy_node(&child, namespaces)?;
                         if !child.move_to_next_sibling() {
                             break;
                         }
@@ -583,7 +657,22 @@ impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
                 Ok(())
             }
             XmlItem::Node(nav) => {
-                self.copy_node(nav)?;
+                self.copy_node(nav, self.copy_namespaces)?;
+                self.top().last_atomic = false;
+                Ok(())
+            }
+        }
+    }
+
+    fn append_copy(
+        &mut self,
+        item: &XmlItem<Nav<'t>>,
+        namespaces: CopyNamespaces,
+    ) -> Result<(), XsltError> {
+        match item {
+            XmlItem::Atomic(_) => self.append_item(item),
+            XmlItem::Node(nav) => {
+                self.copy_node(nav, namespaces)?;
                 self.top().last_atomic = false;
                 Ok(())
             }
@@ -625,7 +714,7 @@ impl<'t> ResultBuilder<'t> {
         options: BufferDocumentOptions,
     ) -> Result<Self, XsltError> {
         let builder = BufferDocumentBuilder::new(arena, names, schema_set, options)
-            .map_err(|e| XsltError::new("XTDE0000", format!("could not start a result tree: {e}")))?;
+            .map_err(|e| XsltError::internal(format!("could not start a result tree: {e}")))?;
         Ok(Self {
             builder,
             pending: None,
@@ -640,7 +729,7 @@ impl<'t> ResultBuilder<'t> {
         self.flush()?;
         self.builder
             .finalize()
-            .map_err(|e| XsltError::new("XTDE0000", format!("could not finish a result tree: {e}")))
+            .map_err(|e| XsltError::internal(format!("could not finish a result tree: {e}")))
     }
 
     /// The node index of the element opened last, for the caller that needs to
@@ -689,7 +778,7 @@ impl<'t> ResultBuilder<'t> {
 }
 
 fn build_error(e: xsd_schema::document::BufferDocumentError) -> XsltError {
-    XsltError::new("XTDE0000", format!("the result-tree builder refused: {e}"))
+    XsltError::internal(format!("the result-tree builder refused: {e}"))
 }
 
 impl<'t> Receiver<'t> for ResultBuilder<'t> {
@@ -758,8 +847,7 @@ impl<'t> Receiver<'t> for ResultBuilder<'t> {
     /// Unreachable below a [`ComplexContentNormalizer`], which decomposes every
     /// item into events before it reaches a tree builder.
     fn append_item(&mut self, _item: &XmlItem<Nav<'t>>) -> Result<(), XsltError> {
-        Err(XsltError::new(
-            "XTDE0000",
+        Err(XsltError::internal(
             "ResultBuilder must sit behind a ComplexContentNormalizer",
         ))
     }
@@ -921,8 +1009,7 @@ impl<'t> Receiver<'t> for EventSerializer {
     }
 
     fn append_item(&mut self, _item: &XmlItem<Nav<'t>>) -> Result<(), XsltError> {
-        Err(XsltError::new(
-            "XTDE0000",
+        Err(XsltError::internal(
             "EventSerializer must sit behind a ComplexContentNormalizer",
         ))
     }
@@ -968,7 +1055,7 @@ fn push_attribute_value(out: &mut String, value: &str) {
 /// uses it.
 pub fn serialize_document(doc: &BufferDocument<'_>) -> Result<String, XsltError> {
     serialize::to_string(&doc.create_navigator(), &Default::default())
-        .map_err(|e| XsltError::new("XTDE0000", format!("could not serialize: {e}")))
+        .map_err(|e| XsltError::internal(format!("could not serialize: {e}")))
 }
 
 // ── SequenceCollector ────────────────────────────────────────────────────
@@ -985,7 +1072,19 @@ pub struct SequenceCollector<'s, 't> {
     items: Vec<XmlItem<Nav<'t>>>,
     /// The nested pipeline building the current construction group.
     nested: Option<ComplexContentNormalizer<'t, ResultBuilder<'t>>>,
+    /// What the open group will produce.
+    group: GroupKind,
+    /// How many containers (elements and document nodes) are open.
     depth: usize,
+}
+
+/// What a construction group in a sequence produces (§6.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupKind {
+    /// A parentless element.
+    Element,
+    /// A document node, from `xsl:document` or a temporary tree.
+    Document,
 }
 
 impl<'s, 't> SequenceCollector<'s, 't> {
@@ -999,6 +1098,7 @@ impl<'s, 't> SequenceCollector<'s, 't> {
             store,
             items: Vec::new(),
             nested: None,
+            group: GroupKind::Element,
             depth: 0,
         }
     }
@@ -1013,65 +1113,205 @@ impl<'s, 't> SequenceCollector<'s, 't> {
         self.items
     }
 
-    fn begin_group(&mut self) -> Result<(), XsltError> {
+    fn begin_group(&mut self, group: GroupKind) -> Result<(), XsltError> {
+        let builder = self.new_builder(group)?;
+        self.nested = Some(ComplexContentNormalizer::new(builder));
+        self.group = group;
+        Ok(())
+    }
+
+    fn new_builder(&self, group: GroupKind) -> Result<ResultBuilder<'t>, XsltError> {
         let (arena, names) = {
             let store = self.store.borrow();
             (store.arena(), store.names())
         };
-        let builder = ResultBuilder::with_options(
-            arena,
-            names,
-            None,
-            // Q6: the hidden document's synthetic root should be invisible.
-            BufferDocumentOptions::fragment(),
-        )?;
-        self.nested = Some(ComplexContentNormalizer::new(builder));
-        Ok(())
+        let options = match group {
+            // A parentless node is built in a hidden document whose root the
+            // navigator then hides (`BufferDocNavigator::new_orphan`).
+            GroupKind::Element => BufferDocumentOptions::fragment(),
+            // A document node is a real document node, with its own identity.
+            GroupKind::Document => BufferDocumentOptions::default(),
+        };
+        ResultBuilder::with_options(arena, names, None, options)
     }
 
     fn end_group(&mut self) -> Result<(), XsltError> {
         let Some(nested) = self.nested.take() else {
             return Ok(());
         };
-        let builder = nested.into_inner();
-        let doc = builder.finish()?;
+        let group = self.group;
+        let doc = nested.into_inner().finish()?;
         let id = self.store.borrow_mut().insert(doc, None);
         let root = self.store.borrow().navigator(id);
-        // The one element child of the hidden document.
-        let mut elem = root.clone();
-        let nav = if elem.move_to_first_child() {
-            fragment_navigator(self.store, id, elem.current_ref())
-        } else {
-            root
+        let item = match group {
+            // A document node keeps its own root and its own identity.
+            GroupKind::Document => root,
+            GroupKind::Element => {
+                let mut elem = root.clone();
+                if elem.move_to_first_child() {
+                    orphan(self.store, id, elem.current_ref())
+                } else {
+                    root
+                }
+            }
         };
-        self.items.push(XmlItem::Node(nav));
+        self.items.push(XmlItem::Node(item));
         Ok(())
+    }
+
+    /// Builds a hidden document holding one parentless node and pushes it.
+    ///
+    /// §6.3: a newly constructed node that lands in a *sequence* rather than
+    /// in element content is parentless. An attribute, comment, processing
+    /// instruction or text node has no way to exist in a `BufferDocument`
+    /// without a parent, so one is built around it and the navigator hides it.
+    fn push_parentless(
+        &mut self,
+        build: impl FnOnce(&mut ComplexContentNormalizer<'t, ResultBuilder<'t>>) -> Result<(), XsltError>,
+        locate: Locate,
+    ) -> Result<(), XsltError> {
+        let builder = self.new_builder(GroupKind::Element)?;
+        let mut pipeline = ComplexContentNormalizer::new(builder);
+        build(&mut pipeline)?;
+        let doc = pipeline.into_inner().finish()?;
+        let id = self.store.borrow_mut().insert(doc, None);
+        let root = self.store.borrow().navigator(id);
+        let mut cursor = root.clone();
+        // The holder element the node was built inside.
+        if !cursor.move_to_first_child() {
+            return Err(XsltError::internal("a parentless node was not built"));
+        }
+        let holder = cursor.current_ref();
+        let item = match locate {
+            // A namespace node has no node index of its own — the cursor sits
+            // on the element that owns it — so the *holder* is the orphan and
+            // the copy keeps it as its parent.
+            Locate::Namespace => {
+                let mut nav = orphan(self.store, id, holder);
+                if !nav.move_to_first_namespace(NamespaceAxisScope::Local) {
+                    return Err(XsltError::internal("a parentless node was not built"));
+                }
+                nav
+            }
+            // Everything else has an index, and *it* becomes the orphan root,
+            // so the holder is invisible: the node has no parent at all.
+            Locate::Attribute | Locate::Child => {
+                let found = match locate {
+                    Locate::Attribute => cursor.move_to_first_attribute(),
+                    _ => cursor.move_to_first_child(),
+                };
+                if !found {
+                    return Err(XsltError::internal("a parentless node was not built"));
+                }
+                orphan(self.store, id, cursor.current_ref())
+            }
+        };
+        self.items.push(XmlItem::Node(item));
+        Ok(())
+    }
+
+    /// Appends a **new** node that is a deep copy of `nav` (§11.9.1, §11.9.2).
+    ///
+    /// The copy is built in its own hidden document, so it is parentless and
+    /// is not the node it was copied from — which is the whole difference
+    /// between `xsl:copy-of` and `xsl:sequence` when the result lands in a
+    /// sequence rather than in element content.
+    fn push_copy(
+        &mut self,
+        nav: &Nav<'t>,
+        namespaces: CopyNamespaces,
+    ) -> Result<(), XsltError> {
+        match nav.node_type() {
+            // A document node copies to a new document node, with its own
+            // identity: "the instruction adds a new document node to the
+            // result sequence".
+            DomNodeType::Root => {
+                let builder = self.new_builder(GroupKind::Document)?;
+                let mut pipeline = ComplexContentNormalizer::new(builder);
+                pipeline.start_document()?;
+                pipeline.copy_node(nav, namespaces)?;
+                pipeline.end_document()?;
+                let doc = pipeline.into_inner().finish()?;
+                let id = self.store.borrow_mut().insert(doc, None);
+                let root = self.store.borrow().navigator(id);
+                self.items.push(XmlItem::Node(root));
+                Ok(())
+            }
+            kind => {
+                let locate = match kind {
+                    DomNodeType::Attribute => Locate::Attribute,
+                    DomNodeType::Namespace => Locate::Namespace,
+                    _ => Locate::Child,
+                };
+                let source = nav.clone();
+                self.push_parentless(
+                    move |out| {
+                        out.start_element(&Name::local(HOLDER), None, false)?;
+                        out.copy_node(&source, namespaces)?;
+                        out.end_start_tag()?;
+                        out.end_element()
+                    },
+                    locate,
+                )
+            }
+        }
     }
 }
 
-/// A navigator on the element of a hidden fragment document.
+/// Where in the hidden document the parentless node sits.
 ///
-/// [`BufferDocNavigator::new_assertion`] is upstream's "fragment scope": it
-/// hides the synthetic root's children from `move_to_first_child` and makes
-/// `move_to_visible_root` land on this element. It does **not** make
-/// `move_to_parent` fail — see `q6` in `tests/m0b_invariants.rs` and the M0b
-/// report.
-fn fragment_navigator<'t>(
-    store: &RefCell<DocumentStore<'t>>,
-    id: DocId,
-    node: u32,
-) -> Nav<'t> {
+/// Everything is built inside a holder element, because a
+/// `BufferDocumentBuilder` only accepts text, comments and processing
+/// instructions inside one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Locate {
+    /// The holder's first child.
+    Child,
+    /// The holder's first attribute.
+    Attribute,
+    /// The holder's first namespace node.
+    ///
+    /// Unlike the others this one is **not** parentless: the XDM lets a
+    /// namespace node stand alone, a `BufferDocument` does not, and the
+    /// navigator has no cursor for a namespace node that is not attached to an
+    /// element. The copy is a new node with the right name and value — which
+    /// is what identity turns on — and its parent is the holder.
+    Namespace,
+}
+
+/// The element every parentless node is built inside.
+const HOLDER: &str = "parentless-node-holder";
+
+/// A navigator on a node of a hidden document that must appear parentless.
+fn orphan<'t>(store: &RefCell<DocumentStore<'t>>, id: DocId, node: u32) -> Nav<'t> {
     let doc = store.borrow().get(id).expect("just inserted").doc;
     debug_assert_eq!(doc.kind(), DocumentKind::Fragment);
-    BufferDocNavigator::new_assertion(doc, node)
+    BufferDocNavigator::new_orphan(doc, node)
 }
 
 impl<'t> Receiver<'t> for SequenceCollector<'_, 't> {
     fn start_document(&mut self) -> Result<(), XsltError> {
-        Ok(())
+        if self.depth == 0 {
+            self.begin_group(GroupKind::Document)?;
+        }
+        self.depth += 1;
+        match self.nested.as_mut() {
+            Some(nested) => nested.start_document(),
+            None => Ok(()),
+        }
     }
 
     fn end_document(&mut self) -> Result<(), XsltError> {
+        if self.depth == 0 {
+            return Ok(());
+        }
+        if let Some(nested) = self.nested.as_mut() {
+            nested.end_document()?;
+        }
+        self.depth -= 1;
+        if self.depth == 0 {
+            self.end_group()?;
+        }
         Ok(())
     }
 
@@ -1082,7 +1322,7 @@ impl<'t> Receiver<'t> for SequenceCollector<'_, 't> {
         nilled: bool,
     ) -> Result<(), XsltError> {
         if self.depth == 0 {
-            self.begin_group()?;
+            self.begin_group(GroupKind::Element)?;
         }
         self.depth += 1;
         self.nested
@@ -1092,7 +1332,13 @@ impl<'t> Receiver<'t> for SequenceCollector<'_, 't> {
     }
 
     fn namespace(&mut self, prefix: &str, uri: &str) -> Result<(), XsltError> {
-        self.require_group()?.namespace(prefix, uri)
+        match self.nested.as_mut() {
+            Some(nested) => nested.namespace(prefix, uri),
+            // A parentless namespace node cannot be represented at all.
+            None => Err(XsltError::internal(
+                "a namespace node cannot stand on its own in a sequence",
+            )),
+        }
     }
 
     fn attribute(
@@ -1101,36 +1347,82 @@ impl<'t> Receiver<'t> for SequenceCollector<'_, 't> {
         value: &str,
         binding: Option<NodeSchemaBinding>,
     ) -> Result<(), XsltError> {
-        self.require_group()?.attribute(name, value, binding)
+        if let Some(nested) = self.nested.as_mut() {
+            return nested.attribute(name, value, binding);
+        }
+        let (name, value) = (name.clone(), value.to_string());
+        self.push_parentless(
+            move |out| {
+                out.start_element(&Name::local(HOLDER), None, false)?;
+                out.attribute(&name, &value, binding)?;
+                out.end_start_tag()?;
+                out.end_element()
+            },
+            Locate::Attribute,
+        )
     }
 
     fn end_start_tag(&mut self) -> Result<(), XsltError> {
-        self.require_group()?.end_start_tag()
-    }
-
-    fn text(&mut self, s: &str, disable_escaping: bool) -> Result<(), XsltError> {
         match self.nested.as_mut() {
-            Some(nested) => nested.text(s, disable_escaping),
-            // A bare text node in a sequence is an atomic-valued item here;
-            // M0b does not construct parentless text nodes.
-            None => {
-                self.items
-                    .push(XmlItem::Atomic(XmlValue::string(s.to_string())));
-                Ok(())
-            }
+            Some(nested) => nested.end_start_tag(),
+            None => Ok(()),
         }
     }
 
+    fn text(&mut self, s: &str, disable_escaping: bool) -> Result<(), XsltError> {
+        if let Some(nested) = self.nested.as_mut() {
+            return nested.text(s, disable_escaping);
+        }
+        if s.is_empty() {
+            // §5.7.1: a zero-length text node is dropped.
+            return Ok(());
+        }
+        let s = s.to_string();
+        self.push_parentless(
+            move |out| {
+                out.start_element(&Name::local(HOLDER), None, false)?;
+                out.text(&s, disable_escaping)?;
+                out.end_element()
+            },
+            Locate::Child,
+        )
+    }
+
     fn comment(&mut self, s: &str) -> Result<(), XsltError> {
-        self.require_group()?.comment(s)
+        if let Some(nested) = self.nested.as_mut() {
+            return nested.comment(s);
+        }
+        let s = s.to_string();
+        self.push_parentless(
+            move |out| {
+                out.start_element(&Name::local(HOLDER), None, false)?;
+                out.comment(&s)?;
+                out.end_element()
+            },
+            Locate::Child,
+        )
     }
 
     fn pi(&mut self, target: &str, data: &str) -> Result<(), XsltError> {
-        self.require_group()?.pi(target, data)
+        if let Some(nested) = self.nested.as_mut() {
+            return nested.pi(target, data);
+        }
+        let (target, data) = (target.to_string(), data.to_string());
+        self.push_parentless(
+            move |out| {
+                out.start_element(&Name::local(HOLDER), None, false)?;
+                out.pi(&target, &data)?;
+                out.end_element()
+            },
+            Locate::Child,
+        )
     }
 
     fn end_element(&mut self) -> Result<(), XsltError> {
-        self.require_group()?.end_element()?;
+        let Some(nested) = self.nested.as_mut() else {
+            return Err(XsltError::internal("end_element with no element open"));
+        };
+        nested.end_element()?;
         self.depth -= 1;
         if self.depth == 0 {
             self.end_group()?;
@@ -1141,27 +1433,35 @@ impl<'t> Receiver<'t> for SequenceCollector<'_, 't> {
     /// Keeps the item **unchanged**: a node stays the very node it was, which
     /// is what `xsl:sequence select="//item"` inside a typed variable means.
     fn append_item(&mut self, item: &XmlItem<Nav<'t>>) -> Result<(), XsltError> {
-        self.items.push(item.clone());
-        Ok(())
+        match self.nested.as_mut() {
+            // Inside a construction group the item is content, so the
+            // normalizer's copy rules apply.
+            Some(nested) => nested.append_item(item),
+            None => {
+                self.items.push(item.clone());
+                Ok(())
+            }
+        }
     }
-}
 
-impl<'t> SequenceCollector<'_, 't> {
-    /// The nested construction pipeline, or the M0b limitation.
-    ///
-    /// XDM allows a parentless attribute, comment or processing instruction in
-    /// a sequence; M0b only builds the case §6.3 names — a construction group
-    /// that starts with an element — so everything else is reported rather
-    /// than silently dropped. M1 gives each kind its own hidden document.
-    fn require_group(
+    /// §11.9.2: a copy landing directly in the sequence is a **new**,
+    /// parentless node, not the node it was copied from.
+    fn append_copy(
         &mut self,
-    ) -> Result<&mut ComplexContentNormalizer<'t, ResultBuilder<'t>>, XsltError> {
-        self.nested.as_mut().ok_or_else(|| {
-            XsltError::new(
-                "XTDE0000",
-                "M0b builds parentless nodes only for a construction group that starts \
-                 with an element",
-            )
-        })
+        item: &XmlItem<Nav<'t>>,
+        namespaces: CopyNamespaces,
+    ) -> Result<(), XsltError> {
+        match (self.nested.as_mut(), item) {
+            // Inside a construction group the copy is content, so it is
+            // decomposed into events like anything else.
+            (Some(nested), _) => nested.append_copy(item, namespaces),
+            // "If the item is an atomic value, the value is appended to the
+            // result sequence, as with xsl:sequence."
+            (None, XmlItem::Atomic(_)) => {
+                self.items.push(item.clone());
+                Ok(())
+            }
+            (None, XmlItem::Node(nav)) => self.push_copy(nav, namespaces),
+        }
     }
 }

@@ -18,6 +18,8 @@
 mod catalog;
 #[path = "compare.rs"]
 mod compare;
+#[path = "engine.rs"]
+mod engine;
 #[path = "environment.rs"]
 mod environment;
 #[path = "filter.rs"]
@@ -50,6 +52,14 @@ struct Options {
     strict: bool,
     report: Option<PathBuf>,
     expect_pass: Option<usize>,
+    /// Run against the M0 `StubEngine` instead of the processor.
+    stub: bool,
+    /// Run the suite even in a debug build.
+    force_debug: bool,
+    /// Test-sets to leave out of the run entirely (by name substring).
+    skip: Vec<String>,
+    /// Compare `assert-xml` leniently everywhere (as if `ignore-prefixes="true"`).
+    lenient_xml: bool,
 }
 
 fn print_usage() {
@@ -69,6 +79,13 @@ fn print_usage() {
     println!("      --schema-aware    Enable the schema_aware feature (runs SA cases)");
     println!("      --xsd11           With --schema-aware: XSD 1.1 schemas are available");
     println!("      --strict          Recoverable errors are signalled (on-multiple-match=error)");
+    println!("      --stub            Run the M0 stub engine instead of the processor");
+    println!("      --debug           Run the suite in a debug build (slow; normally skipped)");
+    println!("      --skip NAME       Leave out test-sets whose name contains NAME (repeatable)");
+    println!("      --lenient-xml     Compare assert-xml ignoring prefixes and namespace");
+    println!("                        declarations everywhere, as if every assertion carried");
+    println!("                        ignore-prefixes=\"true\". The catalog default is false");
+    println!("                        (Canonical-XML equivalence); this is for triage only.");
     println!("      --report FILE     Write results in the W3C xslt30-test-results XML format");
     println!("      --expect-pass N   Exit with status 1 if fewer than N cases pass");
     println!("      --self-test       Run the harness's own checks (assertion evaluation) and exit");
@@ -90,6 +107,10 @@ fn parse_args() -> Options {
         strict: false,
         report: None,
         expect_pass: None,
+        stub: false,
+        force_debug: false,
+        skip: Vec::new(),
+        lenient_xml: false,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -116,6 +137,10 @@ fn parse_args() -> Options {
             "--schema-aware" => o.schema_aware = true,
             "--xsd11" => o.xsd11 = true,
             "--strict" => o.strict = true,
+            "--stub" => o.stub = true,
+            "--debug" => o.force_debug = true,
+            "--skip" => o.skip.push(value(&mut i, "--skip")),
+            "--lenient-xml" => o.lenient_xml = true,
             "--report" => o.report = Some(PathBuf::from(value(&mut i, "--report"))),
             "--expect-pass" => o.expect_pass = Some(value(&mut i, "--expect-pass").parse().unwrap_or_else(|_| {
                 eprintln!("--expect-pass needs a number");
@@ -156,8 +181,34 @@ fn suite_version(root: &std::path::Path) -> String {
 }
 
 fn main() {
+    // Q33: no tail-call elimination in M1, so a deeply recursive named
+    // template needs a bigger stack than a thread gets by default. The whole
+    // run happens on one such thread; per-case panics are still caught by the
+    // runner.
+    let stack_size = std::env::var("XSLT2_STACK_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(xslt2::DEFAULT_STACK_SIZE);
+    xslt2::run_on_large_stack(stack_size, run_suite);
+}
+
+fn run_suite() {
     let opts = parse_args();
     let started = Instant::now();
+
+    // The suite is a release-mode tool: a debug build is roughly twenty times
+    // slower and its stack frames are large enough that a deeply recursive
+    // stylesheet exhausts even the big worker stack. A plain `cargo test`
+    // therefore reports the harness as skipped rather than spending minutes to
+    // produce numbers nobody reads.
+    if cfg!(debug_assertions) && !opts.force_debug {
+        println!(
+            "xslts: skipped — build with --release (or pass --debug to run it anyway):\n  \
+             cargo test --test xslts --release -- -s {}",
+            opts.suite.display()
+        );
+        return;
+    }
 
     if !opts.suite.join("catalog.xml").is_file() {
         eprintln!(
@@ -174,7 +225,11 @@ fn main() {
         }
     };
     let policy = Policy { schema_aware: opts.schema_aware, xsd11: opts.xsd11, strict_recoverable: opts.strict, run_excluded: opts.all };
-    let engine: Box<dyn Engine> = Box::new(StubEngine);
+    let engine: Box<dyn Engine> = if opts.stub {
+        Box::new(StubEngine)
+    } else {
+        Box::new(engine::XsltEngine)
+    };
 
     let mut report = Report {
         engine: engine.name().to_string(),
@@ -200,6 +255,9 @@ fn main() {
     let mut ran = 0usize;
     'sets: for set_ref in &catalog.test_sets {
         if !opts.groups.is_empty() && !opts.groups.iter().any(|g| set_ref.name.contains(g.as_str())) {
+            continue;
+        }
+        if opts.skip.iter().any(|s| set_ref.name.contains(s.as_str())) {
             continue;
         }
         let set = match catalog::load_test_set(set_ref) {
@@ -280,11 +338,14 @@ fn main() {
                         rec.status = Status::HarnessError;
                         rec.message = Some(format!("engine panicked: {p}"));
                     } else if exec.output.not_implemented {
-                        rec.status = Status::Fail;
-                        rec.message = Some("engine not implemented".to_string());
+                        rec.status = Status::NotImplemented;
+                        rec.message = Some(match &exec.output.error {
+                            Some(e) => e.message.clone(),
+                            None => "engine not implemented".to_string(),
+                        });
                     } else {
-                        let cx = CompareContext { set_dir: &set.dir };
-                        let v = compare::evaluate(&case.result, &exec.output, &cx);
+                        let cx = CompareContext { set_dir: &set.dir, lenient_xml: opts.lenient_xml };
+                        let v = compare::evaluate_guarded(&case.result, &exec.output, &cx);
                         rec.status = match v.outcome {
                             Outcome::Pass => Status::Pass,
                             Outcome::Fail => Status::Fail,
@@ -326,7 +387,10 @@ fn main() {
 }
 
 fn print_case(opts: &Options, rec: &CaseRecord) {
-    let failing = matches!(rec.status, Status::Fail | Status::WrongError | Status::HarnessError);
+    let failing = matches!(
+        rec.status,
+        Status::Fail | Status::WrongError | Status::HarnessError | Status::NotImplemented
+    );
     if !(opts.verbose || (opts.failed_only && failing)) {
         return;
     }
@@ -338,6 +402,7 @@ fn print_case(opts: &Options, rec: &CaseRecord) {
         Status::NotRun => "NOT-RUN",
         Status::NotApplicable => "N/A",
         Status::Excluded => "EXCLUDED",
+        Status::NotImplemented => "NOT-IMPL",
     };
     match &rec.message {
         Some(m) => println!("  {tag:<13} {}/{}: {m}", rec.set, rec.name),
