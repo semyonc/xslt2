@@ -39,11 +39,11 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 |---|---|
 | XSLT 2.0-applicable | 6,619 |
 | runnable (dependencies satisfied) | 5,751 |
-| pass | 3,974 |
-| fail / wrongError / harnessError | 424 / 45 / 5 |
+| pass | 3,977 |
+| fail / wrongError / harnessError | 424 / 42 / 5 |
 | not implemented (`XSLT2-NOTIMPL`, M2–M4) | 1,303 |
-| pass rate over runnable | 69.10% |
-| headline (basic profile, non-regex families) | 2,901 / 4,233 = **68.5%** |
+| pass rate over runnable | 69.15% |
+| headline (basic profile, non-regex families) | 2,904 / 4,233 = **68.6%** |
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the

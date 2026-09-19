@@ -387,10 +387,11 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             }),
             other => {
                 // §3.9: in a forwards-compatible region an unknown XSLT
-                // instruction becomes its xsl:fallback children, or an error
-                // only if it is evaluated.
+                // instruction becomes its xsl:fallback children; with no
+                // fallback children it is the same static error as below (see
+                // `fallback_or_error`, which does not yet raise it).
                 if self.static_contexts.get(ctx).compat.is_forwards() {
-                    return Ok(self.fallback_or_error(nav, module_id, other));
+                    return self.fallback_or_error(nav, module_id, other);
                 }
                 Err(XsltError::new(
                     codes::XTSE0010,
@@ -401,24 +402,46 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         }
     }
 
+    /// The forwards-compatible reading of an unknown `xsl:` instruction (§3.9).
+    ///
+    /// > \[§3.9\] … if an element in the XSLT namespace appears as part of a
+    /// > sequence constructor, and XSLT 2.0 does not allow such elements to
+    /// > appear as part of a sequence constructor, then: If the element has one
+    /// > or more `xsl:fallback` children, then no error is reported either
+    /// > statically or dynamically, and the result of evaluating the instruction
+    /// > is the concatenation of the sequences formed by evaluating the sequence
+    /// > constructors within its `xsl:fallback` children, in document order. …
+    /// > If the element has no `xsl:fallback` children, then a static error is
+    /// > reported in the same way as if forwards-compatible behavior were not
+    /// > enabled.
+    ///
+    /// "No error is reported either statically or dynamically" covers the
+    /// unknown element, not the fallback bodies: those *are* evaluated, so a
+    /// failure to compile one is a real error and is propagated (it used to be
+    /// replaced by the `XSLT2-NOTIMPL` below, which hid genuine `XTSE` errors —
+    /// M2a review, finding 1).
+    ///
+    /// The `None` arm is **not** conformant and is left as it was: §3.9 asks for
+    /// the same static error as the non-forwards-compatible branch raises
+    /// (`XTSE0010`), not for an error deferred to evaluation — that was the
+    /// XSLT 1.0 rule. Deferring it is a separate defect, recorded in
+    /// `XSLT2_M2A_REVIEW_FIXES.md` under "Noticed, not done".
     fn fallback_or_error(
         &mut self,
         nav: &Nav<'t>,
         module_id: ModuleId,
         name: &str,
-    ) -> InstructionKind {
-        match self.fallback_bodies(nav, module_id) {
-            Ok(Some(body)) => InstructionKind::Choose {
+    ) -> Result<InstructionKind, XsltError> {
+        Ok(match self.fallback_bodies(nav, module_id)? {
+            Some(body) => InstructionKind::Choose {
                 whens: Vec::new(),
                 otherwise: Some(body),
             },
-            // §3.9: without a fallback, the error is signalled only if the
-            // instruction is evaluated.
-            _ => InstructionKind::NotImplemented {
+            None => InstructionKind::NotImplemented {
                 feature: format!("the unknown XSLT instruction xsl:{name}"),
                 milestone: "M3",
             },
-        }
+        })
     }
 
     fn choose(

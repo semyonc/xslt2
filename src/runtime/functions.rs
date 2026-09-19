@@ -151,11 +151,19 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
             }
             XsltFn::DocAvailable => {
                 let uris = string_args(args.first())?;
+                // F&O `fn:doc-available`: "returns true if and only if the
+                // function call `fn:doc($uri)` would return a document node".
+                // A failure to retrieve or parse the resource is that answer —
+                // `false`. A failure of the *processor* (a feature this
+                // milestone lacks, a broken invariant in the tree builder) is
+                // not: it means this call cannot tell, and answering `false`
+                // would silently send the stylesheet down its fallback path.
                 let available = match uris.first() {
-                    Some(uri) => self
-                        .run
-                        .load_relative_to(self.static_base_uri(), uri)
-                        .is_ok(),
+                    Some(uri) => match self.run.load_relative_to(self.static_base_uri(), uri) {
+                        Ok(_) => true,
+                        Err(e) if e.is_processor_failure() => return Err(e),
+                        Err(_) => false,
+                    },
                     None => false,
                 };
                 Ok(XPathValue::boolean(available))

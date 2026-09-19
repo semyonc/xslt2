@@ -85,13 +85,33 @@ impl<'a, 't> Transformation<'a, 't> {
 
     /// Turns an `XPathError` back into an `XsltError`, recovering an XSLT code
     /// that the evaluator parked on the way out.
+    ///
+    /// The `None` arm assigns [`codes_internal::INTERNAL`], and since
+    /// [`XsltError::is_recoverable_in_pattern`] refuses to recover from that
+    /// code, the arm has to mean what it says. Two of the engine's uncoded
+    /// variants are not internal failures at all but ordinary type errors of
+    /// the stylesheet, and XPath 2.0 §B.2 gives them a code:
+    ///
+    /// > If the operator is not defined for the types of its operands, a type
+    /// > error is raised \[err:XPTY0004\].
+    ///
+    /// They are mapped to it here, so that everything left in the `None` arm is
+    /// genuinely a broken invariant of the engine or of this crate.
+    ///
+    /// [`codes_internal::INTERNAL`]: crate::error::codes_internal::INTERNAL
     pub(super) fn xpath_error(&self, e: XPathError) -> XsltError {
         if let Some(parked) = self.parked_error.borrow_mut().take() {
             return parked;
         }
         match e.error_code() {
             Some(code) => XsltError::new(code, e.to_string()),
-            None => XsltError::internal(e.to_string()),
+            None => match e {
+                XPathError::BinaryOperatorNotDefined { .. }
+                | XPathError::UnaryOperatorNotDefined { .. } => {
+                    XsltError::new("XPTY0004", e.to_string())
+                }
+                _ => XsltError::internal(e.to_string()),
+            },
         }
     }
 }

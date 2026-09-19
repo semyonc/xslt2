@@ -46,6 +46,12 @@ impl<'a, 't> Transformation<'a, 't> {
         let parsed = parsed?;
         let doc = self.strip_source(parsed, uri)?;
         let stripped = !std::ptr::eq(doc, parsed);
+        // §21.1/XTDE1665: this tree was parsed here, by a plain (non-validating)
+        // `BufferDocument` build, and the stripped copy was rebuilt through a
+        // `ResultBuilder` with no schema. Neither can carry a type annotation,
+        // so neither ever needs the walk — record that instead of doing it.
+        self.trust_annotation_free(parsed);
+        self.trust_annotation_free(doc);
         if let Some(uri) = uri {
             self.store.borrow_mut().register_source(uri, xml);
         }
@@ -192,6 +198,79 @@ impl<'a, 't> Transformation<'a, 't> {
         best.is_some_and(|rule| rule.strip)
     }
 
+    // ── §21.1 XTDE1665: the input may not be schema-typed ─────────────────
+
+    /// Records that a tree this run built itself cannot carry a type
+    /// annotation, so [`check_input_annotations`](Self::check_input_annotations)
+    /// never walks it.
+    fn trust_annotation_free(&self, doc: &'t BufferDocument<'t>) {
+        self.annotation_free.borrow_mut().insert(doc.serial());
+    }
+
+    /// Rejects an externally supplied tree that carries type annotations.
+    ///
+    /// > \[ERR XTDE1665\] A basic XSLT processor must raise a non-recoverable
+    /// > dynamic error if the input to the processor includes a node with a
+    /// > type annotation other than `xs:untyped` or `xs:untypedAtomic`, or an
+    /// > atomic value of a type other than those which a basic XSLT processor
+    /// > supports.
+    ///
+    /// > \[Note\] The phrase *input to the processor* is deliberately wide: it
+    /// > includes the tree containing the initial context node, trees passed as
+    /// > stylesheet parameters, trees accessed using the `document`, `doc` and
+    /// > `collection` functions, and trees returned by extension functions.
+    ///
+    /// Of that list, only two can reach this processor already typed. Every
+    /// tree it reads itself — [`load_document`](Self::load_document),
+    /// [`register_source`](Self::register_source), `document()`, `doc()` — is
+    /// parsed without a schema, and [`admit`](Self::admit) marks it as such;
+    /// there are no extension functions and no `collection()`. What is left is
+    /// a document a caller built elsewhere and handed to
+    /// [`DocumentStore::insert`](crate::store::DocumentStore::insert) or
+    /// [`insert_ref`](crate::store::DocumentStore::insert_ref), and a node-valued
+    /// stylesheet parameter. Both are checked here, on the way into
+    /// [`Transformation::run`](Self::run) — the point where they first become
+    /// *input*.
+    ///
+    /// One walk per document: the result is cached by
+    /// [`BufferDocument::serial`], so a second parameter pointing into the same
+    /// tree, or the same tree used as both source and parameter, costs nothing.
+    /// There is no cheap "does this document carry any annotation at all"
+    /// accessor upstream today; with one, this whole function would be O(1).
+    ///
+    /// `input-type-annotations="strip"` would make the error "not arise", but
+    /// this crate does not implement that attribute at all (it is accepted and
+    /// ignored), so there is nothing to honour here yet.
+    pub(super) fn check_input_annotations(&self, node: &Nav<'t>) -> Result<(), XsltError> {
+        let mut root = node.clone();
+        root.move_to_root();
+        let serial = root.document().serial();
+        if self.annotation_free.borrow().contains(&serial) {
+            return Ok(());
+        }
+        match first_annotated(&root) {
+            // Only a tree that *passed* is remembered: a rejected one must be
+            // rejected again if the same `Transformation` is run a second time.
+            None => {
+                self.annotation_free.borrow_mut().insert(serial);
+                Ok(())
+            }
+            Some(found) => Err(XsltError::new(
+                codes::XTDE1665,
+                format!(
+                    "the input to the processor contains the {} {}, which carries a schema type \
+                     annotation; this is a basic XSLT processor, so the input must be untyped \
+                     (§21.1)",
+                    match found.node_type() {
+                        DomNodeType::Attribute => "attribute",
+                        _ => "element",
+                    },
+                    found.name()
+                ),
+            )),
+        }
+    }
+
     /// Registers text a later `document()` call should find at `uri`.
     pub fn register_source(&self, uri: &str, xml: &str) {
         self.store.borrow_mut().register_source(uri, xml);
@@ -240,6 +319,51 @@ impl<'a, 't> Transformation<'a, 't> {
         };
         self.admit(Some(&absolute), &text)
     }
+}
+
+/// The first element or attribute at or below `node`, in document order, that
+/// carries a type annotation.
+///
+/// `DomNavigator::type_annotation()` is the XDM *type-name* property: `None`
+/// means the node was never schema-validated, which for an element is
+/// `xs:untyped` and for an attribute `xs:untypedAtomic` — exactly the two
+/// XTDE1665 permits. Every other node kind reports `None` unconditionally, so
+/// only elements and their attributes are worth visiting.
+fn first_annotated<'t>(node: &Nav<'t>) -> Option<Nav<'t>> {
+    if matches!(
+        node.node_type(),
+        DomNodeType::Element | DomNodeType::Attribute
+    ) && node.type_annotation().is_some()
+    {
+        return Some(node.clone());
+    }
+    if node.node_type() == DomNodeType::Element {
+        let mut attr = node.clone();
+        if attr.move_to_first_attribute() {
+            loop {
+                if attr.type_annotation().is_some() {
+                    return Some(attr);
+                }
+                if !attr.move_to_next_attribute() {
+                    break;
+                }
+            }
+        }
+    }
+    let mut child = node.clone();
+    if child.move_to_first_child() {
+        loop {
+            if child.node_type() == DomNodeType::Element {
+                if let Some(found) = first_annotated(&child) {
+                    return Some(found);
+                }
+            }
+            if !child.move_to_next_sibling() {
+                break;
+            }
+        }
+    }
+    None
 }
 
 /// The value of an attribute of `nav`, by expanded name.

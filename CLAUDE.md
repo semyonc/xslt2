@@ -38,7 +38,7 @@ PSVI, `BufferDocument`). Separate git repository.
 ```bash
 cargo build
 cargo clippy --all-targets         # 0 warnings expected
-cargo test                         # unit + m0b_invariants + m1_context + m1_smoke + m1_review + m2a_groundwork
+cargo test                         # unit + m0b_invariants + m1_context + m1_smoke + m1_review + m2a_groundwork + m2a_review
                                    # (the W3C harness skips itself in a debug build)
 ```
 

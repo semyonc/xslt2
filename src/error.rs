@@ -131,6 +131,51 @@ impl XsltError {
         self.code == codes_internal::NOT_IMPLEMENTED
     }
 
+    /// Whether this is the internal-failure code (`XSLT2-INTERNAL`).
+    pub fn is_internal(&self) -> bool {
+        self.code == codes_internal::INTERNAL
+    }
+
+    /// Whether this error is a failure of the **processor** rather than of the
+    /// stylesheet: the two codes of [`codes_internal`].
+    ///
+    /// Neither is an error the specification describes, so neither may be
+    /// recovered from, defaulted away or turned into a "no" answer: a missing
+    /// feature and a broken invariant are both states in which the processor
+    /// does not know the right answer, and any answer it invents is silently
+    /// wrong. Every site that turns an `Err` into a non-error has to let these
+    /// two through.
+    pub fn is_processor_failure(&self) -> bool {
+        self.is_not_implemented() || self.is_internal()
+    }
+
+    /// Whether §5.5.4's recovery action may be applied to this error when it is
+    /// raised while a pattern is being matched.
+    ///
+    /// > \[§5.5.4\] Any dynamic error or type error that occurs during the
+    /// > evaluation of a pattern against a particular node is treated as a
+    /// > recoverable error, even if the error would normally be
+    /// > non-recoverable. The optional recovery action is to treat the pattern
+    /// > as not matching.
+    ///
+    /// The licence is precisely scoped: "any *dynamic* error or *type* error",
+    /// which is [`ErrorKind::Dynamic`], [`ErrorKind::Type`],
+    /// [`ErrorKind::Recoverable`] and the XPath and F&O codes the engine raises
+    /// while evaluating the predicate ([`ErrorKind::XPath`]). It is not a
+    /// licence to recover from anything else that can go wrong in the same
+    /// call: [`is_processor_failure`](Self::is_processor_failure) is not a
+    /// dynamic error of the stylesheet at all, and neither is a termination
+    /// ([`ErrorKind::Termination`]) or a serialization error. Recovering from
+    /// one of those would not "treat the pattern as not matching" in any
+    /// meaningful sense — it would silently select a different template rule
+    /// and produce a wrong result with no diagnostic.
+    pub fn is_recoverable_in_pattern(&self) -> bool {
+        matches!(
+            self.kind(),
+            ErrorKind::Dynamic | ErrorKind::Type | ErrorKind::Recoverable | ErrorKind::XPath
+        )
+    }
+
     pub fn with_location(mut self, location: Location) -> Self {
         self.location = Some(location);
         self
@@ -221,6 +266,47 @@ mod tests {
         assert!(codes::describe(codes_internal::NOT_IMPLEMENTED).is_none());
         assert!(codes::describe(codes_internal::INTERNAL).is_none());
         assert!(!XsltError::internal("boom").is_not_implemented());
+        assert!(XsltError::internal("boom").is_internal());
+        assert!(!e.is_internal());
+    }
+
+    /// §5.5.4 licenses recovery for "any dynamic error or type error"; the two
+    /// internal codes are neither, and neither is a termination.
+    #[test]
+    fn only_dynamic_and_type_errors_are_recoverable_in_a_pattern() {
+        for code in [
+            codes::XTDE1340,
+            codes::XTTE0570,
+            codes::XTRE0540,
+            "XPTY0004",
+            "XPDY0002",
+            "FORG0001",
+        ] {
+            let e = XsltError::new(code, "x");
+            assert!(
+                e.is_recoverable_in_pattern(),
+                "{code} is a dynamic or type error of the stylesheet"
+            );
+            assert!(
+                !e.is_processor_failure(),
+                "{code} is not a processor failure"
+            );
+        }
+        for e in [
+            XsltError::not_implemented("format-number()", "M3d"),
+            XsltError::internal("broken invariant"),
+        ] {
+            assert!(
+                !e.is_recoverable_in_pattern(),
+                "{} must not be recovered from in a pattern",
+                e.code
+            );
+            assert!(e.is_processor_failure());
+        }
+        // A termination is not a dynamic error either.
+        assert!(!XsltError::new(codes::XTMM9000, "stop").is_recoverable_in_pattern());
+        // …but it is the stylesheet's doing, not the processor's.
+        assert!(!XsltError::new(codes::XTMM9000, "stop").is_processor_failure());
     }
 
     #[test]

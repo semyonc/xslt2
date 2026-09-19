@@ -28,7 +28,7 @@ pub use functions::XsltEvaluator;
 pub use serialize::{serialize_options, serialize_result, source_options, unknown_location};
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bumpalo::Bump;
@@ -157,6 +157,11 @@ pub struct Transformation<'a, 't> {
     /// stores the real error here and returns a placeholder (M0b finding 4).
     parked_error: RefCell<Option<XsltError>>,
     params: RefCell<HashMap<QName, XPathValue<Nav<'t>>>>,
+    /// `BufferDocument::serial()` of every tree already known to carry no type
+    /// annotation — because this run parsed it, or because the §21.1 walk has
+    /// been done. The XTDE1665 check is one walk per externally supplied
+    /// document, and this is what keeps it to one.
+    annotation_free: RefCell<HashSet<u64>>,
     resolver: Arc<dyn Resolver>,
     options: TransformOptions,
     /// The focus global variables are evaluated with (§9.1): the root of the
@@ -189,6 +194,7 @@ impl<'a> CompiledStylesheet<'a> {
             messages: RefCell::new(Vec::new()),
             parked_error: RefCell::new(None),
             params: RefCell::new(HashMap::new()),
+            annotation_free: RefCell::new(HashSet::new()),
             resolver: Arc::new(FileResolver),
             options,
             initial_root: RefCell::new(None),
@@ -271,6 +277,27 @@ impl<'a, 't> Transformation<'a, 't> {
     }
 
     fn run(&self, initial: Option<Nav<'t>>) -> Result<Outcome<'t>, XsltError> {
+        // §21.1 XTDE1665, before anything can observe a typed node: "the input
+        // to the processor" is the tree containing the initial context node and
+        // every tree passed as a stylesheet parameter. Both are checked here,
+        // once per document.
+        if let Some(node) = &initial {
+            self.check_input_annotations(node)?;
+        }
+        let param_nodes: Vec<Nav<'t>> = self
+            .params
+            .borrow()
+            .values()
+            .flat_map(|value| value.clone().into_vec())
+            .filter_map(|item| match item {
+                XmlItem::Node(nav) => Some(nav),
+                XmlItem::Atomic(_) => None,
+            })
+            .collect();
+        for node in &param_nodes {
+            self.check_input_annotations(node)?;
+        }
+
         *self.initial_root.borrow_mut() = initial.clone().map(|mut n| {
             n.move_to_root();
             n
