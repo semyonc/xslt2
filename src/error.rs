@@ -63,9 +63,8 @@ impl ErrorKind {
             Some("XTTE") => Self::Type,
             Some("XTRE") => Self::Recoverable,
             Some("XTMM") => Self::Termination,
-            Some("XPST") | Some("XPDY") | Some("XPTY") | Some("XQST") | Some("XQDY") | Some("XQTY") => {
-                Self::XPath
-            }
+            Some("XPST") | Some("XPDY") | Some("XPTY") | Some("XQST") | Some("XQDY")
+            | Some("XQTY") => Self::XPath,
             _ if code.starts_with("SE") => Self::Serialization,
             _ if code.starts_with("FO") => Self::XPath,
             _ => Self::Other,
@@ -84,7 +83,11 @@ pub struct Location {
 impl Location {
     /// A location in a stylesheet module.
     pub fn new(module_uri: impl Into<String>, line: u32, column: u32) -> Self {
-        Self { module_uri: Some(module_uri.into()), line, column }
+        Self {
+            module_uri: Some(module_uri.into()),
+            line,
+            column,
+        }
     }
 }
 
@@ -99,7 +102,11 @@ pub struct XsltError {
 
 impl XsltError {
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { code: code.into(), message: message.into(), location: None }
+        Self {
+            code: code.into(),
+            message: message.into(),
+            location: None,
+        }
     }
 
     /// A feature this milestone does not implement (`XSLT2-NOTIMPL`).
@@ -152,7 +159,13 @@ impl fmt::Display for XsltError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.code, self.message)?;
         if let Some(loc) = &self.location {
-            write!(f, " (at {}:{}:{})", loc.module_uri.as_deref().unwrap_or("?"), loc.line, loc.column)?;
+            write!(
+                f,
+                " (at {}:{}:{})",
+                loc.module_uri.as_deref().unwrap_or("?"),
+                loc.line,
+                loc.column
+            )?;
         }
         Ok(())
     }
@@ -173,9 +186,14 @@ mod tests {
 
     #[test]
     fn codes_table_is_sorted_and_complete() {
-        assert!(codes::CODES.windows(2).all(|w| w[0].0 < w[1].0), "CODES must be sorted for binary search");
+        assert!(
+            codes::CODES.windows(2).all(|w| w[0].0 < w[1].0),
+            "CODES must be sorted for binary search"
+        );
         assert_eq!(codes::CODES.len(), 163, "Appendix E lists 163 codes");
-        assert!(codes::describe("XTSE0010").unwrap().contains("static error"));
+        assert!(codes::describe("XTSE0010")
+            .unwrap()
+            .contains("static error"));
         assert!(codes::describe("XTDE0410").unwrap().contains("attribute"));
         assert!(codes::describe("XPTY0004").is_none());
     }
@@ -209,14 +227,19 @@ mod tests {
     fn or_location_keeps_the_innermost() {
         let inner = Location::new("a.xsl", 1, 2);
         let outer = Location::new("a.xsl", 9, 9);
-        let e = XsltError::internal("x").with_location(inner.clone()).or_location(&outer);
+        let e = XsltError::internal("x")
+            .with_location(inner.clone())
+            .or_location(&outer);
         assert_eq!(e.location, Some(inner));
     }
 
     #[test]
     fn display_includes_location() {
-        let e = XsltError::new(codes::XTSE0010, "bad")
-            .with_location(Location { module_uri: Some("a.xsl".into()), line: 3, column: 7 });
+        let e = XsltError::new(codes::XTSE0010, "bad").with_location(Location {
+            module_uri: Some("a.xsl".into()),
+            line: 3,
+            column: 7,
+        });
         assert_eq!(e.to_string(), "XTSE0010: bad (at a.xsl:3:7)");
         assert_eq!(e.kind(), ErrorKind::Static);
     }

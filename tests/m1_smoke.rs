@@ -12,8 +12,7 @@ use std::sync::Arc;
 use bumpalo::Bump;
 use xsd_schema::namespace::NameTable;
 use xslt2::{
-    Compiler, CompiledStylesheet, MemoryResolver, QName, TransformOptions, XsltError,
-    XsltFunctions,
+    CompiledStylesheet, Compiler, MemoryResolver, QName, TransformOptions, XsltError, XsltFunctions,
 };
 
 /// Compiles `sheet`, runs it over `source` and returns the serialized result.
@@ -28,9 +27,7 @@ fn transform_with<F>(
     setup: F,
 ) -> Result<String, XsltError>
 where
-    F: for<'a, 't> FnOnce(
-        xslt2::Transformation<'a, 't>,
-    ) -> xslt2::Transformation<'a, 't>,
+    F: for<'a, 't> FnOnce(xslt2::Transformation<'a, 't>) -> xslt2::Transformation<'a, 't>,
 {
     let names = NameTable::new();
     let functions = XsltFunctions::new();
@@ -47,9 +44,7 @@ fn run_and_serialize<F>(
     setup: F,
 ) -> Result<String, XsltError>
 where
-    F: for<'a, 't> FnOnce(
-        xslt2::Transformation<'a, 't>,
-    ) -> xslt2::Transformation<'a, 't>,
+    F: for<'a, 't> FnOnce(xslt2::Transformation<'a, 't>) -> xslt2::Transformation<'a, 't>,
 {
     let arena = Bump::new();
     let run = compiled
@@ -210,9 +205,7 @@ fn import_precedence_and_include_build_one_declaration_set() {
 
 #[test]
 fn an_import_after_another_declaration_is_xtse0200() {
-    let s = sheet(
-        r#"<xsl:template match="/"/><xsl:import href="urn:test:none.xsl"/>"#,
-    );
+    let s = sheet(r#"<xsl:template match="/"/><xsl:import href="urn:test:none.xsl"/>"#);
     let e = transform(&s, "<doc/>").unwrap_err();
     assert_eq!(e.code, "XTSE0200");
 }
@@ -256,7 +249,8 @@ fn a_version_1_0_region_takes_the_first_item_of_a_value_of() {
     assert_eq!(transform(bc, source).unwrap(), "<out>1</out>");
 
     // The same stylesheet at version 2.0 joins them with a single space.
-    let two = sheet(r#"<xsl:template match="/"><out><xsl:value-of select="//n"/></out></xsl:template>"#);
+    let two =
+        sheet(r#"<xsl:template match="/"><out><xsl:value-of select="//n"/></out></xsl:template>"#);
     assert_eq!(transform(&two, source).unwrap(), "<out>1 2 3</out>");
 }
 
@@ -316,7 +310,10 @@ fn conflict_resolution_prefers_the_higher_priority_then_the_later_rule() {
            <xsl:template match="a"><named/></xsl:template>
            <xsl:template match="*" priority="5"><high/></xsl:template>"#,
     );
-    assert_eq!(transform(&s, "<doc><a/></doc>").unwrap(), "<out><high/></out>");
+    assert_eq!(
+        transform(&s, "<doc><a/></doc>").unwrap(),
+        "<out><high/></out>"
+    );
 
     // Without the priority, `a` (priority 0) beats both wildcards (-0.5).
     let s = sheet(
@@ -325,7 +322,10 @@ fn conflict_resolution_prefers_the_higher_priority_then_the_later_rule() {
            <xsl:template match="a"><named/></xsl:template>
            <xsl:template match="*"><wild/></xsl:template>"#,
     );
-    assert_eq!(transform(&s, "<doc><a/></doc>").unwrap(), "<out><named/></out>");
+    assert_eq!(
+        transform(&s, "<doc><a/></doc>").unwrap(),
+        "<out><named/></out>"
+    );
 
     // Equal precedence and priority: the rule declared last wins (XTRE0540's
     // recovery action).
@@ -334,7 +334,10 @@ fn conflict_resolution_prefers_the_higher_priority_then_the_later_rule() {
            <xsl:template match="a"><first/></xsl:template>
            <xsl:template match="a"><last/></xsl:template>"#,
     );
-    assert_eq!(transform(&s, "<doc><a/></doc>").unwrap(), "<out><last/></out>");
+    assert_eq!(
+        transform(&s, "<doc><a/></doc>").unwrap(),
+        "<out><last/></out>"
+    );
 }
 
 #[test]
@@ -459,9 +462,8 @@ fn constructed_elements_attributes_comments_and_pis_reach_the_result() {
 
 #[test]
 fn an_xsl_message_is_collected_and_terminate_yes_ends_the_run() {
-    let s = sheet(
-        r#"<xsl:template match="/"><xsl:message>hello</xsl:message><out/></xsl:template>"#,
-    );
+    let s =
+        sheet(r#"<xsl:template match="/"><xsl:message>hello</xsl:message><out/></xsl:template>"#);
     let names = NameTable::new();
     let functions = XsltFunctions::new();
     let compiled = Compiler::new(&names, &functions)
@@ -477,7 +479,10 @@ fn an_xsl_message_is_collected_and_terminate_yes_ends_the_run() {
     let terminating = sheet(
         r#"<xsl:template match="/"><xsl:message terminate="yes">stop</xsl:message></xsl:template>"#,
     );
-    assert_eq!(transform(&terminating, "<doc/>").unwrap_err().code, "XTMM9000");
+    assert_eq!(
+        transform(&terminating, "<doc/>").unwrap_err().code,
+        "XTMM9000"
+    );
 }
 
 #[test]
@@ -488,7 +493,10 @@ fn a_missing_version_attribute_is_xtse0010() {
 
 #[test]
 fn a_document_element_that_is_not_a_stylesheet_is_xtse0010() {
-    assert_eq!(transform("<not-a-stylesheet/>", "<doc/>").unwrap_err().code, "XTSE0010");
+    assert_eq!(
+        transform("<not-a-stylesheet/>", "<doc/>").unwrap_err().code,
+        "XTSE0010"
+    );
 }
 
 #[test]
@@ -604,7 +612,10 @@ fn exclude_result_prefixes_keeps_a_prefix_out_of_the_result() {
                     xmlns:x="urn:x">
                    <xsl:template match="/"><out/></xsl:template>
                  </xsl:stylesheet>"#;
-    assert_eq!(transform(kept, "<doc/>").unwrap(), r#"<out xmlns:x="urn:x"/>"#);
+    assert_eq!(
+        transform(kept, "<doc/>").unwrap(),
+        r#"<out xmlns:x="urn:x"/>"#
+    );
 }
 
 #[test]
@@ -616,7 +627,8 @@ fn patterns_with_predicates_apply_them_successively() {
            <xsl:template match="item[@on='yes'][1]"><first-on id="{@id}"/></xsl:template>
            <xsl:template match="item"/>"#,
     );
-    let source = r#"<doc><item id="a" on="no"/><item id="b" on="yes"/><item id="c" on="yes"/></doc>"#;
+    let source =
+        r#"<doc><item id="a" on="no"/><item id="b" on="yes"/><item id="c" on="yes"/></doc>"#;
     assert_eq!(
         transform(&s, source).unwrap(),
         r#"<out><first-on id="b"/></out>"#

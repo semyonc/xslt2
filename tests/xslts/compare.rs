@@ -49,16 +49,28 @@ pub struct Verdict {
 
 impl Verdict {
     fn pass() -> Self {
-        Verdict { outcome: Outcome::Pass, message: None }
+        Verdict {
+            outcome: Outcome::Pass,
+            message: None,
+        }
     }
     fn fail(m: impl Into<String>) -> Self {
-        Verdict { outcome: Outcome::Fail, message: Some(m.into()) }
+        Verdict {
+            outcome: Outcome::Fail,
+            message: Some(m.into()),
+        }
     }
     fn wrong_error(m: impl Into<String>) -> Self {
-        Verdict { outcome: Outcome::WrongError, message: Some(m.into()) }
+        Verdict {
+            outcome: Outcome::WrongError,
+            message: Some(m.into()),
+        }
     }
     fn harness(m: impl Into<String>) -> Self {
-        Verdict { outcome: Outcome::HarnessError, message: Some(m.into()) }
+        Verdict {
+            outcome: Outcome::HarnessError,
+            message: Some(m.into()),
+        }
     }
 }
 
@@ -85,7 +97,10 @@ pub fn evaluate_guarded(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>)
 fn guard(f: impl FnOnce() -> Verdict) -> Verdict {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(v) => v,
-        Err(p) => Verdict::harness(format!("panic while evaluating assertions: {}", crate::runner::panic_message(p))),
+        Err(p) => Verdict::harness(format!(
+            "panic while evaluating assertions: {}",
+            crate::runner::panic_message(p)
+        )),
     }
 }
 
@@ -94,7 +109,9 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
     match a {
         // An empty `<result>` (or a `<test-case>` with no `<result>` at all) asserts nothing:
         // reporting it as a pass would be a free pass for a case nobody checks.
-        AllOf(list) if list.is_empty() => Verdict::harness("no assertion to check (empty or missing <result>)"),
+        AllOf(list) if list.is_empty() => {
+            Verdict::harness("no assertion to check (empty or missing <result>)")
+        }
         AllOf(list) => {
             for inner in list {
                 let v = evaluate(inner, out, cx);
@@ -112,8 +129,14 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
                     return v;
                 }
                 worst = Some(match worst {
-                    Some(w) if w.outcome <= v.outcome => Verdict { message: join(w.message, v.message), ..w },
-                    Some(w) => Verdict { outcome: v.outcome, message: join(w.message, v.message) },
+                    Some(w) if w.outcome <= v.outcome => Verdict {
+                        message: join(w.message, v.message),
+                        ..w
+                    },
+                    Some(w) => Verdict {
+                        outcome: v.outcome,
+                        message: join(w.message, v.message),
+                    },
                     None => v,
                 });
             }
@@ -125,23 +148,35 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
         Not(inner) if out.error.is_some() && !mentions_error(inner) => unexpected_error(out),
         Not(inner) => match evaluate(inner, out, cx).outcome {
             Outcome::Pass => Verdict::fail(format!("negated assertion <{}> passed", inner.label())),
-            Outcome::HarnessError => Verdict::harness(format!("cannot evaluate negated <{}>", inner.label())),
+            Outcome::HarnessError => {
+                Verdict::harness(format!("cannot evaluate negated <{}>", inner.label()))
+            }
             _ => Verdict::pass(),
         },
         // `@code` is optional in the catalog schema; an absent one used to default to `*`,
         // which matches any error at all.
-        Error { code } | AssertSerializationError { code } if code.is_empty() => {
-            Verdict::harness(format!("<{}> has no @code, so nothing is asserted", a.label()))
-        }
+        Error { code } | AssertSerializationError { code } if code.is_empty() => Verdict::harness(
+            format!("<{}> has no @code, so nothing is asserted", a.label()),
+        ),
         Error { code } => match &out.error {
             Some(e) if code_matches(code, &e.code) => Verdict::pass(),
-            Some(e) => Verdict::wrong_error(format!("expected error {code}, got {}: {}", e.code, e.message)),
-            None => Verdict::fail(format!("expected error {code} but the transformation succeeded")),
+            Some(e) => Verdict::wrong_error(format!(
+                "expected error {code}, got {}: {}",
+                e.code, e.message
+            )),
+            None => Verdict::fail(format!(
+                "expected error {code} but the transformation succeeded"
+            )),
         },
         AssertSerializationError { code } => match &out.error {
             Some(e) if code_matches(code, &e.code) => Verdict::pass(),
-            Some(e) => Verdict::wrong_error(format!("expected serialization error {code}, got {}: {}", e.code, e.message)),
-            None => Verdict::fail(format!("expected serialization error {code} but serialization succeeded")),
+            Some(e) => Verdict::wrong_error(format!(
+                "expected serialization error {code}, got {}: {}",
+                e.code, e.message
+            )),
+            None => Verdict::fail(format!(
+                "expected serialization error {code} but serialization succeeded"
+            )),
         },
         _ if out.error.is_some() => unexpected_error(out),
         Assert { xpath, ns } => with_primary(out, |doc| match eval_xpath(xpath, ns, doc, ebv) {
@@ -149,7 +184,12 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
             Ok(false) => Verdict::fail(format!("assert `{}` is false", one_line(xpath))),
             Err(m) => Verdict::harness(m),
         }),
-        AssertXml { expected, file, xml_version, ignore_prefixes } => {
+        AssertXml {
+            expected,
+            file,
+            xml_version,
+            ignore_prefixes,
+        } => {
             if xml_version.as_deref() == Some("1.1") {
                 return Verdict::harness("assert-xml with xml-version 1.1");
             }
@@ -167,7 +207,10 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
                 },
             }
         }
-        AssertStringValue { expected, normalize_space: normalize } => match &out.primary {
+        AssertStringValue {
+            expected,
+            normalize_space: normalize,
+        } => match &out.primary {
             None => Verdict::fail("no primary result"),
             Some(p) => {
                 let actual = string_value_of(&p.serialized);
@@ -179,7 +222,11 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
                 if e == a {
                     Verdict::pass()
                 } else {
-                    Verdict::fail(format!("string value mismatch: expected {:?}, got {:?}", clip(&e), clip(&a)))
+                    Verdict::fail(format!(
+                        "string value mismatch: expected {:?}, got {:?}",
+                        clip(&e),
+                        clip(&a)
+                    ))
                 }
             }
         },
@@ -192,7 +239,11 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
                 None => Verdict::fail("no primary result"),
                 Some(p) => match regex_matches(&p.serialized, &regex, flags) {
                     Ok(true) => Verdict::pass(),
-                    Ok(false) => Verdict::fail(format!("serialization does not match /{}/{}", clip(&regex), flags)),
+                    Ok(false) => Verdict::fail(format!(
+                        "serialization does not match /{}/{}",
+                        clip(&regex),
+                        flags
+                    )),
                     Err(m) => Verdict::harness(m),
                 },
             }
@@ -208,17 +259,33 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
                     if trim_trailing_newlines(&expected) == trim_trailing_newlines(&p.serialized) {
                         Verdict::pass()
                     } else {
-                        Verdict::fail(format!("serialization mismatch: expected {:?}, got {:?}", clip(&expected), clip(&p.serialized)))
+                        Verdict::fail(format!(
+                            "serialization mismatch: expected {:?}, got {:?}",
+                            clip(&expected),
+                            clip(&p.serialized)
+                        ))
                     }
                 }
             }
         }
         AssertResultDocument { uri, inner } => {
-            let found = out.secondary.iter().find(|(u, _)| result_document_uri_matches(u, uri));
+            let found = out
+                .secondary
+                .iter()
+                .find(|(u, _)| result_document_uri_matches(u, uri));
             match found {
-                None => Verdict::fail(format!("no result document {uri} (have: {:?})", out.secondary.iter().map(|(u, _)| u.as_str()).collect::<Vec<_>>())),
+                None => Verdict::fail(format!(
+                    "no result document {uri} (have: {:?})",
+                    out.secondary
+                        .iter()
+                        .map(|(u, _)| u.as_str())
+                        .collect::<Vec<_>>()
+                )),
                 Some((_, doc)) => {
-                    let view = RunOutput { primary: Some(doc.clone()), ..Default::default() };
+                    let view = RunOutput {
+                        primary: Some(doc.clone()),
+                        ..Default::default()
+                    };
                     evaluate(inner, &view, cx)
                 }
             }
@@ -229,7 +296,12 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
             }
             let mut last = Verdict::fail("no message satisfied the assertion");
             for m in &out.messages {
-                let view = RunOutput { primary: Some(ResultDocument { serialized: m.clone() }), ..Default::default() };
+                let view = RunOutput {
+                    primary: Some(ResultDocument {
+                        serialized: m.clone(),
+                    }),
+                    ..Default::default()
+                };
                 let v = evaluate(inner, &view, cx);
                 if v.outcome == Outcome::Pass {
                     return v;
@@ -241,13 +313,18 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
         // The harness sees only the serialized result, never the processor's warnings, so
         // there is nothing here to check; reporting a pass would be reporting a check that
         // never happened.
-        AssertWarning => Verdict::harness("assert-warning: the harness does not capture processor warnings"),
+        AssertWarning => {
+            Verdict::harness("assert-warning: the harness does not capture processor warnings")
+        }
         AssertEmpty => match &out.primary {
             None => Verdict::pass(),
             // Only a trailing newline is forgiven: whitespace in the result is a text node,
             // which is emphatically not an empty sequence.
             Some(p) if trim_trailing_newlines(&p.serialized).is_empty() => Verdict::pass(),
-            Some(p) => Verdict::fail(format!("expected empty result, got {:?}", clip(&p.serialized))),
+            Some(p) => Verdict::fail(format!(
+                "expected empty result, got {:?}",
+                clip(&p.serialized)
+            )),
         },
         AssertTrue => bool_result(out, true),
         AssertFalse => bool_result(out, false),
@@ -258,12 +335,18 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
         AssertEq { xpath, ns } => xpath_over_result(out, &format!("$result eq ({xpath})"), ns),
         AssertDeepEq { .. } => Verdict::harness("assert-deep-eq needs a raw sequence result"),
         // `$result instance of document-node()` is true whatever the real result was.
-        AssertType { xpath, .. } => Verdict::harness(format!("assert-type {xpath} needs a raw sequence result")),
+        AssertType { xpath, .. } => {
+            Verdict::harness(format!("assert-type {xpath} needs a raw sequence result"))
+        }
         // The catalog schema says so itself: "For XSLT tests, the result is typically a
         // document node, in which case the length is always 1."
         AssertCount(n) => Verdict::harness(format!("assert-count {n} needs a raw sequence result")),
-        AssertPermutation { .. } => Verdict::harness("assert-permutation needs a raw sequence result"),
-        AssertPostureAndSweep => Verdict::harness("assert-posture-and-sweep is a streaming (XSLT 3.0) assertion"),
+        AssertPermutation { .. } => {
+            Verdict::harness("assert-permutation needs a raw sequence result")
+        }
+        AssertPostureAndSweep => {
+            Verdict::harness("assert-posture-and-sweep is a streaming (XSLT 3.0) assertion")
+        }
         Unknown(name) => Verdict::harness(format!("unknown assertion <{name}>")),
     }
 }
@@ -380,7 +463,10 @@ fn eval_xpath<'d, T>(
             bindings.push((names.add(p), names.add(u)));
         }
     }
-    let ctx = XPathContext::new(&names).with_namespaces(NamespaceContextSnapshot { default_ns: None, bindings });
+    let ctx = XPathContext::new(&names).with_namespaces(NamespaceContextSnapshot {
+        default_ns: None,
+        bindings,
+    });
     let expr = XPathExpr::compile_with_vars(xpath, &ctx, &["result"])
         .map_err(|e| format!("cannot compile assertion XPath `{}`: {e}", one_line(xpath)))?;
     let nav = RoXmlNavigator::new(doc);
@@ -397,8 +483,9 @@ fn eval_xpath<'d, T>(
 fn regex_matches(input: &str, regex: &str, flags: &str) -> Result<bool, String> {
     let names = NameTable::new();
     let ctx = XPathContext::new(&names);
-    let expr = XPathExpr::compile_with_vars("matches($s, $re, $flags)", &ctx, &["s", "re", "flags"])
-        .map_err(|e| format!("cannot compile matches(): {e}"))?;
+    let expr =
+        XPathExpr::compile_with_vars("matches($s, $re, $flags)", &ctx, &["s", "re", "flags"])
+            .map_err(|e| format!("cannot compile matches(): {e}"))?;
     let (s, re, fl) = (input.to_string(), regex.to_string(), flags.to_string());
     let value = expr
         .evaluator(&ctx)
@@ -411,11 +498,16 @@ fn regex_matches(input: &str, regex: &str, flags: &str) -> Result<bool, String> 
     ebv(&value)
 }
 
-fn load_text(inline: &str, file: &Option<String>, cx: &CompareContext<'_>) -> Result<String, String> {
+fn load_text(
+    inline: &str,
+    file: &Option<String>,
+    cx: &CompareContext<'_>,
+) -> Result<String, String> {
     match file {
         Some(f) => {
             let p = cx.set_dir.join(f);
-            std::fs::read_to_string(&p).map_err(|e| format!("cannot read expected file {}: {e}", p.display()))
+            std::fs::read_to_string(&p)
+                .map_err(|e| format!("cannot read expected file {}: {e}", p.display()))
         }
         None => Ok(inline.to_string()),
     }
@@ -463,8 +555,10 @@ pub const NS_MISMATCH: &str = "assert-xml namespace mismatch:";
 fn compare_xml(expected: &str, actual: &str, strict: bool) -> Result<(), String> {
     let e_text = parseable_text(expected);
     let a_text = parseable_text(actual);
-    let e_doc = Document::parse(&e_text).map_err(|e| format!("expected XML does not parse: {e}"))?;
-    let a_doc = Document::parse(&a_text).map_err(|e| format!("actual result does not parse: {e}"))?;
+    let e_doc =
+        Document::parse(&e_text).map_err(|e| format!("expected XML does not parse: {e}"))?;
+    let a_doc =
+        Document::parse(&a_text).map_err(|e| format!("actual result does not parse: {e}"))?;
     let (e_top, a_top) = (top_level(&e_doc), top_level(&a_doc));
     let mut e_canon = String::new();
     let mut a_canon = String::new();
@@ -475,9 +569,17 @@ fn compare_xml(expected: &str, actual: &str, strict: bool) -> Result<(), String>
         canonicalize(*n, &mut a_canon);
     }
     if e_canon != a_canon {
-        let at = e_canon.bytes().zip(a_canon.bytes()).position(|(x, y)| x != y).unwrap_or(e_canon.len().min(a_canon.len()));
+        let at = e_canon
+            .bytes()
+            .zip(a_canon.bytes())
+            .position(|(x, y)| x != y)
+            .unwrap_or(e_canon.len().min(a_canon.len()));
         let ctx = |s: &str| clip(tail_from(s, at.saturating_sub(30)));
-        return Err(format!("assert-xml mismatch at byte {at}: expected …{}, got …{}", ctx(&e_canon), ctx(&a_canon)));
+        return Err(format!(
+            "assert-xml mismatch at byte {at}: expected …{}, got …{}",
+            ctx(&e_canon),
+            ctx(&a_canon)
+        ));
     }
     if strict {
         if let Some(diff) = namespace_diff(&e_text, &e_top, &a_text, &a_top, "") {
@@ -536,7 +638,9 @@ fn attribute_prefix(text: &str, a: &roxmltree::Attribute<'_, '_>) -> String {
 
 /// Read a QName off the front of `s` and return its prefix, or `""` if it is unprefixed.
 fn prefix_of_qname(s: &str) -> String {
-    let end = s.find(|c: char| c.is_whitespace() || matches!(c, '>' | '/' | '=')).unwrap_or(s.len());
+    let end = s
+        .find(|c: char| c.is_whitespace() || matches!(c, '>' | '/' | '='))
+        .unwrap_or(s.len());
     match s[..end].split_once(':') {
         Some((p, _)) => p.to_string(),
         None => String::new(),
@@ -545,7 +649,14 @@ fn prefix_of_qname(s: &str) -> String {
 
 /// Attribute prefixes by expanded name, which is the key the lenient layer already matched on.
 fn attribute_prefixes(text: &str, n: Node) -> BTreeMap<String, String> {
-    n.attributes().map(|a| (expanded_name(a.namespace(), a.name()), attribute_prefix(text, &a))).collect()
+    n.attributes()
+        .map(|a| {
+            (
+                expanded_name(a.namespace(), a.name()),
+                attribute_prefix(text, &a),
+            )
+        })
+        .collect()
 }
 
 fn expanded_name(ns: Option<&str>, local: &str) -> String {
@@ -569,7 +680,13 @@ fn significant<'a, 'i>(n: Node<'a, 'i>) -> Vec<Node<'a, 'i>> {
 
 /// Walk two lenient-equal node lists in step and report the first prefix or namespace
 /// difference. Returns the message tail; the caller prefixes [`NS_MISMATCH`].
-fn namespace_diff(e_text: &str, e: &[Node], a_text: &str, a: &[Node], path: &str) -> Option<String> {
+fn namespace_diff(
+    e_text: &str,
+    e: &[Node],
+    a_text: &str,
+    a: &[Node],
+    path: &str,
+) -> Option<String> {
     // Only reachable if the two sides canonicalized identically, so this should not happen;
     // if it somehow does, the lenient layer's verdict stands rather than inventing a failure.
     if e.len() != a.len() {
@@ -587,14 +704,25 @@ fn namespace_diff(e_text: &str, e: &[Node], a_text: &str, a: &[Node], path: &str
 
         let a_prefix = element_prefix(a_text, *an);
         if e_prefix != a_prefix {
-            return Some(format!("element prefix at {here}: expected {}, got {}", show(&e_prefix), show(&a_prefix)));
+            return Some(format!(
+                "element prefix at {here}: expected {}, got {}",
+                show(&e_prefix),
+                show(&a_prefix)
+            ));
         }
 
-        let (e_attrs, a_attrs) = (attribute_prefixes(e_text, *en), attribute_prefixes(a_text, *an));
+        let (e_attrs, a_attrs) = (
+            attribute_prefixes(e_text, *en),
+            attribute_prefixes(a_text, *an),
+        );
         for (name, e_pfx) in &e_attrs {
             if let Some(a_pfx) = a_attrs.get(name) {
                 if e_pfx != a_pfx {
-                    return Some(format!("attribute prefix at {here}/@{name}: expected {}, got {}", show(e_pfx), show(a_pfx)));
+                    return Some(format!(
+                        "attribute prefix at {here}/@{name}: expected {}, got {}",
+                        show(e_pfx),
+                        show(a_pfx)
+                    ));
                 }
             }
         }
@@ -604,7 +732,8 @@ fn namespace_diff(e_text: &str, e: &[Node], a_text: &str, a: &[Node], path: &str
             return Some(in_scope_message(&here, &e_ns, &a_ns));
         }
 
-        if let Some(m) = namespace_diff(e_text, &significant(*en), a_text, &significant(*an), &here) {
+        if let Some(m) = namespace_diff(e_text, &significant(*en), a_text, &significant(*an), &here)
+        {
             return Some(m);
         }
     }
@@ -672,7 +801,16 @@ fn canonicalize(n: Node, out: &mut String) {
         NodeType::Element => {
             out.push('<');
             push_expanded(out, n.tag_name().namespace(), n.tag_name().name());
-            let mut attrs: Vec<_> = n.attributes().map(|a| (a.namespace().unwrap_or("").to_string(), a.name().to_string(), a.value().to_string())).collect();
+            let mut attrs: Vec<_> = n
+                .attributes()
+                .map(|a| {
+                    (
+                        a.namespace().unwrap_or("").to_string(),
+                        a.name().to_string(),
+                        a.value().to_string(),
+                    )
+                })
+                .collect();
             attrs.sort();
             for (ns, name, value) in attrs {
                 out.push(' ');
@@ -738,7 +876,12 @@ fn escape_into(s: &str, out: &mut String, attr: bool) {
 fn string_value_of(serialized: &str) -> String {
     let text = parseable_text(serialized);
     match Document::parse(&text) {
-        Ok(doc) => doc.root().descendants().filter(|n| n.is_text()).filter_map(|n| n.text()).collect(),
+        Ok(doc) => doc
+            .root()
+            .descendants()
+            .filter(|n| n.is_text())
+            .filter_map(|n| n.text())
+            .collect(),
         Err(_) => serialized.to_string(),
     }
 }
@@ -770,41 +913,72 @@ pub mod self_test {
     use super::*;
 
     fn out(xml: &str) -> RunOutput {
-        RunOutput { primary: Some(ResultDocument { serialized: xml.to_string() }), ..Default::default() }
+        RunOutput {
+            primary: Some(ResultDocument {
+                serialized: xml.to_string(),
+            }),
+            ..Default::default()
+        }
     }
 
     fn check(v: Verdict, want: Outcome) {
         assert_eq!(v.outcome, want, "verdict message: {:?}", v.message);
     }
     fn cx() -> CompareContext<'static> {
-        CompareContext { set_dir: Path::new("."), lenient_xml: false }
+        CompareContext {
+            set_dir: Path::new("."),
+            lenient_xml: false,
+        }
     }
     /// The `--lenient-xml` context.
     fn lenient_cx() -> CompareContext<'static> {
-        CompareContext { set_dir: Path::new("."), lenient_xml: true }
+        CompareContext {
+            set_dir: Path::new("."),
+            lenient_xml: true,
+        }
     }
 
     fn assert_xml(expected: &str, ignore_prefixes: bool) -> Assertion {
-        Assertion::AssertXml { expected: expected.into(), file: None, ignore_prefixes, xml_version: None }
+        Assertion::AssertXml {
+            expected: expected.into(),
+            file: None,
+            ignore_prefixes,
+            xml_version: None,
+        }
     }
 
     /// A strict-only failure must be recognisable as one, and name the kind and the values.
     fn check_ns_mismatch(v: Verdict, kind: &str, needles: &[&str]) {
         assert_eq!(v.outcome, Outcome::Fail, "expected a failure, got {:?}", v);
         let m = v.message.unwrap_or_default();
-        assert!(m.starts_with(NS_MISMATCH), "message does not start with the marker: {m}");
-        assert!(m.contains(kind), "message does not name the kind {kind:?}: {m}");
+        assert!(
+            m.starts_with(NS_MISMATCH),
+            "message does not start with the marker: {m}"
+        );
+        assert!(
+            m.contains(kind),
+            "message does not name the kind {kind:?}: {m}"
+        );
         for n in needles {
             assert!(m.contains(n), "message does not mention {n:?}: {m}");
         }
     }
 
     fn assert_xpath_over_result() {
-        let a = Assertion::Assert { xpath: "/doc/a = 'x' and count(//b) = 2".into(), ns: vec![] };
+        let a = Assertion::Assert {
+            xpath: "/doc/a = 'x' and count(//b) = 2".into(),
+            ns: vec![],
+        };
         let v = evaluate(&a, &out("<doc><a>x</a><b/><b/></doc>"), &cx());
         check(v.clone(), Outcome::Pass);
-        let a = Assertion::Assert { xpath: "$result/doc/a = 'y'".into(), ns: vec![] };
-        check(evaluate(&a, &out("<doc><a>x</a></doc>"), &cx()), Outcome::Fail);
+        let a = Assertion::Assert {
+            xpath: "$result/doc/a = 'y'".into(),
+            ns: vec![],
+        };
+        check(
+            evaluate(&a, &out("<doc><a>x</a></doc>"), &cx()),
+            Outcome::Fail,
+        );
     }
 
     /// Attribute order, the XML declaration and adjacent-text merging are never significant —
@@ -817,7 +991,12 @@ pub mod self_test {
         check(evaluate(&a, &out(actual), &cx()), Outcome::Pass);
         let v = evaluate(&a, &out(r#"<doc xmlns="urn:x" a="1" b="3">t</doc>"#), &cx());
         check(v.clone(), Outcome::Fail);
-        assert!(v.message.unwrap_or_default().starts_with("assert-xml mismatch"), "content mismatch must not be reported as a namespace mismatch");
+        assert!(
+            v.message
+                .unwrap_or_default()
+                .starts_with("assert-xml mismatch"),
+            "content mismatch must not be reported as a namespace mismatch"
+        );
     }
 
     /// Defect A: `<p:r xmlns:p="urn:r"/>` and `<q:r xmlns:q="urn:r"/>` are *not* the same
@@ -825,12 +1004,26 @@ pub mod self_test {
     fn assert_xml_element_prefix_is_significant() {
         let expected = r#"<p:r xmlns:p="urn:r"/>"#;
         let actual = r#"<q:r xmlns:q="urn:r"/>"#;
-        check_ns_mismatch(evaluate(&assert_xml(expected, false), &out(actual), &cx()), "element prefix", &["\"p\"", "\"q\""]);
-        check(evaluate(&assert_xml(expected, true), &out(actual), &cx()), Outcome::Pass);
-        check(evaluate(&assert_xml(expected, false), &out(actual), &lenient_cx()), Outcome::Pass);
+        check_ns_mismatch(
+            evaluate(&assert_xml(expected, false), &out(actual), &cx()),
+            "element prefix",
+            &["\"p\"", "\"q\""],
+        );
+        check(
+            evaluate(&assert_xml(expected, true), &out(actual), &cx()),
+            Outcome::Pass,
+        );
+        check(
+            evaluate(&assert_xml(expected, false), &out(actual), &lenient_cx()),
+            Outcome::Pass,
+        );
         // A prefix against no prefix at all, in both directions.
         check_ns_mismatch(
-            evaluate(&assert_xml(r#"<p:r xmlns:p="urn:r"/>"#, false), &out(r#"<r xmlns="urn:r"/>"#), &cx()),
+            evaluate(
+                &assert_xml(r#"<p:r xmlns:p="urn:r"/>"#, false),
+                &out(r#"<r xmlns="urn:r"/>"#),
+                &cx(),
+            ),
             "element prefix",
             &["(no prefix)"],
         );
@@ -845,46 +1038,106 @@ pub mod self_test {
             "in-scope namespaces",
             &["actual has extra [xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"]"],
         );
-        check(evaluate(&assert_xml(expected, true), &out(actual), &cx()), Outcome::Pass);
-        check(evaluate(&assert_xml(expected, false), &out(actual), &lenient_cx()), Outcome::Pass);
+        check(
+            evaluate(&assert_xml(expected, true), &out(actual), &cx()),
+            Outcome::Pass,
+        );
+        check(
+            evaluate(&assert_xml(expected, false), &out(actual), &lenient_cx()),
+            Outcome::Pass,
+        );
         // Inherited bindings count too: the declaration is on the parent, the report is on the
         // child whose scope it entered (the parent is reported first, so check the child alone).
-        let v = evaluate(&assert_xml("<r><a/></r>", false), &out(r#"<r><a xmlns:foo="urn:foo"/></r>"#), &cx());
-        check_ns_mismatch(v, "in-scope namespaces", &["/r[1]/a[1]", "extra [xmlns:foo=\"urn:foo\"]"]);
+        let v = evaluate(
+            &assert_xml("<r><a/></r>", false),
+            &out(r#"<r><a xmlns:foo="urn:foo"/></r>"#),
+            &cx(),
+        );
+        check_ns_mismatch(
+            v,
+            "in-scope namespaces",
+            &["/r[1]/a[1]", "extra [xmlns:foo=\"urn:foo\"]"],
+        );
         // …and a *missing* one is reported as such.
-        let v = evaluate(&assert_xml(r#"<r xmlns:foo="urn:foo"/>"#, false), &out("<r/>"), &cx());
-        check_ns_mismatch(v, "in-scope namespaces", &["actual lacks [xmlns:foo=\"urn:foo\"]"]);
+        let v = evaluate(
+            &assert_xml(r#"<r xmlns:foo="urn:foo"/>"#, false),
+            &out("<r/>"),
+            &cx(),
+        );
+        check_ns_mismatch(
+            v,
+            "in-scope namespaces",
+            &["actual lacks [xmlns:foo=\"urn:foo\"]"],
+        );
         // A default-namespace difference, which is the other half of the same story.
-        let v = evaluate(&assert_xml(r#"<r xmlns="urn:d"><a/></r>"#, false), &out(r#"<r xmlns="urn:d"><a xmlns=""/></r>"#), &cx());
-        assert_eq!(v.outcome, Outcome::Fail, "an undeclared default namespace changes the expanded name");
+        let v = evaluate(
+            &assert_xml(r#"<r xmlns="urn:d"><a/></r>"#, false),
+            &out(r#"<r xmlns="urn:d"><a xmlns=""/></r>"#),
+            &cx(),
+        );
+        assert_eq!(
+            v.outcome,
+            Outcome::Fail,
+            "an undeclared default namespace changes the expanded name"
+        );
     }
 
     fn assert_xml_attribute_prefix_is_significant() {
         let expected = r#"<r xmlns:p="urn:p" xmlns:q="urn:p" p:a="1"/>"#;
         let actual = r#"<r xmlns:p="urn:p" xmlns:q="urn:p" q:a="1"/>"#;
-        check_ns_mismatch(evaluate(&assert_xml(expected, false), &out(actual), &cx()), "attribute prefix", &["{urn:p}a", "\"p\"", "\"q\""]);
-        check(evaluate(&assert_xml(expected, true), &out(actual), &cx()), Outcome::Pass);
+        check_ns_mismatch(
+            evaluate(&assert_xml(expected, false), &out(actual), &cx()),
+            "attribute prefix",
+            &["{urn:p}a", "\"p\"", "\"q\""],
+        );
+        check(
+            evaluate(&assert_xml(expected, true), &out(actual), &cx()),
+            Outcome::Pass,
+        );
     }
 
     /// The bindings are a *set*: the order they were written in is not part of the document.
     fn assert_xml_namespace_declaration_order_is_not_significant() {
         let expected = r#"<p:r xmlns:p="urn:p" xmlns:q="urn:q" xmlns:z="urn:z"/>"#;
         let actual = r#"<p:r xmlns:z="urn:z" xmlns:q="urn:q" xmlns:p="urn:p"/>"#;
-        check(evaluate(&assert_xml(expected, false), &out(actual), &cx()), Outcome::Pass);
+        check(
+            evaluate(&assert_xml(expected, false), &out(actual), &cx()),
+            Outcome::Pass,
+        );
         // Redeclaring an inherited binding on a child is likewise invisible.
         let a = assert_xml(r#"<p:r xmlns:p="urn:p"><p:c/></p:r>"#, false);
-        check(evaluate(&a, &out(r#"<p:r xmlns:p="urn:p"><p:c xmlns:p="urn:p"/></p:r>"#), &cx()), Outcome::Pass);
+        check(
+            evaluate(
+                &a,
+                &out(r#"<p:r xmlns:p="urn:p"><p:c xmlns:p="urn:p"/></p:r>"#),
+                &cx(),
+            ),
+            Outcome::Pass,
+        );
     }
 
     fn assert_xml_fragments_and_text() {
-        check(evaluate(&assert_xml("<a/><b/>", false), &out("<a/><b/>"), &cx()), Outcome::Pass);
-        check(evaluate(&assert_xml("hello", false), &out("hello"), &cx()), Outcome::Pass);
+        check(
+            evaluate(&assert_xml("<a/><b/>", false), &out("<a/><b/>"), &cx()),
+            Outcome::Pass,
+        );
+        check(
+            evaluate(&assert_xml("hello", false), &out("hello"), &cx()),
+            Outcome::Pass,
+        );
         // The wrapper the harness adds around a fragment must not hide or invent a namespace
         // difference: these two fragments are prefixed, multi-root, and equal.
         let frag = r#"<p:a xmlns:p="urn:p"/>text<q:b xmlns:q="urn:q"/>"#;
-        check(evaluate(&assert_xml(frag, false), &out(frag), &cx()), Outcome::Pass);
+        check(
+            evaluate(&assert_xml(frag, false), &out(frag), &cx()),
+            Outcome::Pass,
+        );
         // …and a prefix difference inside a fragment is still caught, at the right path.
-        let v = evaluate(&assert_xml(frag, false), &out(r#"<p:a xmlns:p="urn:p"/>text<r:b xmlns:r="urn:q"/>"#), &cx());
+        let v = evaluate(
+            &assert_xml(frag, false),
+            &out(r#"<p:a xmlns:p="urn:p"/>text<r:b xmlns:r="urn:q"/>"#),
+            &cx(),
+        );
         check_ns_mismatch(v, "element prefix", &["/q:b[1]"]);
     }
 
@@ -896,7 +1149,10 @@ pub mod self_test {
         let v = evaluate(&a, &out(&format!("<r>{emoji}B</r>")), &cx());
         check(v.clone(), Outcome::Fail);
         let m = v.message.unwrap_or_default();
-        assert!(m.starts_with("assert-xml mismatch at byte "), "unexpected message: {m}");
+        assert!(
+            m.starts_with("assert-xml mismatch at byte "),
+            "unexpected message: {m}"
+        );
         // Also exercise the helper directly at every offset in and around a 4-byte character.
         let s = format!("ab{emoji}cd");
         for at in 0..=s.len() + 4 {
@@ -913,8 +1169,14 @@ pub mod self_test {
         std::panic::set_hook(hook);
         check(v.clone(), Outcome::HarnessError);
         let m = v.message.unwrap_or_default();
-        assert!(m.contains("panic while evaluating assertions"), "unexpected message: {m}");
-        assert!(m.contains("boom in an assertion"), "the panic message is lost: {m}");
+        assert!(
+            m.contains("panic while evaluating assertions"),
+            "unexpected message: {m}"
+        );
+        assert!(
+            m.contains("boom in an assertion"),
+            "the panic message is lost: {m}"
+        );
         // The guard must be transparent when nothing panics.
         check(guard(Verdict::pass), Outcome::Pass);
     }
@@ -925,64 +1187,166 @@ pub mod self_test {
         for a in [
             Assertion::AssertWarning,
             Assertion::AssertCount("2".into()),
-            Assertion::AssertType { xpath: "document-node()".into(), ns: vec![] },
-            Assertion::AssertDeepEq { xpath: "1234,5678".into(), ns: vec![] },
-            Assertion::AssertPermutation { xpath: "1,2".into(), ns: vec![] },
+            Assertion::AssertType {
+                xpath: "document-node()".into(),
+                ns: vec![],
+            },
+            Assertion::AssertDeepEq {
+                xpath: "1234,5678".into(),
+                ns: vec![],
+            },
+            Assertion::AssertPermutation {
+                xpath: "1,2".into(),
+                ns: vec![],
+            },
             Assertion::AllOf(Vec::new()),
-            Assertion::Error { code: String::new() },
+            Assertion::Error {
+                code: String::new(),
+            },
         ] {
             check(evaluate(&a, &o, &cx()), Outcome::HarnessError);
         }
         // `<not>` must not be satisfied by an unrelated failure of the transformation.
-        let err = RunOutput { error: Some(xslt2::XsltError::new("XTDE0030", "boom")), ..Default::default() };
-        let n = Assertion::Not(Box::new(Assertion::Assert { xpath: "true()".into(), ns: vec![] }));
+        let err = RunOutput {
+            error: Some(xslt2::XsltError::new("XTDE0030", "boom")),
+            ..Default::default()
+        };
+        let n = Assertion::Not(Box::new(Assertion::Assert {
+            xpath: "true()".into(),
+            ns: vec![],
+        }));
         check(evaluate(&n, &err, &cx()), Outcome::Fail);
         // …but it still works when it is an error the case is talking about.
-        let n = Assertion::Not(Box::new(Assertion::Error { code: "XTSE0010".into() }));
+        let n = Assertion::Not(Box::new(Assertion::Error {
+            code: "XTSE0010".into(),
+        }));
         check(evaluate(&n, &err, &cx()), Outcome::Pass);
         // A whitespace-only result is a text node, not an empty sequence.
-        check(evaluate(&Assertion::AssertEmpty, &out("   "), &cx()), Outcome::Fail);
-        check(evaluate(&Assertion::AssertEmpty, &out("\n"), &cx()), Outcome::Pass);
+        check(
+            evaluate(&Assertion::AssertEmpty, &out("   "), &cx()),
+            Outcome::Fail,
+        );
+        check(
+            evaluate(&Assertion::AssertEmpty, &out("\n"), &cx()),
+            Outcome::Pass,
+        );
         // A relative result-document URI matches only at a path-segment boundary.
         assert!(result_document_uri_matches("file:///t/out.xml", "out.xml"));
         assert!(result_document_uri_matches("out.xml", "out.xml"));
-        assert!(!result_document_uri_matches("file:///t/checkout.xml", "out.xml"));
+        assert!(!result_document_uri_matches(
+            "file:///t/checkout.xml",
+            "out.xml"
+        ));
     }
 
     fn error_assertions() {
-        let err = RunOutput { error: Some(xslt2::XsltError::new("XTSE0010", "bad")), ..Default::default() };
-        check(evaluate(&Assertion::Error { code: "XTSE0010".into() }, &err, &cx()), Outcome::Pass);
-        check(evaluate(&Assertion::Error { code: "*".into() }, &err, &cx()), Outcome::Pass);
-        check(evaluate(&Assertion::Error { code: "XTSE0020".into() }, &err, &cx()), Outcome::WrongError);
-        check(evaluate(&Assertion::Error { code: "XTSE0010".into() }, &out("<a/>"), &cx()), Outcome::Fail);
-        let a = Assertion::Assert { xpath: "true()".into(), ns: vec![] };
+        let err = RunOutput {
+            error: Some(xslt2::XsltError::new("XTSE0010", "bad")),
+            ..Default::default()
+        };
+        check(
+            evaluate(
+                &Assertion::Error {
+                    code: "XTSE0010".into(),
+                },
+                &err,
+                &cx(),
+            ),
+            Outcome::Pass,
+        );
+        check(
+            evaluate(&Assertion::Error { code: "*".into() }, &err, &cx()),
+            Outcome::Pass,
+        );
+        check(
+            evaluate(
+                &Assertion::Error {
+                    code: "XTSE0020".into(),
+                },
+                &err,
+                &cx(),
+            ),
+            Outcome::WrongError,
+        );
+        check(
+            evaluate(
+                &Assertion::Error {
+                    code: "XTSE0010".into(),
+                },
+                &out("<a/>"),
+                &cx(),
+            ),
+            Outcome::Fail,
+        );
+        let a = Assertion::Assert {
+            xpath: "true()".into(),
+            ns: vec![],
+        };
         check(evaluate(&a, &err, &cx()), Outcome::Fail);
-        let any = Assertion::AnyOf(vec![Assertion::Error { code: "XTSE0020".into() }, Assertion::Error { code: "XTSE0010".into() }]);
+        let any = Assertion::AnyOf(vec![
+            Assertion::Error {
+                code: "XTSE0020".into(),
+            },
+            Assertion::Error {
+                code: "XTSE0010".into(),
+            },
+        ]);
         check(evaluate(&any, &err, &cx()), Outcome::Pass);
     }
 
     fn string_value_and_serialization_matches() {
-        let a = Assertion::AssertStringValue { expected: " a  b ".into(), normalize_space: true };
-        check(evaluate(&a, &out("<d>a <e>b</e></d>"), &cx()), Outcome::Pass);
-        let a = Assertion::SerializationMatches { regex: "^<d>a\\s".into(), flags: "".into(), file: None };
+        let a = Assertion::AssertStringValue {
+            expected: " a  b ".into(),
+            normalize_space: true,
+        };
+        check(
+            evaluate(&a, &out("<d>a <e>b</e></d>"), &cx()),
+            Outcome::Pass,
+        );
+        let a = Assertion::SerializationMatches {
+            regex: "^<d>a\\s".into(),
+            flags: "".into(),
+            file: None,
+        };
         let v = evaluate(&a, &out("<d>a <e>b</e></d>"), &cx());
         check(v.clone(), Outcome::Pass);
-        let a = Assertion::SerializationMatches { regex: "^<D/".into(), flags: "i".into(), file: None };
+        let a = Assertion::SerializationMatches {
+            regex: "^<D/".into(),
+            flags: "i".into(),
+            file: None,
+        };
         check(evaluate(&a, &out("<d/>"), &cx()), Outcome::Pass);
     }
 
     fn result_document_and_message() {
         let mut o = out("<a/>");
-        o.secondary.push(("file:///tmp/out/x.xml".into(), ResultDocument { serialized: "<r>1</r>".into() }));
+        o.secondary.push((
+            "file:///tmp/out/x.xml".into(),
+            ResultDocument {
+                serialized: "<r>1</r>".into(),
+            },
+        ));
         o.messages.push("<m>hi</m>".into());
-        let a = Assertion::AssertResultDocument { uri: "x.xml".into(), inner: Box::new(Assertion::Assert { xpath: "/r = 1".into(), ns: vec![] }) };
+        let a = Assertion::AssertResultDocument {
+            uri: "x.xml".into(),
+            inner: Box::new(Assertion::Assert {
+                xpath: "/r = 1".into(),
+                ns: vec![],
+            }),
+        };
         check(evaluate(&a, &o, &cx()), Outcome::Pass);
-        let a = Assertion::AssertMessage(Box::new(Assertion::AssertStringValue { expected: "hi".into(), normalize_space: false }));
+        let a = Assertion::AssertMessage(Box::new(Assertion::AssertStringValue {
+            expected: "hi".into(),
+            normalize_space: false,
+        }));
         check(evaluate(&a, &o, &cx()), Outcome::Pass);
     }
 
     fn namespaces_from_assertion_scope() {
-        let a = Assertion::Assert { xpath: "/x:doc/@x:a = 'v'".into(), ns: vec![("x".into(), "urn:x".into())] };
+        let a = Assertion::Assert {
+            xpath: "/x:doc/@x:a = 'v'".into(),
+            ns: vec![("x".into(), "urn:x".into())],
+        };
         let v = evaluate(&a, &out(r#"<p:doc xmlns:p="urn:x" p:a="v"/>"#), &cx());
         check(v.clone(), Outcome::Pass);
     }
@@ -991,11 +1355,20 @@ pub mod self_test {
     fn error_codes_compare_by_local_part() {
         assert!(code_matches("XTSE0010", "XTSE0010"));
         assert!(code_matches("err:XTSE0010", "XTSE0010"));
-        assert!(code_matches("Q{http://www.w3.org/2005/xqt-errors}XTDE1420", "XTDE1420"));
-        assert!(code_matches("Q{http://example.com/err}XXXX8888", "my:XXXX8888"));
+        assert!(code_matches(
+            "Q{http://www.w3.org/2005/xqt-errors}XTDE1420",
+            "XTDE1420"
+        ));
+        assert!(code_matches(
+            "Q{http://example.com/err}XXXX8888",
+            "my:XXXX8888"
+        ));
         assert!(code_matches("Q{}XX99", "XX99"));
         assert!(code_matches("*", "anything"));
-        assert!(!code_matches("Q{http://www.w3.org/2005/xqt-errors}XTDE1420", "XTDE1425"));
+        assert!(!code_matches(
+            "Q{http://www.w3.org/2005/xqt-errors}XTDE1420",
+            "XTDE1425"
+        ));
         assert!(!code_matches("", "XTSE0010"));
     }
 

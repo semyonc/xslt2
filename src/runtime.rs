@@ -21,8 +21,8 @@ use xsd_schema::document::{BufferDocument, BufferDocumentOptions};
 use xsd_schema::navigator::{DomNavigator, DomNodeType, NamespaceAxisScope};
 use xsd_schema::types::{XmlAtomicValue, XmlTypeCode, XmlValue, XmlValueKind};
 use xsd_schema::xpath::functions::{
-    atomize_sequence, effective_boolean_value, BuiltinEvaluator, FunctionEvaluator,
-    FunctionHandle, XPathValue,
+    atomize_sequence, effective_boolean_value, BuiltinEvaluator, FunctionEvaluator, FunctionHandle,
+    XPathValue,
 };
 use xsd_schema::xpath::{DynamicContext, XPathError, XmlItem};
 
@@ -33,12 +33,11 @@ use crate::names::{is_ncname, split_qname, QName, XML_NS, XSLT_NS};
 use crate::output::OutputMethod;
 use crate::pattern::{Anchor, Connector, NodeTest, PathPattern, Pattern, PatternAxis, PatternStep};
 use crate::receiver::{
-    ComplexContentNormalizer, CopyNamespaces, Name, Nav, Receiver, ResultBuilder,
-    SequenceCollector,
+    ComplexContentNormalizer, CopyNamespaces, Name, Nav, Receiver, ResultBuilder, SequenceCollector,
 };
 use crate::resolver::{self, FileResolver, Resolver};
-use crate::whitespace;
 use crate::store::{DocId, DocumentStore};
+use crate::whitespace;
 
 /// What a caller can change about one run.
 pub struct TransformOptions {
@@ -132,7 +131,9 @@ pub struct Frame<'t> {
 
 impl<'t> Frame<'t> {
     pub fn with_slots(n: usize) -> Self {
-        Self { slots: (0..n).map(|_| None).collect() }
+        Self {
+            slots: (0..n).map(|_| None).collect(),
+        }
     }
 
     pub fn set(&mut self, slot: usize, value: XPathValue<Nav<'t>>) {
@@ -255,7 +256,9 @@ impl<'a> CompiledStylesheet<'a> {
     where
         'a: 't,
     {
-        let globals = (0..self.globals().len()).map(|_| GlobalSlot::Unevaluated).collect();
+        let globals = (0..self.globals().len())
+            .map(|_| GlobalSlot::Unevaluated)
+            .collect();
         Transformation {
             sheet: self,
             store: RefCell::new(DocumentStore::new(arena, self.names())),
@@ -565,7 +568,10 @@ impl<'a, 't> Transformation<'a, 't> {
         let doc = out.into_inner().finish()?;
         let id = self.store.borrow_mut().insert(doc, None);
         let primary = self.store.borrow().get(id).map(|d| d.doc);
-        Ok(Outcome { primary, messages: self.take_messages() })
+        Ok(Outcome {
+            primary,
+            messages: self.take_messages(),
+        })
     }
 
     fn run_entry(
@@ -644,7 +650,12 @@ impl<'a, 't> Transformation<'a, 't> {
         match &instruction.kind {
             InstructionKind::Text { text, .. } => out.text(text, false),
 
-            InstructionKind::ValueOf { value, separator, first_item_only, .. } => {
+            InstructionKind::ValueOf {
+                value,
+                separator,
+                first_item_only,
+                ..
+            } => {
                 let separator = match separator {
                     Some(avt) => Some(self.avt(avt, frame, cx)?),
                     None => None,
@@ -706,13 +717,22 @@ impl<'a, 't> Transformation<'a, 't> {
                 Ok(())
             }
 
-            InstructionKind::Variable { slot, value, as_type, .. } => {
+            InstructionKind::Variable {
+                slot,
+                value,
+                as_type,
+                ..
+            } => {
                 let value = self.var_value(value, as_type.as_ref(), frame, cx, codes::XTTE0570)?;
                 frame.set(*slot, value);
                 Ok(())
             }
 
-            InstructionKind::ApplyTemplates { select, mode, params } => {
+            InstructionKind::ApplyTemplates {
+                select,
+                mode,
+                params,
+            } => {
                 let items = match select {
                     Some(id) => self.eval_expr(*id, frame, cx)?.into_vec(),
                     None => self.children_of_focus(cx)?,
@@ -739,9 +759,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 if !self.sheet.is_backwards(instruction.ctx) {
                     let rule = self.sheet.template(id);
                     for param in params {
-                        if !param.tunnel
-                            && !rule.params.iter().any(|p| p.name == param.name)
-                        {
+                        if !param.tunnel && !rule.params.iter().any(|p| p.name == param.name) {
                             return Err(XsltError::new(
                                 codes::XTSE0680,
                                 format!(
@@ -756,7 +774,13 @@ impl<'a, 't> Transformation<'a, 't> {
                 self.call_template(id, params, cx, out)
             }
 
-            InstructionKind::LiteralElement { name, namespaces, attrs, attr_sets, body } => {
+            InstructionKind::LiteralElement {
+                name,
+                namespaces,
+                attrs,
+                attr_sets,
+                body,
+            } => {
                 out.start_element(name, None, false)?;
                 for (prefix, uri) in namespaces {
                     out.namespace(prefix, uri)?;
@@ -771,7 +795,13 @@ impl<'a, 't> Transformation<'a, 't> {
                 out.end_element()
             }
 
-            InstructionKind::Element { name, namespace, attr_sets, body, .. } => {
+            InstructionKind::Element {
+                name,
+                namespace,
+                attr_sets,
+                body,
+                ..
+            } => {
                 let lexical = self.avt(name, frame, cx)?;
                 let (prefix, local) = split_qname(whitespace::trim(&lexical));
                 if !is_ncname(local) || (!prefix.is_empty() && !is_ncname(prefix)) {
@@ -782,14 +812,12 @@ impl<'a, 't> Transformation<'a, 't> {
                 }
                 let uri = match namespace {
                     Some(avt) => self.avt(avt, frame, cx)?,
-                    None => self
-                        .static_prefix(instruction, prefix)
-                        .ok_or_else(|| {
-                            XsltError::new(
-                                codes::XTDE0830,
-                                format!("the prefix {prefix:?} of {lexical:?} is not in scope"),
-                            )
-                        })?,
+                    None => self.static_prefix(instruction, prefix).ok_or_else(|| {
+                        XsltError::new(
+                            codes::XTDE0830,
+                            format!("the prefix {prefix:?} of {lexical:?} is not in scope"),
+                        )
+                    })?,
                 };
                 let prefix = if uri.is_empty() { "" } else { prefix };
                 out.start_element(&Name::qualified(prefix, local, &uri), None, false)?;
@@ -799,7 +827,12 @@ impl<'a, 't> Transformation<'a, 't> {
                 out.end_element()
             }
 
-            InstructionKind::Attribute { name, namespace, separator, value } => {
+            InstructionKind::Attribute {
+                name,
+                namespace,
+                separator,
+                value,
+            } => {
                 let lexical = self.avt(name, frame, cx)?;
                 let (prefix, local) = split_qname(whitespace::trim(&lexical));
                 if !is_ncname(local) || (!prefix.is_empty() && !is_ncname(prefix)) {
@@ -894,11 +927,17 @@ impl<'a, 't> Transformation<'a, 't> {
                 out.end_document()
             }
 
-            InstructionKind::Copy { copy_namespaces, attr_sets, body, .. } => {
-                self.copy_shallow(*copy_namespaces, attr_sets, body, frame, cx, out)
-            }
+            InstructionKind::Copy {
+                copy_namespaces,
+                attr_sets,
+                body,
+                ..
+            } => self.copy_shallow(*copy_namespaces, attr_sets, body, frame, cx, out),
 
-            InstructionKind::CopyOf { select, copy_namespaces } => {
+            InstructionKind::CopyOf {
+                select,
+                copy_namespaces,
+            } => {
                 let value = self.eval_expr(*select, frame, cx)?;
                 let scope = copy_scope(*copy_namespaces);
                 for item in value.into_vec() {
@@ -911,7 +950,11 @@ impl<'a, 't> Transformation<'a, 't> {
                 Ok(())
             }
 
-            InstructionKind::Message { select, body, terminate } => {
+            InstructionKind::Message {
+                select,
+                body,
+                terminate,
+            } => {
                 let terminate = self.avt(terminate, frame, cx)?;
                 let terminate = crate::names::parse_yes_no(&terminate, "terminate")?;
                 let content = self.message_content(*select, body, frame, cx)?;
@@ -1058,7 +1101,8 @@ impl<'a, 't> Transformation<'a, 't> {
     ) -> Result<(), XsltError> {
         // > [ERR XTTE0520] It is a type error if the sequence returned by the
         // > select expression contains an item that is not a node.
-        if let Some(XmlItem::Atomic(value)) = items.iter().find(|i| matches!(i, XmlItem::Atomic(_))) {
+        if let Some(XmlItem::Atomic(value)) = items.iter().find(|i| matches!(i, XmlItem::Atomic(_)))
+        {
             return Err(XsltError::new(
                 codes::XTTE0520,
                 format!(
@@ -1128,7 +1172,9 @@ impl<'a, 't> Transformation<'a, 't> {
         item: &XmlItem<Nav<'t>>,
         mode: &ModeKey,
     ) -> Result<Option<RuleId>, XsltError> {
-        let XmlItem::Node(nav) = item else { return Ok(None) };
+        let XmlItem::Node(nav) = item else {
+            return Ok(None);
+        };
         let candidates = self.candidates(nav, mode);
         let mut matched: Option<RuleId> = None;
         for id in candidates {
@@ -1174,7 +1220,9 @@ impl<'a, 't> Transformation<'a, 't> {
     /// Whether one rule — one alternative of one declaration's pattern —
     /// matches `nav`.
     fn rule_matches(&self, id: RuleId, nav: &Nav<'t>) -> Result<bool, XsltError> {
-        let Some(pattern_id) = self.sheet.rule(id).pattern else { return Ok(false) };
+        let Some(pattern_id) = self.sheet.rule(id).pattern else {
+            return Ok(false);
+        };
         let pattern = self.sheet.pattern(pattern_id);
         let Some(alternative) = pattern.alternatives.get(id.alternative as usize) else {
             return Ok(false);
@@ -1390,9 +1438,7 @@ impl<'a, 't> Transformation<'a, 't> {
                     .map(|(_, value, _)| value.clone())
             };
             let value = match value {
-                Some(value) => {
-                    self.convert(value, param.as_type.as_ref(), codes::XTTE0590)?
-                }
+                Some(value) => self.convert(value, param.as_type.as_ref(), codes::XTTE0590)?,
                 None if param.required => {
                     // §10.1.1 distinguishes the three ways a template can be
                     // entered: XTSE0690 for xsl:call-template (a static
@@ -1405,13 +1451,20 @@ impl<'a, 't> Transformation<'a, 't> {
                     };
                     return Err(XsltError::new(
                         code,
-                        format!("no value was supplied for the required parameter {}", param.name),
+                        format!(
+                            "no value was supplied for the required parameter {}",
+                            param.name
+                        ),
                     )
                     .or_location(&param.loc));
                 }
-                None => {
-                    self.var_value(&param.value, param.as_type.as_ref(), frame, cx, codes::XTTE0590)?
-                }
+                None => self.var_value(
+                    &param.value,
+                    param.as_type.as_ref(),
+                    frame,
+                    cx,
+                    codes::XTTE0590,
+                )?,
             };
             frame.set(param.slot, value);
         }
@@ -1426,8 +1479,13 @@ impl<'a, 't> Transformation<'a, 't> {
     ) -> Result<Vec<(QName, XPathValue<Nav<'t>>, bool)>, XsltError> {
         let mut out = Vec::with_capacity(params.len());
         for param in params {
-            let value =
-                self.var_value(&param.value, param.as_type.as_ref(), frame, cx, codes::XTTE0590)?;
+            let value = self.var_value(
+                &param.value,
+                param.as_type.as_ref(),
+                frame,
+                cx,
+                codes::XTTE0590,
+            )?;
             out.push((param.name.clone(), value, param.tunnel));
         }
         Ok(out)
@@ -1507,7 +1565,9 @@ impl<'a, 't> Transformation<'a, 't> {
         as_type: Option<&TypeCheck>,
         code: &'static str,
     ) -> Result<XPathValue<Nav<'t>>, XsltError> {
-        let Some(check) = as_type else { return Ok(value) };
+        let Some(check) = as_type else {
+            return Ok(value);
+        };
         if self.instance_of(&value, check)? {
             return Ok(value);
         }
@@ -1517,15 +1577,13 @@ impl<'a, 't> Transformation<'a, 't> {
             // expected type; a numeric item is promoted to `xs:double` or
             // `xs:float`, and `xs:anyURI` to `xs:string`. Nothing else is
             // converted, so a genuine type mismatch stays one.
-            let atomized = atomize_sequence(value.clone())
-                .map_err(|e| self.xpath_error(e))?;
+            let atomized = atomize_sequence(value.clone()).map_err(|e| self.xpath_error(e))?;
             let mut items: Vec<XmlItem<Nav<'t>>> = Vec::with_capacity(atomized.len());
             for atom in atomized {
                 let needs_cast = atom.type_code == XmlTypeCode::UntypedAtomic
                     || (atom.type_code.is_numeric()
                         && matches!(check.item_type.as_str(), "xs:double" | "xs:float"))
-                    || (atom.type_code == XmlTypeCode::AnyUri
-                        && check.item_type == "xs:string");
+                    || (atom.type_code == XmlTypeCode::AnyUri && check.item_type == "xs:string");
                 let item = XPathValue::from_atomic(atom);
                 let converted = match (&check.cast, needs_cast) {
                     (Some(cast), true) => match self.apply_probe(*cast, item.clone()) {
@@ -1587,12 +1645,7 @@ impl<'a, 't> Transformation<'a, 't> {
 
     // ── Expressions ──────────────────────────────────────────────────────
 
-    fn ebv(
-        &self,
-        id: ExprId,
-        frame: &Frame<'t>,
-        cx: &XsltContext<'t>,
-    ) -> Result<bool, XsltError> {
+    fn ebv(&self, id: ExprId, frame: &Frame<'t>, cx: &XsltContext<'t>) -> Result<bool, XsltError> {
         let value = self.eval_expr(id, frame, cx)?;
         effective_boolean_value(&value).map_err(|e| self.xpath_error(e))
     }
@@ -1618,14 +1671,15 @@ impl<'a, 't> Transformation<'a, 't> {
         self.parked_error.borrow_mut().take();
 
         // Bind only the slots the expression actually references (§7.5).
-        let mut bindings: Vec<(u32, XPathValue<Nav<'t>>)> =
-            Vec::with_capacity(compiled.vars.len());
+        let mut bindings: Vec<(u32, XPathValue<Nav<'t>>)> = Vec::with_capacity(compiled.vars.len());
         for (slot, location) in compiled.vars.iter().enumerate() {
             if !compiled.expr.references_external_var(slot as u32) {
                 continue;
             }
             let value = match location {
-                VarLocation::Local(index) => frame.get(*index).cloned().unwrap_or_else(XPathValue::empty),
+                VarLocation::Local(index) => {
+                    frame.get(*index).cloned().unwrap_or_else(XPathValue::empty)
+                }
                 VarLocation::Global(index) => self.global(*index)?,
             };
             bindings.push((slot as u32, value));
@@ -1711,12 +1765,21 @@ impl<'a, 't> Transformation<'a, 't> {
             if global.required {
                 return Err(XsltError::new(
                     codes::XTDE0050,
-                    format!("no value was supplied for the required parameter {}", global.name),
+                    format!(
+                        "no value was supplied for the required parameter {}",
+                        global.name
+                    ),
                 ));
             }
         }
         let mut frame = Frame::with_slots(global.frame_size);
-        self.var_value(&global.value, global.as_type.as_ref(), &mut frame, &cx, codes::XTTE0570)
+        self.var_value(
+            &global.value,
+            global.as_type.as_ref(),
+            &mut frame,
+            &cx,
+            codes::XTTE0570,
+        )
     }
 
     /// The string an atomized item contributes to simple content (§5.7.2
@@ -1731,12 +1794,7 @@ impl<'a, 't> Transformation<'a, 't> {
     }
 
     /// §5.6: the effective value of an attribute value template.
-    fn avt(
-        &self,
-        avt: &Avt,
-        frame: &Frame<'t>,
-        cx: &XsltContext<'t>,
-    ) -> Result<String, XsltError> {
+    fn avt(&self, avt: &Avt, frame: &Frame<'t>, cx: &XsltContext<'t>) -> Result<String, XsltError> {
         if let Some(text) = avt.as_literal() {
             return Ok(text.to_string());
         }
@@ -1749,8 +1807,7 @@ impl<'a, 't> Transformation<'a, 't> {
                     // §5.7.2: the same simple-content rules, with a single
                     // space as the separator.
                     let atoms = atomize_sequence(value).map_err(|e| self.xpath_error(e))?;
-                    let strings: Vec<String> =
-                        atoms.iter().map(|a| self.atom_string(a)).collect();
+                    let strings: Vec<String> = atoms.iter().map(|a| self.atom_string(a)).collect();
                     out.push_str(&strings.join(" "));
                 }
             }
@@ -1997,10 +2054,7 @@ impl<'a, 't> Transformation<'a, 't> {
 
     // ── Helpers the function evaluator needs ─────────────────────────────
 
-    fn children_of_focus(
-        &self,
-        cx: &XsltContext<'t>,
-    ) -> Result<Vec<XmlItem<Nav<'t>>>, XsltError> {
+    fn children_of_focus(&self, cx: &XsltContext<'t>) -> Result<Vec<XmlItem<Nav<'t>>>, XsltError> {
         match &cx.item {
             Some(XmlItem::Node(nav)) => Ok(children_of(nav)),
             Some(XmlItem::Atomic(_)) => Err(XsltError::new(
@@ -2135,7 +2189,9 @@ impl<'n> SimpleContentCollector<'n> {
     }
 
     fn push_text(&mut self, s: &str) {
-        self.pending_text.get_or_insert_with(String::new).push_str(s);
+        self.pending_text
+            .get_or_insert_with(String::new)
+            .push_str(s);
     }
 
     fn push_atomic(&mut self, s: String) {
@@ -2306,10 +2362,7 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
     /// This is **not** `self.cx.item`: the XSLT-level focus is the focus of the
     /// innermost *instruction*, which inside a predicate or on the right of `/`
     /// is a different node. Only `current()` (§16.6.1) wants that one.
-    fn context_item(
-        &self,
-        ctx: &DynamicContext<'_, Nav<'t>>,
-    ) -> Option<XmlItem<Nav<'t>>> {
+    fn context_item(&self, ctx: &DynamicContext<'_, Nav<'t>>) -> Option<XmlItem<Nav<'t>>> {
         ctx.context_item.clone()
     }
 
@@ -2407,7 +2460,9 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                     None => self.context_item(ctx),
                     Some(value) => value.first().cloned(),
                 };
-                let Some(XmlItem::Node(nav)) = node else { return Ok(XPathValue::empty()) };
+                let Some(XmlItem::Node(nav)) = node else {
+                    return Ok(XPathValue::empty());
+                };
                 if nav.node_type() != DomNodeType::Root {
                     return Ok(XPathValue::empty());
                 }
@@ -2745,7 +2800,9 @@ fn single_string<N: DomNavigator>(value: Option<&XPathValue<N>>) -> Option<Strin
 /// (`functions/mod.rs`, documented there as a limitation), so the value is
 /// materialized instead.
 fn string_args<N: DomNavigator>(value: Option<&XPathValue<N>>) -> Result<Vec<String>, XsltError> {
-    let Some(value) = value else { return Ok(Vec::new()) };
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
     Ok(value
         .clone()
         .into_vec()
@@ -2866,5 +2923,9 @@ pub fn source_options() -> BufferDocumentOptions {
 
 /// Where an error without its own location is reported.
 pub fn unknown_location() -> Location {
-    Location { module_uri: None, line: 0, column: 0 }
+    Location {
+        module_uri: None,
+        line: 0,
+        column: 0,
+    }
 }

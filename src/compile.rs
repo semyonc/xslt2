@@ -23,12 +23,11 @@ use crate::output::{parse_method, OutputDefinition};
 use crate::pattern::{self, IndexKey, Pattern, PatternSink};
 use crate::receiver::{Name, Nav};
 use crate::resolver::{self, FileResolver, Resolver};
-use crate::whitespace;
 use crate::stylesheet::{
-    attr_local, attributes, in_scope_namespaces, is_stripped_stylesheet_text,
-    static_context_of, CompatMode, DeclKind, Loader, Module, ModuleId, ModuleSet,
-    StaticContextId, StaticContexts,
+    attr_local, attributes, in_scope_namespaces, is_stripped_stylesheet_text, static_context_of,
+    CompatMode, DeclKind, Loader, Module, ModuleId, ModuleSet, StaticContextId, StaticContexts,
 };
+use crate::whitespace;
 
 /// The standard attributes §3.5 allows on every XSLT element.
 const STANDARD_ATTRS: &[&str] = &[
@@ -55,7 +54,11 @@ pub struct Compiler<'a> {
 impl<'a> Compiler<'a> {
     /// A compiler that reads modules from the file system.
     pub fn new(names: &'a NameTable, functions: &'a XsltFunctions) -> Self {
-        Self { names, functions, resolver: Arc::new(FileResolver) }
+        Self {
+            names,
+            functions,
+            resolver: Arc::new(FileResolver),
+        }
     }
 
     /// Where `xsl:include`, `xsl:import` and `document()` read from.
@@ -89,17 +92,12 @@ impl<'a> Compiler<'a> {
         self.run(base_uri, Some(source.to_string()))
     }
 
-    fn run(
-        &self,
-        uri: &str,
-        text: Option<String>,
-    ) -> Result<CompiledStylesheet<'a>, XsltError> {
+    fn run(&self, uri: &str, text: Option<String>) -> Result<CompiledStylesheet<'a>, XsltError> {
         let arena = Bump::new();
         // SAFETY-free lifetime note: `modules` borrows `arena`, and every value
         // that escapes this function is owned, so the arena dies here.
-        let modules =
-            Loader::new(&arena, self.names, self.resolver.as_ref(), self.functions)
-                .load(uri, text)?;
+        let modules = Loader::new(&arena, self.names, self.resolver.as_ref(), self.functions)
+            .load(uri, text)?;
         let mut builder = Builder::new(self.names, self.functions, &modules);
         builder.build()
     }
@@ -155,11 +153,7 @@ struct Builder<'a, 'm, 't> {
 }
 
 impl<'a, 'm, 't> Builder<'a, 'm, 't> {
-    fn new(
-        names: &'a NameTable,
-        functions: &'a XsltFunctions,
-        modules: &'m ModuleSet<'t>,
-    ) -> Self {
+    fn new(names: &'a NameTable, functions: &'a XsltFunctions, modules: &'m ModuleSet<'t>) -> Self {
         Self {
             names,
             functions,
@@ -204,7 +198,11 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             exprs: std::mem::take(&mut self.exprs),
             patterns: std::mem::take(&mut self.patterns),
             templates: std::mem::take(&mut self.templates),
-            named: self.named.iter().map(|(k, (id, _))| (k.clone(), *id)).collect(),
+            named: self
+                .named
+                .iter()
+                .map(|(k, (id, _))| (k.clone(), *id))
+                .collect(),
             globals: std::mem::take(&mut self.globals),
             global_index: std::mem::take(&mut self.global_index),
             modes,
@@ -345,9 +343,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             match child.node_type() {
                 DomNodeType::Element if self.excluded(&child, module_id) => {}
                 DomNodeType::Element => return true,
-                kind if kind.is_text_like() && !is_stripped_stylesheet_text(&child) => {
-                    return true
-                }
+                kind if kind.is_text_like() && !is_stripped_stylesheet_text(&child) => return true,
                 _ => {}
             }
             if !child.move_to_next_sibling() {
@@ -442,16 +438,11 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         out
     }
 
-    fn compile_expr(
-        &mut self,
-        source: &str,
-        ctx: StaticContextId,
-    ) -> Result<ExprId, XsltError> {
+    fn compile_expr(&mut self, source: &str, ctx: StaticContextId) -> Result<ExprId, XsltError> {
         let visible = self.visible_vars(ctx);
         let names: Vec<&str> = visible.iter().map(|(n, _)| n.as_str()).collect();
         let vars: Vec<VarLocation> = visible.iter().map(|(_, l)| *l).collect();
-        let compiled =
-            XPathExpr::compile_with_vars(source, &self.contexts[ctx.0 as usize], &names);
+        let compiled = XPathExpr::compile_with_vars(source, &self.contexts[ctx.0 as usize], &names);
         let (expr, unavailable) = match compiled {
             Ok(expr) => (expr, None),
             // §3.9 / §9.10 row 3: a call to a function the processor does not
@@ -470,16 +461,17 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 ))
             }
         };
-        self.exprs.push(CompiledExpr { expr, ctx, vars, unavailable });
+        self.exprs.push(CompiledExpr {
+            expr,
+            ctx,
+            vars,
+            unavailable,
+        });
         Ok(ExprId(self.exprs.len() as u32 - 1))
     }
 
     /// Compiles the `as` attribute of a variable, parameter or template.
-    fn compile_type(
-        &mut self,
-        text: &str,
-        ctx: StaticContextId,
-    ) -> Result<TypeCheck, XsltError> {
+    fn compile_type(&mut self, text: &str, ctx: StaticContextId) -> Result<TypeCheck, XsltError> {
         let text = whitespace::trim(text).to_string();
         let test = self.compile_probe(&format!("$value instance of {text}"), ctx, &text)?;
         // The item type, without its occurrence indicator.
@@ -490,7 +482,13 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         } else {
             None
         };
-        Ok(TypeCheck { text, test, cast, atomic, item_type: item })
+        Ok(TypeCheck {
+            text,
+            test,
+            cast,
+            atomic,
+            item_type: item,
+        })
     }
 
     /// Compiles a helper expression whose only variable is `$value`.
@@ -507,7 +505,12 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     format!("{what:?} is not a sequence type: {e}"),
                 )
             })?;
-        self.exprs.push(CompiledExpr { expr, ctx, vars: Vec::new(), unavailable: None });
+        self.exprs.push(CompiledExpr {
+            expr,
+            ctx,
+            vars: Vec::new(),
+            unavailable: None,
+        });
         Ok(ExprId(self.exprs.len() as u32 - 1))
     }
 
@@ -535,7 +538,11 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         )?;
 
         let sc = self.static_contexts.get(ctx).clone();
-        let mut sink = Sink { builder: self, ctx, sc };
+        let mut sink = Sink {
+            builder: self,
+            ctx,
+            sc,
+        };
         let pattern = pattern::parse(source, &mut sink)?;
         self.patterns.push(pattern);
         Ok(PatternId(self.patterns.len() as u32 - 1))
@@ -543,10 +550,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
 
     // ── Declarations (§7.3) ──────────────────────────────────────────────
 
-    fn declare_globals(
-        &mut self,
-        decls: &[(u32, ModuleId, Nav<'t>)],
-    ) -> Result<(), XsltError> {
+    fn declare_globals(&mut self, decls: &[(u32, ModuleId, Nav<'t>)]) -> Result<(), XsltError> {
         // Highest precedence wins; two at the top precedence is XTSE0630.
         let mut best: HashMap<QName, (u32, usize)> = HashMap::new();
         let mut entries: Vec<(QName, u32, ModuleId, Nav<'t>)> = Vec::new();
@@ -686,7 +690,9 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 "method" => target.method.set(parse_method(&value)?, precedence),
                 "version" => target.version.set(value, precedence),
                 "encoding" => target.encoding.set(value, precedence),
-                "indent" => target.indent.set(parse_yes_no(&value, "indent")?, precedence),
+                "indent" => target
+                    .indent
+                    .set(parse_yes_no(&value, "indent")?, precedence),
                 "omit-xml-declaration" => target
                     .omit_xml_declaration
                     .set(parse_yes_no(&value, "omit-xml-declaration")?, precedence),
@@ -701,8 +707,12 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 "doctype-system" => target.doctype_system.set(value, precedence),
                 "media-type" => target.media_type.set(value, precedence),
                 // Serialization parameters M1 does not act on but must accept.
-                "cdata-section-elements" | "escape-uri-attributes" | "include-content-type"
-                | "normalization-form" | "undeclare-prefixes" | "use-character-maps"
+                "cdata-section-elements"
+                | "escape-uri-attributes"
+                | "include-content-type"
+                | "normalization-form"
+                | "undeclare-prefixes"
+                | "use-character-maps"
                 | "byte-order-mark" => {}
                 other if STANDARD_ATTRS.contains(&other) => {}
                 other => {
@@ -813,10 +823,12 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         precedence: u32,
     ) -> Result<(), XsltError> {
         let module = self.modules.module(module_id);
-        let name = self.declared_name(nav, "name", ctx, module)?.ok_or_else(|| {
-            XsltError::new(codes::XTSE0010, "xsl:attribute-set has no name attribute")
-                .with_location(module.location(nav))
-        })?;
+        let name = self
+            .declared_name(nav, "name", ctx, module)?
+            .ok_or_else(|| {
+                XsltError::new(codes::XTSE0010, "xsl:attribute-set has no name attribute")
+                    .with_location(module.location(nav))
+            })?;
         let uses = self.qname_list(nav, "use-attribute-sets", ctx, module)?;
         self.frame_size = 0;
         let scope_mark = self.scope.len();
@@ -824,9 +836,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         let mut child = nav.clone();
         if child.move_to_first_child() {
             loop {
-                if child.node_type() == DomNodeType::Element
-                    && !self.excluded(&child, module_id)
-                {
+                if child.node_type() == DomNodeType::Element && !self.excluded(&child, module_id) {
                     if child.namespace_uri() == XSLT_NS && child.local_name() == "attribute" {
                         attributes.push(self.instruction(&child, module_id)?);
                     } else {
@@ -844,11 +854,14 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         }
         self.scope.truncate(scope_mark);
         let _ = precedence;
-        let entry = self.attribute_sets.entry(name.clone()).or_insert_with(|| AttributeSet {
-            name,
-            use_attribute_sets: Vec::new(),
-            attributes: Vec::new(),
-        });
+        let entry = self
+            .attribute_sets
+            .entry(name.clone())
+            .or_insert_with(|| AttributeSet {
+                name,
+                use_attribute_sets: Vec::new(),
+                attributes: Vec::new(),
+            });
         entry.use_attribute_sets.extend(uses);
         entry.attributes.extend(attributes);
         Ok(())
@@ -915,9 +928,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 Some((_, existing)) if *existing == precedence => {
                     return Err(XsltError::new(
                         codes::XTSE0660,
-                        format!(
-                            "two templates are named {name} with the same import precedence"
-                        ),
+                        format!("two templates are named {name} with the same import precedence"),
                     )
                     .with_location(loc));
                 }
@@ -955,7 +966,14 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         has_match: bool,
     ) -> Result<(Vec<ModeKey>, bool), XsltError> {
         let Some(text) = attr_local(nav, "mode") else {
-            return Ok((if has_match { vec![ModeKey::Default] } else { Vec::new() }, false));
+            return Ok((
+                if has_match {
+                    vec![ModeKey::Default]
+                } else {
+                    Vec::new()
+                },
+                false,
+            ));
         };
         if !has_match {
             return Err(XsltError::new(
@@ -1195,7 +1213,13 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         nav: &Nav<'t>,
     ) -> Instruction {
         let loc = self.modules.module(module_id).location(nav);
-        Instruction { kind, ctx, module: module_id, line: loc.line, column: loc.column }
+        Instruction {
+            kind,
+            ctx,
+            module: module_id,
+            line: loc.line,
+            column: loc.column,
+        }
     }
 
     fn instruction(
@@ -1227,7 +1251,10 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     ) -> Result<Instruction, XsltError> {
         match self.fallback_bodies(nav, module_id)? {
             Some(body) => Ok(self.wrap(
-                InstructionKind::Choose { whens: Vec::new(), otherwise: Some(body) },
+                InstructionKind::Choose {
+                    whens: Vec::new(),
+                    otherwise: Some(body),
+                },
                 ctx,
                 module_id,
                 nav,
@@ -1296,14 +1323,18 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 };
                 let mode = self.mode_ref(nav, ctx)?;
                 let params = self.with_params(nav, module_id)?;
-                Ok(InstructionKind::ApplyTemplates { select, mode, params })
+                Ok(InstructionKind::ApplyTemplates {
+                    select,
+                    mode,
+                    params,
+                })
             }
-            "apply-imports" => {
-                Ok(InstructionKind::ApplyImports { params: self.with_params(nav, module_id)? })
-            }
-            "next-match" => {
-                Ok(InstructionKind::NextMatch { params: self.with_params(nav, module_id)? })
-            }
+            "apply-imports" => Ok(InstructionKind::ApplyImports {
+                params: self.with_params(nav, module_id)?,
+            }),
+            "next-match" => Ok(InstructionKind::NextMatch {
+                params: self.with_params(nav, module_id)?,
+            }),
             "call-template" => {
                 let name = self.qname_attr(nav, "name", ctx, module)?.ok_or_else(|| {
                     XsltError::new(codes::XTSE0010, "xsl:call-template has no name attribute")
@@ -1352,7 +1383,10 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     .map(|v| parse_yes_no(&v, "disable-output-escaping"))
                     .transpose()?
                     .unwrap_or(false);
-                Ok(InstructionKind::Text { text: text_content(nav), disable_output_escaping: doe })
+                Ok(InstructionKind::Text {
+                    text: text_content(nav),
+                    disable_output_escaping: doe,
+                })
             }
             "sequence" => {
                 let select = match attr_local(nav, "select") {
@@ -1392,7 +1426,12 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     None => None,
                 };
                 let value = self.value_source(nav, module_id, ctx, codes::XTSE0840)?;
-                Ok(InstructionKind::Attribute { name, namespace, separator, value })
+                Ok(InstructionKind::Attribute {
+                    name,
+                    namespace,
+                    separator,
+                    value,
+                })
             }
             "namespace" => {
                 let name = self.required_avt(nav, "name", ctx, &loc)?;
@@ -1435,7 +1474,10 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     .map(|v| parse_yes_no(&v, "copy-namespaces"))
                     .transpose()?
                     .unwrap_or(true);
-                Ok(InstructionKind::CopyOf { select, copy_namespaces: copy_ns })
+                Ok(InstructionKind::CopyOf {
+                    select,
+                    copy_namespaces: copy_ns,
+                })
             }
             "variable" => {
                 let name = self.qname_attr(nav, "name", ctx, module)?.ok_or_else(|| {
@@ -1453,7 +1495,12 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     name: name.clone(),
                     location: VarLocation::Local(slot),
                 });
-                Ok(InstructionKind::Variable { slot, value, as_type, name })
+                Ok(InstructionKind::Variable {
+                    slot,
+                    value,
+                    as_type,
+                    name,
+                })
             }
             "param" => Err(XsltError::new(
                 codes::XTSE0010,
@@ -1470,7 +1517,11 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     None => None,
                 };
                 let body = self.sequence_constructor(nav, module_id)?;
-                Ok(InstructionKind::Message { select, body, terminate })
+                Ok(InstructionKind::Message {
+                    select,
+                    body,
+                    terminate,
+                })
             }
             "fallback" => Ok(InstructionKind::Fallback),
             "number" | "for-each-group" | "analyze-string" | "perform-sort" | "result-document"
@@ -1504,9 +1555,10 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         name: &str,
     ) -> InstructionKind {
         match self.fallback_bodies(nav, module_id) {
-            Ok(Some(body)) => {
-                InstructionKind::Choose { whens: Vec::new(), otherwise: Some(body) }
-            }
+            Ok(Some(body)) => InstructionKind::Choose {
+                whens: Vec::new(),
+                otherwise: Some(body),
+            },
             // §3.9: without a fallback, the error is signalled only if the
             // instruction is evaluated.
             _ => InstructionKind::NotImplemented {
@@ -1527,9 +1579,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         let mut child = nav.clone();
         if child.move_to_first_child() {
             loop {
-                if child.node_type() == DomNodeType::Element
-                    && !self.excluded(&child, module_id)
-                {
+                if child.node_type() == DomNodeType::Element && !self.excluded(&child, module_id) {
                     let module = self.modules.module(module_id);
                     let child_loc = module.location(&child);
                     if child.namespace_uri() != XSLT_NS {
@@ -1662,7 +1712,13 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         }
 
         let body = self.sequence_constructor(nav, module_id)?;
-        Ok(InstructionKind::LiteralElement { name, namespaces, attrs, attr_sets, body })
+        Ok(InstructionKind::LiteralElement {
+            name,
+            namespaces,
+            attrs,
+            attr_sets,
+            body,
+        })
     }
 
     /// §11.1.4: `xsl:namespace-alias` rewrites a literal result element's
@@ -1712,10 +1768,12 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 {
                     let module = self.modules.module(module_id);
                     let ctx = self.context_of(&child, module)?;
-                    let name = self.qname_attr(&child, "name", ctx, module)?.ok_or_else(|| {
-                        XsltError::new(codes::XTSE0010, "xsl:with-param has no name attribute")
-                            .with_location(module.location(&child))
-                    })?;
+                    let name = self
+                        .qname_attr(&child, "name", ctx, module)?
+                        .ok_or_else(|| {
+                            XsltError::new(codes::XTSE0010, "xsl:with-param has no name attribute")
+                                .with_location(module.location(&child))
+                        })?;
                     let as_type = match attr_local(&child, "as") {
                         Some(text) => Some(self.compile_type(&text, ctx)?),
                         None => None,
@@ -1865,7 +1923,9 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         ctx: StaticContextId,
         module: &Module<'t>,
     ) -> Result<Option<QName>, XsltError> {
-        let Some(text) = attr_local(nav, attr) else { return Ok(None) };
+        let Some(text) = attr_local(nav, attr) else {
+            return Ok(None);
+        };
         let name = self
             .resolve(&text, ctx, codes::XTSE0020)
             .map_err(|e| e.or_location(&module.location(nav)))?;
@@ -1879,7 +1939,9 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         ctx: StaticContextId,
         module: &Module<'t>,
     ) -> Result<Vec<QName>, XsltError> {
-        let Some(text) = attr_local(nav, attr) else { return Ok(Vec::new()) };
+        let Some(text) = attr_local(nav, attr) else {
+            return Ok(Vec::new());
+        };
         self.qname_list_value(&text, ctx)
             .map_err(|e| e.or_location(&module.location(nav)))
     }
@@ -1894,12 +1956,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             .collect()
     }
 
-    fn resolve(
-        &self,
-        name: &str,
-        ctx: StaticContextId,
-        code: &str,
-    ) -> Result<QName, XsltError> {
+    fn resolve(&self, name: &str, ctx: StaticContextId, code: &str) -> Result<QName, XsltError> {
         let sc = self.static_contexts.get(ctx);
         resolve_qname(name, |prefix| sc.resolve_prefix(prefix), code)
     }
@@ -1915,7 +1972,9 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         ctx: StaticContextId,
         module: &Module<'t>,
     ) -> Result<Option<QName>, XsltError> {
-        let Some(name) = self.qname_attr(nav, attr, ctx, module)? else { return Ok(None) };
+        let Some(name) = self.qname_attr(nav, attr, ctx, module)? else {
+            return Ok(None);
+        };
         // `xsl:initial-template` is the conventional default entry point and
         // is the one name in the XSLT namespace a stylesheet may declare.
         let is_entry_point = name.uri == XSLT_NS && name.local == "initial-template";
@@ -1950,12 +2009,17 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             table.modes.insert(mode.clone(), ModeIndex::default());
         }
         for rule in &self.templates {
-            let Some(pattern_id) = rule.pattern else { continue };
+            let Some(pattern_id) = rule.pattern else {
+                continue;
+            };
             let pattern = &self.patterns[pattern_id.0 as usize];
             for (index, alternative) in pattern.alternatives.iter().enumerate() {
                 // §6.4: each alternative is a template rule of its own, so it
                 // gets its own index key.
-                let id = RuleId { template: rule.id, alternative: index as u32 };
+                let id = RuleId {
+                    template: rule.id,
+                    alternative: index as u32,
+                };
                 let key = alternative.index_key();
                 if rule.all_modes {
                     push_into(&mut table.all_modes, key, id);
@@ -2096,11 +2160,7 @@ fn unimplemented_declaration(local: &str) -> Option<&'static str> {
 /// > one of the attributes defined for that element in this specification.
 fn allowed_attributes(local: &str) -> Option<&'static [&'static str]> {
     Some(match local {
-        "stylesheet" | "transform" => &[
-            "id",
-            "default-validation",
-            "input-type-annotations",
-        ],
+        "stylesheet" | "transform" => &["id", "default-validation", "input-type-annotations"],
         "include" | "import" => &["href"],
         "import-schema" => &["namespace", "schema-location"],
         "template" => &["match", "name", "priority", "mode", "as"],
@@ -2148,7 +2208,13 @@ fn allowed_attributes(local: &str) -> Option<&'static [&'static str]> {
         "attribute-set" => &["name", "use-attribute-sets"],
         "namespace-alias" => &["stylesheet-prefix", "result-prefix"],
         "sort" => &[
-            "select", "lang", "order", "collation", "stable", "case-order", "data-type",
+            "select",
+            "lang",
+            "order",
+            "collation",
+            "stable",
+            "case-order",
+            "data-type",
         ],
         "key" => &["name", "match", "use", "collation"],
         "function" => &["name", "as", "override"],
@@ -2172,7 +2238,9 @@ fn check_attributes(nav: &Nav<'_>, local: &str, loc: &Location) -> Result<(), Xs
             .with_location(loc.clone()));
         }
     }
-    let Some(allowed) = allowed_attributes(local) else { return Ok(()) };
+    let Some(allowed) = allowed_attributes(local) else {
+        return Ok(());
+    };
     for (uri, name, _, _) in attributes(nav) {
         if !uri.is_empty() {
             continue;
@@ -2194,11 +2262,7 @@ fn check_attributes(nav: &Nav<'_>, local: &str, loc: &Location) -> Result<(), Xs
 /// > \[ERR XTSE0350\] It is a static error if an unescaped left curly bracket
 /// > appears in a fixed part of an attribute value template without a matching
 /// > right curly bracket.
-fn avt_expression(
-    chars: &[char],
-    mut i: usize,
-    value: &str,
-) -> Result<(String, usize), XsltError> {
+fn avt_expression(chars: &[char], mut i: usize, value: &str) -> Result<(String, usize), XsltError> {
     let mut source = String::new();
     let mut quote: Option<char> = None;
     while i < chars.len() {
@@ -2223,4 +2287,3 @@ fn avt_expression(
         format!("an unmatched `{{` in the attribute value template {value:?}"),
     ))
 }
-

@@ -10,8 +10,8 @@
 //! this crate builds itself.
 
 use crate::error::{codes, XsltError};
-use crate::names::{is_ncname, split_qname, QName};
 use crate::model::ExprId;
+use crate::names::{is_ncname, split_qname, QName};
 use crate::whitespace;
 
 /// A compiled pattern: one or more alternatives, each an independent rule for
@@ -193,13 +193,22 @@ pub fn parse(source: &str, sink: &mut dyn PatternSink) -> Result<Pattern, XsltEr
         alternatives.push(parse_alternative(alt, source, sink)?);
     }
     if alternatives.is_empty() {
-        return Err(bad_pattern(source, "a pattern must have at least one alternative"));
+        return Err(bad_pattern(
+            source,
+            "a pattern must have at least one alternative",
+        ));
     }
-    Ok(Pattern { alternatives, source: source.to_string() })
+    Ok(Pattern {
+        alternatives,
+        source: source.to_string(),
+    })
 }
 
 fn bad_pattern(source: &str, why: impl std::fmt::Display) -> XsltError {
-    XsltError::new(codes::XTSE0340, format!("{source:?} is not a pattern: {why}"))
+    XsltError::new(
+        codes::XTSE0340,
+        format!("{source:?} is not a pattern: {why}"),
+    )
 }
 
 fn parse_alternative(
@@ -230,7 +239,10 @@ fn parse_alternative(
                 steps: Vec::new(),
                 priority: 0.0,
             })),
-            _ => Err(bad_pattern(source, "a path pattern needs at least one step")),
+            _ => Err(bad_pattern(
+                source,
+                "a path pattern needs at least one step",
+            )),
         };
     }
 
@@ -239,11 +251,19 @@ fn parse_alternative(
     let mut steps: Vec<PatternStep> = Vec::with_capacity(pieces.len());
     for (index, (connector, text)) in pieces.iter().enumerate() {
         // The leftmost step's connector is the anchor's business.
-        let connector = if index == 0 { Connector::Parent } else { *connector };
+        let connector = if index == 0 {
+            Connector::Parent
+        } else {
+            *connector
+        };
         steps.push(parse_step(text, connector, source, sink)?);
     }
     steps.reverse();
-    Ok(finish(PathPattern { anchor, steps, priority: 0.0 }))
+    Ok(finish(PathPattern {
+        anchor,
+        steps,
+        priority: 0.0,
+    }))
 }
 
 fn finish(mut p: PathPattern) -> PathPattern {
@@ -324,7 +344,12 @@ fn parse_step(
     for predicate in predicate_text {
         predicates.push(sink.compile_predicate(&predicate)?);
     }
-    Ok(PatternStep { axis, test, predicates, connector })
+    Ok(PatternStep {
+        axis,
+        test,
+        predicates,
+        connector,
+    })
 }
 
 /// Splits `nodetest[p1][p2]…` into the node test and the predicate sources.
@@ -354,7 +379,9 @@ fn split_predicates(text: &str, source: &str) -> Result<(String, Vec<String>), X
             (None, ']') => {
                 depth -= 1;
                 if depth == 0 {
-                    let start = open.take().ok_or_else(|| bad_pattern(source, "a stray `]`"))?;
+                    let start = open
+                        .take()
+                        .ok_or_else(|| bad_pattern(source, "a stray `]`"))?;
                     predicates.push(bytes[start..i].iter().collect());
                 }
             }
@@ -419,10 +446,7 @@ fn expand(
 ) -> Result<QName, XsltError> {
     if prefix.is_empty() {
         return Ok(match axis {
-            PatternAxis::Child => QName::new(
-                sink.resolve_prefix("").unwrap_or_default(),
-                local,
-            ),
+            PatternAxis::Child => QName::new(sink.resolve_prefix("").unwrap_or_default(), local),
             PatternAxis::Attribute => QName::local(local),
         });
     }
@@ -508,7 +532,9 @@ fn parse_kind_test(
 
 fn unquote(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
-    if bytes.len() >= 2 && (bytes[0] == b'"' || bytes[0] == b'\'') && bytes[bytes.len() - 1] == bytes[0]
+    if bytes.len() >= 2
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+        && bytes[bytes.len() - 1] == bytes[0]
     {
         Some(text[1..text.len() - 1].to_string())
     } else {
@@ -691,7 +717,11 @@ mod tests {
     #[test]
     fn id_and_key_anchors_are_not_implemented_yet() {
         let mut sink = Sink(Vec::new());
-        assert!(parse("id('x')", &mut sink).unwrap_err().is_not_implemented());
-        assert!(parse("key('k', 'v')", &mut sink).unwrap_err().is_not_implemented());
+        assert!(parse("id('x')", &mut sink)
+            .unwrap_err()
+            .is_not_implemented());
+        assert!(parse("key('k', 'v')", &mut sink)
+            .unwrap_err()
+            .is_not_implemented());
     }
 }

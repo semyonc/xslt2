@@ -201,12 +201,18 @@ fn p1_2_two_alternatives_of_one_template_are_not_a_conflict() {
     // `strict_recoverable` turns XTRE0540 into a hard error instead of taking
     // the recovery action, which is what makes the absence of a conflict
     // observable.
-    let options = TransformOptions { strict_recoverable: true, ..TransformOptions::default() };
+    let options = TransformOptions {
+        strict_recoverable: true,
+        ..TransformOptions::default()
+    };
     let outcome = compiled
         .transformation(&arena, options)
         .transform_source("file:///review/in.xml", "<root><b/></root>")
         .unwrap();
-    assert_eq!(compiled.serialize_primary(&outcome).unwrap(), "<out>ONCE</out>");
+    assert_eq!(
+        compiled.serialize_primary(&outcome).unwrap(),
+        "<out>ONCE</out>"
+    );
 }
 
 /// `xsl:next-match` sees the per-alternative priorities too: the `*`
@@ -439,7 +445,10 @@ fn p2_5_xml_base_moves_the_base_uri_of_the_expression() {
         .with_resolver(resolver)
         .transform_source("file:///review/in.xml", "<root/>")
         .unwrap();
-    assert_eq!(compiled.serialize_primary(&outcome).unwrap(), "<out>RIGHT</out>");
+    assert_eq!(
+        compiled.serialize_primary(&outcome).unwrap(),
+        "<out>RIGHT</out>"
+    );
 }
 
 // ── P2-6 a document keeps its URI ────────────────────────────────────────
@@ -603,7 +612,10 @@ fn p2_8_list_valued_attributes_split_on_xml_whitespace_only() {
          <xsl:template match=\"/\"><out xsl:use-attribute-sets=\"a\u{00a0}b\"/></xsl:template>",
         "<root/>",
     );
-    assert!(err.is_err(), "a\u{a0}b is one token, and no set is named that");
+    assert!(
+        err.is_err(),
+        "a\u{a0}b is one token, and no set is named that"
+    );
     // With a real space, both sets apply.
     let out = transform(
         "<xsl:attribute-set name=\"a\"><xsl:attribute name=\"x\">1</xsl:attribute></xsl:attribute-set>\

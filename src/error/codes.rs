@@ -236,7 +236,7 @@ pub const XTDE1035: &str = "XTDE1035";
 pub const XTDE1110: &str = "XTDE1110";
 /// It is a non-recoverable dynamic error if the effective value of the regex attribute [of the xsl:analyze-string instruction] does not conform to the required syntax for regular expressions, as specified in [Functions and …
 pub const XTDE1140: &str = "XTDE1140";
-/// It is a non-recoverable dynamic error if the effective value of the flags attribute [of the xsl:analyze-string instruction] has a value other than the values defined in [Functions and Operators] 
+/// It is a non-recoverable dynamic error if the effective value of the flags attribute [of the xsl:analyze-string instruction] has a value other than the values defined in [Functions and Operators]
 pub const XTDE1145: &str = "XTDE1145";
 /// It is a non-recoverable dynamic error if the effective value of the regex attribute [of the xsl:analyze-string instruction] is a regular expression that matches a zero-length string: or more specifically, if the regular …
 pub const XTDE1150: &str = "XTDE1150";
@@ -292,7 +292,7 @@ pub const XTMM9000: &str = "XTMM9000";
 pub const XTRE0270: &str = "XTRE0270";
 /// It is a recoverable dynamic error if the conflict resolution algorithm for template rules leaves more than one matching template rule
 pub const XTRE0540: &str = "XTRE0540";
-/// It is a recoverable dynamic error if the name of a constructed attribute is xml:space and the value is not either default or preserve 
+/// It is a recoverable dynamic error if the name of a constructed attribute is xml:space and the value is not either default or preserve
 pub const XTRE0795: &str = "XTRE0795";
 /// When a URI reference [supplied to the document function] contains a fragment identifier, it is a recoverable dynamic error if the media type is not one that is recognized by the processor, or if the fragment identifier d…
 pub const XTRE1160: &str = "XTRE1160";
@@ -352,7 +352,7 @@ pub const XTSE0350: &str = "XTSE0350";
 pub const XTSE0370: &str = "XTSE0370";
 /// An xsl:template element must have either a match attribute or a name attribute, or both
 pub const XTSE0500: &str = "XTSE0500";
-/// The value of this attribute [the priority attribute of the xsl:template element] must conform to the rules for the xs:decimal type defined in [XML Schema Part 2] 
+/// The value of this attribute [the priority attribute of the xsl:template element] must conform to the rules for the xs:decimal type defined in [XML Schema Part 2]
 pub const XTSE0530: &str = "XTSE0530";
 /// It is a static error if the list [of modes in the mode attribute of xsl:template ] is empty, if the same token is included more than once in the list, if the list contains an invalid token, or if the token #all appears t…
 pub const XTSE0550: &str = "XTSE0550";
@@ -442,7 +442,7 @@ pub const XTSE1520: &str = "XTSE1520";
 pub const XTSE1530: &str = "XTSE1530";
 /// It is a static error if two xsl:output declarations within an output definition specify explicit values for the same attribute (other than cdata-section-elements and use-character-maps ), with the values of the attribute…
 pub const XTSE1560: &str = "XTSE1560";
-/// The value [of the method attribute on xsl:output ] must (if present) be a valid QName 
+/// The value [of the method attribute on xsl:output ] must (if present) be a valid QName
 pub const XTSE1570: &str = "XTSE1570";
 /// It is a static error if the stylesheet contains two or more character maps with the same name and the same import precedence , unless it also contains another character map with the same name and higher import precedence…
 pub const XTSE1580: &str = "XTSE1580";
@@ -452,7 +452,7 @@ pub const XTSE1590: &str = "XTSE1590";
 pub const XTSE1600: &str = "XTSE1600";
 /// A basic XSLT processor must signal a static error if the stylesheet includes an xsl:import-schema declaration.
 pub const XTSE1650: &str = "XTSE1650";
-/// A basic XSLT processor must signal a static error if the stylesheet includes an [xsl:]type attribute, or an [xsl:]validation or default-validation attribute with a value other than strip 
+/// A basic XSLT processor must signal a static error if the stylesheet includes an [xsl:]type attribute, or an [xsl:]validation or default-validation attribute with a value other than strip
 pub const XTSE1660: &str = "XTSE1660";
 /// It is a type error if the result of evaluating the sequence constructor cannot be converted to the required type.
 pub const XTTE0505: &str = "XTTE0505";
@@ -466,7 +466,7 @@ pub const XTTE0570: &str = "XTTE0570";
 pub const XTTE0590: &str = "XTTE0590";
 /// If a default value is given explicitly, that is, if there is either a select attribute or a non-empty sequence constructor , then it is a type error if the default value cannot be converted to the required type, using th…
 pub const XTTE0600: &str = "XTTE0600";
-/// If the as attribute [of xsl:function ] is specified, then the result evaluated by the sequence constructor (see 5.7 Sequence Constructors ) is converted to the required type, using the function conversion rules 
+/// If the as attribute [of xsl:function ] is specified, then the result evaluated by the sequence constructor (see 5.7 Sequence Constructors ) is converted to the required type, using the function conversion rules
 pub const XTTE0780: &str = "XTTE0780";
 /// If the value of a parameter to a stylesheet function cannot be converted to the required type, a type error is signaled.
 pub const XTTE0790: &str = "XTTE0790";
@@ -499,5 +499,8 @@ pub const XTTE1555: &str = "XTTE1555";
 
 /// Look up the spec description of an error code, if it is an XSLT 2.0 code.
 pub fn describe(code: &str) -> Option<&'static str> {
-    CODES.binary_search_by(|(c, _)| c.cmp(&code)).ok().map(|i| CODES[i].1)
+    CODES
+        .binary_search_by(|(c, _)| c.cmp(&code))
+        .ok()
+        .map(|i| CODES[i].1)
 }

@@ -52,7 +52,10 @@ pub struct RuleId {
 impl RuleId {
     /// The rule made of a declaration's first (often only) alternative.
     pub fn first(template: TemplateId) -> Self {
-        Self { template, alternative: 0 }
+        Self {
+            template,
+            alternative: 0,
+        }
     }
 }
 
@@ -104,7 +107,9 @@ pub struct Avt {
 impl Avt {
     /// An AVT that is one fixed string.
     pub fn literal(text: impl Into<String>) -> Self {
-        Self { parts: vec![AvtPart::Literal(text.into())] }
+        Self {
+            parts: vec![AvtPart::Literal(text.into())],
+        }
     }
 
     /// The fixed value, when the template contains no expression.

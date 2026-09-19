@@ -40,8 +40,8 @@ pub struct FileResolver;
 
 impl Resolver for FileResolver {
     fn resolve_text(&self, uri: &str) -> Result<String, String> {
-        let path = uri_to_path(uri)
-            .ok_or_else(|| format!("{uri:?} is not a file URI or a path"))?;
+        let path =
+            uri_to_path(uri).ok_or_else(|| format!("{uri:?} is not a file URI or a path"))?;
         let bytes =
             std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         Ok(decode_xml(&bytes))
@@ -73,7 +73,10 @@ impl MemoryResolver {
 
     /// An in-memory resolver that falls back to `next`.
     pub fn with_fallback(next: Arc<dyn Resolver>) -> Self {
-        Self { entries: HashMap::new(), next: Some(next) }
+        Self {
+            entries: HashMap::new(),
+            next: Some(next),
+        }
     }
 
     /// Registers the text served at `uri`.
@@ -106,7 +109,10 @@ impl Resolver for MemoryResolver {
 
 /// The error a failed module load carries (§3.10.1).
 pub(crate) fn load_failed(uri: &str, why: &str) -> XsltError {
-    XsltError::new(codes::XTSE0165, format!("cannot load the stylesheet module {uri:?}: {why}"))
+    XsltError::new(
+        codes::XTSE0165,
+        format!("cannot load the stylesheet module {uri:?}: {why}"),
+    )
 }
 
 /// Decodes the bytes of an XML document into a Rust `String`.
@@ -237,7 +243,11 @@ pub fn normalize_uri(uri: &str) -> String {
             s => out.push(s),
         }
     }
-    let trailing = if path.ends_with('/') && !out.is_empty() { "/" } else { "" };
+    let trailing = if path.ends_with('/') && !out.is_empty() {
+        "/"
+    } else {
+        ""
+    };
     let body = out.join("/");
     let slash = if absolute { "/" } else { "" };
     format!("{head}{slash}{body}{trailing}{tail}")
@@ -245,7 +255,9 @@ pub fn normalize_uri(uri: &str) -> String {
 
 /// Splits a `scheme://authority` (or `scheme:`) prefix off a URI.
 fn split_authority(uri: &str) -> (&str, &str) {
-    let Some(colon) = uri.find(':') else { return ("", uri) };
+    let Some(colon) = uri.find(':') else {
+        return ("", uri);
+    };
     if !has_scheme(uri) {
         return ("", uri);
     }
@@ -268,7 +280,11 @@ pub fn path_to_uri(path: &Path) -> String {
         std::env::current_dir().unwrap_or_default().join(path)
     };
     let text = absolute.to_string_lossy().replace('\\', "/");
-    let text = if text.starts_with('/') { text } else { format!("/{text}") };
+    let text = if text.starts_with('/') {
+        text
+    } else {
+        format!("/{text}")
+    };
     normalize_uri(&format!("file://{}", escape_path(&text)))
 }
 
@@ -332,12 +348,27 @@ mod tests {
 
     #[test]
     fn relative_references_join_the_base_directory() {
-        assert_eq!(resolve_uri("file:///a/b/c.xsl", "d.xsl"), "file:///a/b/d.xsl");
-        assert_eq!(resolve_uri("file:///a/b/c.xsl", "../d.xsl"), "file:///a/d.xsl");
-        assert_eq!(resolve_uri("file:///a/b/c.xsl", "./e/d.xsl"), "file:///a/b/e/d.xsl");
-        assert_eq!(resolve_uri("file:///a/b/c.xsl", "file:///z.xsl"), "file:///z.xsl");
+        assert_eq!(
+            resolve_uri("file:///a/b/c.xsl", "d.xsl"),
+            "file:///a/b/d.xsl"
+        );
+        assert_eq!(
+            resolve_uri("file:///a/b/c.xsl", "../d.xsl"),
+            "file:///a/d.xsl"
+        );
+        assert_eq!(
+            resolve_uri("file:///a/b/c.xsl", "./e/d.xsl"),
+            "file:///a/b/e/d.xsl"
+        );
+        assert_eq!(
+            resolve_uri("file:///a/b/c.xsl", "file:///z.xsl"),
+            "file:///z.xsl"
+        );
         assert_eq!(resolve_uri("file:///a/b/c.xsl", ""), "file:///a/b/c.xsl");
-        assert_eq!(resolve_uri("file:///a/b/c.xsl", "#x"), "file:///a/b/c.xsl#x");
+        assert_eq!(
+            resolve_uri("file:///a/b/c.xsl", "#x"),
+            "file:///a/b/c.xsl#x"
+        );
     }
 
     #[test]
@@ -362,7 +393,10 @@ mod tests {
         let uri = path_to_uri(Path::new("/tmp/a b/c.xml"));
         assert_eq!(uri, "file:///tmp/a%20b/c.xml");
         assert_eq!(uri_to_path(&uri), Some(PathBuf::from("/tmp/a b/c.xml")));
-        assert_eq!(uri_to_path("/plain/path.xml"), Some(PathBuf::from("/plain/path.xml")));
+        assert_eq!(
+            uri_to_path("/plain/path.xml"),
+            Some(PathBuf::from("/plain/path.xml"))
+        );
         assert_eq!(uri_to_path("http://example.com/x"), None);
     }
 
@@ -372,7 +406,10 @@ mod tests {
         let latin1 = b"<?xml version=\"1.0\" encoding=\"iso-8859-1\"?>\n<a>\xe9</a>";
         // `str::trim_end` is fine here: this trims a Rust string in a test
         // assertion, not a value whose whitespace XSLT or XML defines.
-        assert_eq!(decode_xml(latin1).trim_end(), "<?xml version=\"1.0\" encoding=\"iso-8859-1\"?>\n<a>\u{e9}</a>");
+        assert_eq!(
+            decode_xml(latin1).trim_end(),
+            "<?xml version=\"1.0\" encoding=\"iso-8859-1\"?>\n<a>\u{e9}</a>"
+        );
 
         // A UTF-8 BOM is removed.
         let mut bom = vec![0xEF, 0xBB, 0xBF];

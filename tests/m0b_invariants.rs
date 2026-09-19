@@ -21,8 +21,8 @@ use xsd_schema::SchemaSet;
 
 use xslt2::error::codes;
 use xslt2::receiver::{
-    serialize_document, Annotations, ComplexContentNormalizer, EventSerializer, Name, Nav, Receiver,
-    ResultBuilder, SequenceCollector,
+    serialize_document, Annotations, ComplexContentNormalizer, EventSerializer, Name, Nav,
+    Receiver, ResultBuilder, SequenceCollector,
 };
 use xslt2::store::DocumentStore;
 use xslt2::{Compiler, TransformOptions, XsltFunctions};
@@ -425,7 +425,8 @@ const NILLABLE_XSD: &str = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSch
   </xs:element>
 </xs:schema>"#;
 
-const NILLED_XML: &str = r#"<root><value xsi:nil="true" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"/></root>"#;
+const NILLED_XML: &str =
+    r#"<root><value xsi:nil="true" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"/></root>"#;
 
 fn nillable_schema() -> SchemaSet {
     let mut schema_set = SchemaSet::xsd11();
@@ -455,7 +456,10 @@ fn inv5_typed_copy_preserves_or_strips_the_psvi_state() {
     let source_binding: NodeSchemaBinding =
         *value.schema_binding().expect("the source is annotated");
     assert!(
-        matches!(source_binding.type_key, TypeKey::Simple(_) | TypeKey::Complex(_)),
+        matches!(
+            source_binding.type_key,
+            TypeKey::Simple(_) | TypeKey::Complex(_)
+        ),
         "the source carries a real TypeKey"
     );
     assert!(
@@ -595,7 +599,10 @@ fn q7_full_document_accepts_several_element_children() {
             }
         }
     }
-    assert_eq!(children, 3, "three document elements under one Full document");
+    assert_eq!(
+        children, 3,
+        "three document elements under one Full document"
+    );
     assert_eq!(
         serialize::to_string(&doc.create_navigator(), &Default::default()).expect("serialize"),
         "<one/><two/><three/>",
@@ -659,8 +666,14 @@ fn store_same_uri_same_identity() {
     let arena = Bump::new();
     let names = NameTable::new();
     let docs = store(&arena, &names);
-    let first = docs.borrow_mut().load_str("catalog.xml", SOURCE).expect("load");
-    let second = docs.borrow_mut().load_str("catalog.xml", SOURCE).expect("load");
+    let first = docs
+        .borrow_mut()
+        .load_str("catalog.xml", SOURCE)
+        .expect("load");
+    let second = docs
+        .borrow_mut()
+        .load_str("catalog.xml", SOURCE)
+        .expect("load");
     assert_eq!(first, second, "the same URI resolves to the same DocId");
     assert_eq!(docs.borrow().len(), 1, "and is parsed once");
 
@@ -670,7 +683,10 @@ fn store_same_uri_same_identity() {
     assert_eq!(docs.borrow().generate_id(&a), docs.borrow().generate_id(&b));
 
     // Non-vacuous: a different URI with the same text is a different document.
-    let other = docs.borrow_mut().load_str("copy.xml", SOURCE).expect("load");
+    let other = docs
+        .borrow_mut()
+        .load_str("copy.xml", SOURCE)
+        .expect("load");
     assert_ne!(first, other);
     let c = item(&docs.borrow().navigator(other), 0);
     assert!(!a.is_same_position(&c));
@@ -895,7 +911,8 @@ fn document_node_in_content_contributes_its_children() {
 
     let mut pipe = ComplexContentNormalizer::new(EventSerializer::new());
     pipe.start_document().unwrap();
-    pipe.start_element(&Name::local("wrap"), None, false).unwrap();
+    pipe.start_element(&Name::local("wrap"), None, false)
+        .unwrap();
     pipe.append_item(&XmlItem::Node(doc_node.clone())).unwrap();
     pipe.end_element().unwrap();
     pipe.end_document().unwrap();
@@ -913,7 +930,10 @@ fn sequence_collector_keeps_identity_and_builds_parentless_nodes() {
     let arena = Bump::new();
     let names = NameTable::new();
     let docs = store(&arena, &names);
-    let id = docs.borrow_mut().load_str("catalog.xml", SOURCE).expect("load");
+    let id = docs
+        .borrow_mut()
+        .load_str("catalog.xml", SOURCE)
+        .expect("load");
     let root = docs.borrow().navigator(id);
     let existing = item(&root, 0);
 

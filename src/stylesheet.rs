@@ -7,7 +7,6 @@
 //! local to one compilation: the module trees are discarded once the
 //! [`CompiledStylesheet`](crate::CompiledStylesheet) exists.
 
-
 use std::collections::HashSet;
 
 use bumpalo::Bump;
@@ -230,7 +229,11 @@ impl<'t> Module<'t> {
             Some(span) => self.line_column(span.start),
             None => (0, 0),
         };
-        Location { module_uri: Some(self.uri.clone()), line, column }
+        Location {
+            module_uri: Some(self.uri.clone()),
+            line,
+            column,
+        }
     }
 
     /// Whether §3.12 effectively excludes this element of **this** module.
@@ -352,7 +355,12 @@ impl<'a, 't> Loader<'a, 't> {
     /// includes.
     pub fn load(mut self, uri: &str, text: Option<String>) -> Result<ModuleSet<'t>, XsltError> {
         let (principal, simplified) = self.visit(uri, text, Inclusion::Import, true)?;
-        Ok(ModuleSet { modules: self.modules, units: self.units, principal, simplified })
+        Ok(ModuleSet {
+            modules: self.modules,
+            units: self.units,
+            principal,
+            simplified,
+        })
     }
 
     /// Parses one module, processes its imports (post-order precedence), and
@@ -367,11 +375,21 @@ impl<'a, 't> Loader<'a, 't> {
         if self.stack.iter().any(|(u, _)| u == uri) {
             // §3.10.2 / §3.10.3: an include cycle is XTSE0180, an import cycle
             // XTSE0210. The edge that closes the cycle names it.
-            let code = if edge == Inclusion::Include { codes::XTSE0180 } else { codes::XTSE0210 };
+            let code = if edge == Inclusion::Include {
+                codes::XTSE0180
+            } else {
+                codes::XTSE0210
+            };
             return Err(XsltError::new(
                 code,
-                format!("the stylesheet module {uri:?} directly or indirectly {} itself",
-                    if edge == Inclusion::Include { "includes" } else { "imports" }),
+                format!(
+                    "the stylesheet module {uri:?} directly or indirectly {} itself",
+                    if edge == Inclusion::Include {
+                        "includes"
+                    } else {
+                        "imports"
+                    }
+                ),
             ));
         }
         self.stack.push((uri.to_string(), edge));
@@ -393,7 +411,11 @@ impl<'a, 't> Loader<'a, 't> {
         let _ = principal;
         let precedence = self.next_precedence;
         self.next_precedence += 1;
-        self.units.push(Unit { precedence, subtree_min, decls });
+        self.units.push(Unit {
+            precedence,
+            subtree_min,
+            decls,
+        });
         Ok((id, simplified))
     }
 
@@ -416,7 +438,10 @@ impl<'a, 't> Loader<'a, 't> {
             text.as_bytes(),
             self.arena,
             self.names,
-            BufferDocumentOptions { track_source_locations: true, ..Default::default() },
+            BufferDocumentOptions {
+                track_source_locations: true,
+                ..Default::default()
+            },
             None,
         )
         .map_err(|e| resolver::load_failed(uri, &e.to_string()))?;
@@ -440,7 +465,8 @@ impl<'a, 't> Loader<'a, 't> {
         // resolved (an excluded one must not load its module at all) and before
         // any static validation (§3.12: "no static or dynamic errors will be
         // reported in respect of the element and its contents").
-        let excluded = use_when_exclusions(&self.modules[id.0 as usize], self.names, self.functions)?;
+        let excluded =
+            use_when_exclusions(&self.modules[id.0 as usize], self.names, self.functions)?;
         self.modules[id.0 as usize].excluded = excluded;
         Ok(id)
     }
@@ -465,9 +491,7 @@ impl<'a, 't> Loader<'a, 't> {
                     if !move_to_document_element(&mut nav) {
                         return Err(XsltError::new(
                             codes::XTSE0010,
-                            format!(
-                                "the stylesheet module {module_uri:?} has no document element"
-                            ),
+                            format!("the stylesheet module {module_uri:?} has no document element"),
                         ));
                     }
                     nav
@@ -519,7 +543,10 @@ impl<'a, 't> Loader<'a, 't> {
         let version = attr_local(&root, "version").ok_or_else(|| {
             XsltError::new(
                 codes::XTSE0010,
-                format!("xsl:{} in {module_uri:?} has no version attribute", root.local_name()),
+                format!(
+                    "xsl:{} in {module_uri:?} has no version attribute",
+                    root.local_name()
+                ),
             )
         })?;
         check_version(&version, &module_uri)?;
@@ -692,7 +719,9 @@ fn keeps(
 ) -> Result<bool, XsltError> {
     // §3.5 spells a standard attribute `use-when` on an XSLT element and
     // `xsl:use-when` on any other.
-    let Some(source) = standard_attr(nav, "use-when") else { return Ok(true) };
+    let Some(source) = standard_attr(nav, "use-when") else {
+        return Ok(true);
+    };
     evaluate_use_when(&source, nav, module, names, functions)
 }
 
@@ -746,18 +775,22 @@ fn evaluate_use_when(
 
 /// §3.6: the `version` attribute must be a number.
 fn check_version(version: &str, module_uri: &str) -> Result<(), XsltError> {
-    whitespace::trim(version).parse::<f64>().map(|_| ()).map_err(|_| {
-        XsltError::new(
-            codes::XTSE0110,
-            format!("the version attribute of {module_uri:?} is {version:?}, which is not a number"),
-        )
-    })
+    whitespace::trim(version)
+        .parse::<f64>()
+        .map(|_| ())
+        .map_err(|_| {
+            XsltError::new(
+                codes::XTSE0110,
+                format!(
+                    "the version attribute of {module_uri:?} is {version:?}, which is not a number"
+                ),
+            )
+        })
 }
 
 fn require_href(nav: &Nav<'_>, what: &str) -> Result<String, XsltError> {
-    attr_local(nav, "href").ok_or_else(|| {
-        XsltError::new(codes::XTSE0010, format!("{what} has no href attribute"))
-    })
+    attr_local(nav, "href")
+        .ok_or_else(|| XsltError::new(codes::XTSE0010, format!("{what} has no href attribute")))
 }
 
 // ── Navigation helpers ───────────────────────────────────────────────────
@@ -922,10 +955,7 @@ pub fn in_scope_namespaces(nav: &Nav<'_>) -> Vec<(String, String)> {
 /// `[xsl:]extension-element-prefixes` are unioned — §11.1.2: "the set of
 /// excluded namespaces for a literal result element … is the union of the sets
 /// of excluded namespaces of its ancestors".
-pub fn static_context_of(
-    nav: &Nav<'_>,
-    module: &Module<'_>,
-) -> Result<StaticContext, XsltError> {
+pub fn static_context_of(nav: &Nav<'_>, module: &Module<'_>) -> Result<StaticContext, XsltError> {
     let mut ancestors: Vec<Nav<'_>> = Vec::new();
     let mut cursor = nav.clone();
     loop {
@@ -1113,7 +1143,10 @@ mod tests {
         let b = interner.intern(ctx.clone());
         assert_eq!(a, b);
         assert_eq!(interner.len(), 1);
-        let other = StaticContext { compat: CompatMode::BackwardsCompatible, ..ctx };
+        let other = StaticContext {
+            compat: CompatMode::BackwardsCompatible,
+            ..ctx
+        };
         assert_ne!(interner.intern(other), a);
         assert_eq!(interner.len(), 2);
     }

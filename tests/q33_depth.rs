@@ -46,8 +46,14 @@ fn measure() {
         // A debug build's frames are several times larger, so the default
         // depth is chosen to fit both profiles; `Q33_DEPTH` repeats the real
         // measurement in `--release`.
-        .unwrap_or(if cfg!(debug_assertions) { 2_000 } else { 10_000 });
-    let stack: usize = std::env::var("Q33_STACK").ok().and_then(|v| v.parse().ok())
+        .unwrap_or(if cfg!(debug_assertions) {
+            2_000
+        } else {
+            10_000
+        });
+    let stack: usize = std::env::var("Q33_STACK")
+        .ok()
+        .and_then(|v| v.parse().ok())
         .unwrap_or(xslt2::DEFAULT_STACK_SIZE);
     let out = xslt2::run_on_large_stack(stack, move || run(target));
     let serialized = out.expect("a recursion of this depth fits on the stack");

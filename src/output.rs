@@ -53,7 +53,10 @@ pub struct Setting<T> {
 
 impl<T> Default for Setting<T> {
     fn default() -> Self {
-        Self { value: None, precedence: 0 }
+        Self {
+            value: None,
+            precedence: 0,
+        }
     }
 }
 
@@ -98,7 +101,9 @@ impl OutputDefinition {
     /// The highest character the declared encoding can write directly, or
     /// `None` when every character can be written as it stands.
     pub fn character_escaping(&self) -> Result<Option<char>, XsltError> {
-        let Some(encoding) = self.encoding.get() else { return Ok(None) };
+        let Some(encoding) = self.encoding.get() else {
+            return Ok(None);
+        };
         match encoding_limit(encoding) {
             Some(limit) => Ok(limit),
             None => Err(XsltError::not_implemented(
@@ -135,7 +140,11 @@ impl OutputDefinition {
         Ok(SerializeOptions {
             xml_declaration: !self.omit_xml_declaration.get_or(true),
             standalone: self.standalone.get().copied().flatten(),
-            indent: if self.indent.get_or(false) { Some(2) } else { None },
+            indent: if self.indent.get_or(false) {
+                Some(2)
+            } else {
+                None
+            },
         })
     }
 }
@@ -149,7 +158,10 @@ impl OutputDefinition {
 /// character the encoding cannot represent must appear as a character
 /// reference. `None` means nothing needs escaping.
 pub fn encoding_limit(encoding: &str) -> Option<Option<char>> {
-    match crate::whitespace::trim(encoding).to_ascii_lowercase().as_str() {
+    match crate::whitespace::trim(encoding)
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "utf-8" | "utf8" | "utf-16" | "utf16" | "utf-16le" | "utf-16be" => Some(None),
         "us-ascii" | "ascii" => Some(Some('\u{7F}')),
         "iso-8859-1" | "latin1" | "latin-1" => Some(Some('\u{FF}')),

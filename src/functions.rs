@@ -134,7 +134,12 @@ impl XsltFunctions {
 
         this.add(XsltFn::Current, "current", vec![], item());
         this.add(XsltFn::Document, "document", vec![items()], nodes());
-        this.add(XsltFn::Document, "document", vec![items(), nodes()], nodes());
+        this.add(
+            XsltFn::Document,
+            "document",
+            vec![items(), nodes()],
+            nodes(),
+        );
         this.add(XsltFn::Key, "key", vec![string(), items()], nodes());
         this.add(XsltFn::Key, "key", vec![string(), items(), node()], nodes());
         this.add(XsltFn::GenerateId, "generate-id", vec![], string());
@@ -144,7 +149,12 @@ impl XsltFunctions {
             vec![SequenceType::optional(ItemType::AnyNode)],
             string(),
         );
-        this.add(XsltFn::SystemProperty, "system-property", vec![string()], string());
+        this.add(
+            XsltFn::SystemProperty,
+            "system-property",
+            vec![string()],
+            string(),
+        );
         this.add(
             XsltFn::ElementAvailable,
             "element-available",
@@ -190,11 +200,14 @@ impl XsltFunctions {
             XsltFn::DocumentUri,
             "document-uri",
             vec![SequenceType::optional(ItemType::AnyNode)],
-            SequenceType::optional(ItemType::AtomicType(
-                xsd_schema::types::XmlTypeCode::AnyUri,
-            )),
+            SequenceType::optional(ItemType::AtomicType(xsd_schema::types::XmlTypeCode::AnyUri)),
         );
-        this.add(XsltFn::UnparsedText, "unparsed-text", vec![string_opt()], string_opt());
+        this.add(
+            XsltFn::UnparsedText,
+            "unparsed-text",
+            vec![string_opt()],
+            string_opt(),
+        );
         this.add(
             XsltFn::UnparsedText,
             "unparsed-text",
@@ -232,7 +245,12 @@ impl XsltFunctions {
             vec![],
             SequenceType::any_atomic_optional(),
         );
-        this.add(XsltFn::RegexGroup, "regex-group", vec![SequenceType::integer()], string());
+        this.add(
+            XsltFn::RegexGroup,
+            "regex-group",
+            vec![SequenceType::integer()],
+            string(),
+        );
         this
     }
 
@@ -287,7 +305,10 @@ pub struct StaticEvaluator<'f> {
 
 impl<'f> StaticEvaluator<'f> {
     pub fn new(functions: &'f XsltFunctions, namespaces: Vec<(String, String)>) -> Self {
-        Self { functions, namespaces }
+        Self {
+            functions,
+            namespaces,
+        }
     }
 
     fn resolve(&self, prefix: &str) -> Option<String> {
@@ -327,8 +348,7 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
                 }
             })
             .unwrap_or_default();
-        let (prefix, local) =
-            crate::names::split_qname(crate::whitespace::trim(&name));
+        let (prefix, local) = crate::names::split_qname(crate::whitespace::trim(&name));
         match which {
             XsltFn::SystemProperty => {
                 let uri = self.resolve(prefix).unwrap_or_default();

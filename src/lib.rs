@@ -42,9 +42,9 @@ pub mod model;
 pub mod names;
 pub mod output;
 pub mod pattern;
+pub mod receiver;
 pub mod resolver;
 pub mod runtime;
-pub mod receiver;
 pub mod store;
 pub mod stylesheet;
 pub mod whitespace;
@@ -54,15 +54,15 @@ pub use error::{ErrorKind, Location, XsltError};
 pub use functions::XsltFunctions;
 pub use model::{CompiledStylesheet, ModeKey};
 pub use names::QName;
-pub use receiver::Nav;
 pub use output::{OutputDefinition, OutputMethod};
+pub use receiver::Nav;
+pub use receiver::{
+    Annotations, ComplexContentNormalizer, EventSerializer, Name, Receiver, ResultBuilder,
+    SequenceCollector,
+};
 pub use resolver::{FileResolver, MemoryResolver, Resolver};
 pub use runtime::{
     run_on_large_stack, Message, Outcome, TransformOptions, Transformation,
     DEFAULT_MAX_RECURSION_DEPTH, DEFAULT_STACK_SIZE,
-};
-pub use receiver::{
-    Annotations, ComplexContentNormalizer, EventSerializer, Name, Receiver, ResultBuilder,
-    SequenceCollector,
 };
 pub use store::{DocId, DocumentStore, StoredDocument};

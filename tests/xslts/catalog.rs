@@ -191,20 +191,59 @@ pub enum Assertion {
     AnyOf(Vec<Assertion>),
     Not(Box<Assertion>),
     /// XPath whose effective boolean value must be true; context item = result document node.
-    Assert { xpath: String, ns: NsBindings },
-    AssertXml { expected: String, file: Option<String>, ignore_prefixes: bool, xml_version: Option<String> },
-    AssertStringValue { expected: String, normalize_space: bool },
-    Error { code: String },
-    SerializationMatches { regex: String, flags: String, file: Option<String> },
-    AssertSerialization { expected: String, file: Option<String>, method: Option<String>, ignore_prefixes: bool },
-    AssertSerializationError { code: String },
-    AssertResultDocument { uri: String, inner: Box<Assertion> },
+    Assert {
+        xpath: String,
+        ns: NsBindings,
+    },
+    AssertXml {
+        expected: String,
+        file: Option<String>,
+        ignore_prefixes: bool,
+        xml_version: Option<String>,
+    },
+    AssertStringValue {
+        expected: String,
+        normalize_space: bool,
+    },
+    Error {
+        code: String,
+    },
+    SerializationMatches {
+        regex: String,
+        flags: String,
+        file: Option<String>,
+    },
+    AssertSerialization {
+        expected: String,
+        file: Option<String>,
+        method: Option<String>,
+        ignore_prefixes: bool,
+    },
+    AssertSerializationError {
+        code: String,
+    },
+    AssertResultDocument {
+        uri: String,
+        inner: Box<Assertion>,
+    },
     AssertMessage(Box<Assertion>),
     AssertWarning,
-    AssertType { xpath: String, ns: NsBindings },
-    AssertEq { xpath: String, ns: NsBindings },
-    AssertDeepEq { xpath: String, ns: NsBindings },
-    AssertPermutation { xpath: String, ns: NsBindings },
+    AssertType {
+        xpath: String,
+        ns: NsBindings,
+    },
+    AssertEq {
+        xpath: String,
+        ns: NsBindings,
+    },
+    AssertDeepEq {
+        xpath: String,
+        ns: NsBindings,
+    },
+    AssertPermutation {
+        xpath: String,
+        ns: NsBindings,
+    },
     AssertCount(String),
     AssertEmpty,
     AssertTrue,
@@ -217,30 +256,47 @@ pub enum Assertion {
 
 pub fn load_catalog(root: &Path) -> Result<Catalog, String> {
     let path = root.join("catalog.xml");
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let doc = Document::parse(&text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let doc =
+        Document::parse(&text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
     let mut test_sets = Vec::new();
     for n in elems(doc.root_element(), "test-set") {
         let name = n.attribute("name").unwrap_or("").to_string();
         let rel_file = n.attribute("file").unwrap_or("").to_string();
-        test_sets.push(TestSetRef { name, file: root.join(&rel_file), rel_file });
+        test_sets.push(TestSetRef {
+            name,
+            file: root.join(&rel_file),
+            rel_file,
+        });
     }
     if test_sets.is_empty() {
         return Err(format!("{} contains no <test-set> entries", path.display()));
     }
-    Ok(Catalog { root: root.to_path_buf(), test_sets })
+    Ok(Catalog {
+        root: root.to_path_buf(),
+        test_sets,
+    })
 }
 
 pub fn load_test_set(r: &TestSetRef) -> Result<TestSet, String> {
-    let text = std::fs::read_to_string(&r.file).map_err(|e| format!("cannot read {}: {e}", r.file.display()))?;
-    let doc = Document::parse(&text).map_err(|e| format!("cannot parse {}: {e}", r.file.display()))?;
+    let text = std::fs::read_to_string(&r.file)
+        .map_err(|e| format!("cannot read {}: {e}", r.file.display()))?;
+    let doc =
+        Document::parse(&text).map_err(|e| format!("cannot parse {}: {e}", r.file.display()))?;
     let root = doc.root_element();
     if root.tag_name().namespace() != Some(CATALOG_NS) {
-        return Err(format!("{} is not in the catalog namespace", r.file.display()));
+        return Err(format!(
+            "{} is not in the catalog namespace",
+            r.file.display()
+        ));
     }
     let dir = r.file.parent().map(Path::to_path_buf).unwrap_or_default();
     let name = root.attribute("name").unwrap_or(&r.name).to_string();
-    let description = elems(root, "description").next().map(text_of).unwrap_or_default();
+    let description = elems(root, "description")
+        .next()
+        .map(text_of)
+        .unwrap_or_default();
     let dependencies = parse_dependencies(root);
     let mut environments = HashMap::new();
     for e in elems(root, "environment") {
@@ -253,16 +309,29 @@ pub fn load_test_set(r: &TestSetRef) -> Result<TestSet, String> {
     for tc in elems(root, "test-case") {
         cases.push(parse_test_case(tc, &doc));
     }
-    Ok(TestSet { name, file: r.file.clone(), dir, rel_file: r.rel_file.clone(), description, dependencies, environments, cases })
+    Ok(TestSet {
+        name,
+        file: r.file.clone(),
+        dir,
+        rel_file: r.rel_file.clone(),
+        description,
+        dependencies,
+        environments,
+        cases,
+    })
 }
 
 fn elems<'a, 'i: 'a>(n: Node<'a, 'i>, name: &'a str) -> impl Iterator<Item = Node<'a, 'i>> + 'a {
-    n.children().filter(move |c| c.is_element() && c.tag_name().name() == name)
+    n.children()
+        .filter(move |c| c.is_element() && c.tag_name().name() == name)
 }
 
 /// Concatenated text of all direct text/CDATA children.
 fn text_of(n: Node) -> String {
-    n.children().filter(|c| c.is_text()).filter_map(|c| c.text()).collect()
+    n.children()
+        .filter(|c| c.is_text())
+        .filter_map(|c| c.text())
+        .collect()
 }
 
 fn attr(n: Node, name: &str) -> Option<String> {
@@ -284,7 +353,11 @@ fn qname_of(n: Node, value: &str) -> QName {
             local: l.to_string(),
             namespace: n.lookup_namespace_uri(Some(p)).map(str::to_string),
         },
-        None => QName { prefix: None, local: value.to_string(), namespace: None },
+        None => QName {
+            prefix: None,
+            local: value.to_string(),
+            namespace: None,
+        },
     }
 }
 
@@ -341,19 +414,40 @@ fn parse_environment(n: Node) -> Environment {
         name: attr(n, "name"),
         sources: elems(n, "source").map(parse_source).collect(),
         stylesheets: elems(n, "stylesheet")
-            .map(|s| StylesheetRef { file: attr(s, "file"), uri: attr(s, "uri"), role: attr(s, "role"), xml_version: attr(s, "xml-version") })
+            .map(|s| StylesheetRef {
+                file: attr(s, "file"),
+                uri: attr(s, "uri"),
+                role: attr(s, "role"),
+                xml_version: attr(s, "xml-version"),
+            })
             .collect(),
         schemas: elems(n, "schema")
-            .map(|s| SchemaRef { file: attr(s, "file"), uri: attr(s, "uri"), role: attr(s, "role"), xsd_version: attr(s, "xsd-version") })
+            .map(|s| SchemaRef {
+                file: attr(s, "file"),
+                uri: attr(s, "uri"),
+                role: attr(s, "role"),
+                xsd_version: attr(s, "xsd-version"),
+            })
             .collect(),
         resources: elems(n, "resource")
-            .map(|s| Resource { file: attr(s, "file"), uri: attr(s, "uri"), media_type: attr(s, "media-type"), encoding: attr(s, "encoding") })
+            .map(|s| Resource {
+                file: attr(s, "file"),
+                uri: attr(s, "uri"),
+                media_type: attr(s, "media-type"),
+                encoding: attr(s, "encoding"),
+            })
             .collect(),
         collations: elems(n, "collation")
-            .map(|c| Collation { uri: c.attribute("uri").unwrap_or("").to_string(), default: attr_bool(c, "default").unwrap_or(false) })
+            .map(|c| Collation {
+                uri: c.attribute("uri").unwrap_or("").to_string(),
+                default: attr_bool(c, "default").unwrap_or(false),
+            })
             .collect(),
         collections: elems(n, "collection")
-            .map(|c| Collection { uri: attr(c, "uri"), sources: elems(c, "source").map(parse_source).collect() })
+            .map(|c| Collection {
+                uri: attr(c, "uri"),
+                sources: elems(c, "source").map(parse_source).collect(),
+            })
             .collect(),
         params: elems(n, "param").map(parse_param).collect(),
         has_package: elems(n, "package").next().is_some(),
@@ -363,7 +457,12 @@ fn parse_environment(n: Node) -> Environment {
 fn parse_test(n: Node) -> TestSpec {
     let mut spec = TestSpec {
         stylesheets: elems(n, "stylesheet")
-            .map(|s| StylesheetRef { file: attr(s, "file"), uri: attr(s, "uri"), role: attr(s, "role"), xml_version: attr(s, "xml-version") })
+            .map(|s| StylesheetRef {
+                file: attr(s, "file"),
+                uri: attr(s, "uri"),
+                role: attr(s, "role"),
+                xml_version: attr(s, "xml-version"),
+            })
             .collect(),
         params: elems(n, "param").map(parse_param).collect(),
         has_package: elems(n, "package").next().is_some(),
@@ -393,7 +492,10 @@ fn parse_test(n: Node) -> TestSpec {
 }
 
 fn parse_assertions(n: Node) -> Vec<Assertion> {
-    n.children().filter(|c| c.is_element()).map(parse_assertion).collect()
+    n.children()
+        .filter(|c| c.is_element())
+        .map(parse_assertion)
+        .collect()
 }
 
 fn one_or_all(mut list: Vec<Assertion>) -> Assertion {
@@ -410,7 +512,10 @@ fn parse_assertion(n: Node) -> Assertion {
         "all-of" => AllOf(parse_assertions(n)),
         "any-of" => AnyOf(parse_assertions(n)),
         "not" => Not(Box::new(one_or_all(parse_assertions(n)))),
-        "assert" => Assert { xpath: text_of(n), ns: ns_bindings(n) },
+        "assert" => Assert {
+            xpath: text_of(n),
+            ns: ns_bindings(n),
+        },
         "assert-xml" => AssertXml {
             expected: text_of(n),
             file: attr(n, "file"),
@@ -424,7 +529,9 @@ fn parse_assertion(n: Node) -> Assertion {
         // `@code` is optional in the schema; keep an absent one distinguishable from the
         // documented `code="*"` ("any error code is allowed") instead of silently conflating
         // the two, which would make a codeless <error> match every error.
-        "error" => Error { code: n.attribute("code").unwrap_or("").to_string() },
+        "error" => Error {
+            code: n.attribute("code").unwrap_or("").to_string(),
+        },
         "serialization-matches" => SerializationMatches {
             regex: text_of(n),
             flags: n.attribute("flags").unwrap_or("").to_string(),
@@ -436,17 +543,31 @@ fn parse_assertion(n: Node) -> Assertion {
             method: attr(n, "method"),
             ignore_prefixes: attr_bool(n, "ignore-prefixes").unwrap_or(false),
         },
-        "assert-serialization-error" => AssertSerializationError { code: n.attribute("code").unwrap_or("").to_string() },
+        "assert-serialization-error" => AssertSerializationError {
+            code: n.attribute("code").unwrap_or("").to_string(),
+        },
         "assert-result-document" => AssertResultDocument {
             uri: n.attribute("uri").unwrap_or("").to_string(),
             inner: Box::new(one_or_all(parse_assertions(n))),
         },
         "assert-message" => AssertMessage(Box::new(one_or_all(parse_assertions(n)))),
         "assert-warning" => AssertWarning,
-        "assert-type" => AssertType { xpath: text_of(n), ns: ns_bindings(n) },
-        "assert-eq" => AssertEq { xpath: text_of(n), ns: ns_bindings(n) },
-        "assert-deep-eq" => AssertDeepEq { xpath: text_of(n), ns: ns_bindings(n) },
-        "assert-permutation" => AssertPermutation { xpath: text_of(n), ns: ns_bindings(n) },
+        "assert-type" => AssertType {
+            xpath: text_of(n),
+            ns: ns_bindings(n),
+        },
+        "assert-eq" => AssertEq {
+            xpath: text_of(n),
+            ns: ns_bindings(n),
+        },
+        "assert-deep-eq" => AssertDeepEq {
+            xpath: text_of(n),
+            ns: ns_bindings(n),
+        },
+        "assert-permutation" => AssertPermutation {
+            xpath: text_of(n),
+            ns: ns_bindings(n),
+        },
         // Kept verbatim: a malformed count used to become 0 silently, and the harness cannot
         // check the count anyway (see `compare::evaluate`), so the text is only ever reported.
         "assert-count" => AssertCount(text_of(n).trim().to_string()),
@@ -459,17 +580,25 @@ fn parse_assertion(n: Node) -> Assertion {
 }
 
 fn parse_test_case(n: Node, doc: &Document) -> TestCase {
-    let environment = elems(n, "environment").next().map(|e| match e.attribute("ref") {
-        Some(r) => EnvRef::Ref(r.to_string()),
-        None => EnvRef::Inline(parse_environment(e)),
-    });
+    let environment = elems(n, "environment")
+        .next()
+        .map(|e| match e.attribute("ref") {
+            Some(r) => EnvRef::Ref(r.to_string()),
+            None => EnvRef::Inline(parse_environment(e)),
+        });
     TestCase {
         name: n.attribute("name").unwrap_or("").to_string(),
-        description: elems(n, "description").next().map(text_of).unwrap_or_default(),
+        description: elems(n, "description")
+            .next()
+            .map(text_of)
+            .unwrap_or_default(),
         dependencies: parse_dependencies(n),
         environment,
         test: elems(n, "test").next().map(parse_test).unwrap_or_default(),
-        result: elems(n, "result").next().map(|r| one_or_all(parse_assertions(r))).unwrap_or(Assertion::AllOf(Vec::new())),
+        result: elems(n, "result")
+            .next()
+            .map(|r| one_or_all(parse_assertions(r)))
+            .unwrap_or(Assertion::AllOf(Vec::new())),
         line: doc.text_pos_at(n.range().start).row,
     }
 }

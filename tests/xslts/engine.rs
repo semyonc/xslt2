@@ -14,8 +14,7 @@ use xsd_schema::xpath::functions::XPathValue;
 use xsd_schema::xpath::{XPathContext, XPathExpr};
 
 use xslt2::{
-    Compiler, MemoryResolver, ModeKey, QName, Resolver, TransformOptions, XsltError,
-    XsltFunctions,
+    Compiler, MemoryResolver, ModeKey, QName, Resolver, TransformOptions, XsltError, XsltFunctions,
 };
 
 use crate::catalog::QName as CatalogQName;
@@ -105,7 +104,9 @@ impl Job {
             if param.is_static {
                 continue;
             }
-            let Some(select) = param.select.clone() else { continue };
+            let Some(select) = param.select.clone() else {
+                continue;
+            };
             params.push((qname_of(&param.name), select, param.as_type.clone()));
         }
 
@@ -188,10 +189,16 @@ impl Job {
                         messages,
                         ..Default::default()
                     },
-                    Err(e) => RunOutput { messages, ..failure(e) },
+                    Err(e) => RunOutput {
+                        messages,
+                        ..failure(e)
+                    },
                 }
             }
-            Err(e) => RunOutput { messages, ..failure(e) },
+            Err(e) => RunOutput {
+                messages,
+                ..failure(e)
+            },
         }
     }
 }
@@ -223,7 +230,9 @@ fn eval_param(
         ("xsi", "http://www.w3.org/2001/XMLSchema-instance"),
         ("fn", "http://www.w3.org/2005/xpath-functions"),
     ] {
-        namespaces.bindings.push((names.add(prefix), names.add(uri)));
+        namespaces
+            .bindings
+            .push((names.add(prefix), names.add(uri)));
     }
     let ctx = XPathContext::new(names)
         .with_namespaces(namespaces)

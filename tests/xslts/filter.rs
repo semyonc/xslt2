@@ -61,7 +61,11 @@ pub fn applicability(set: &TestSet, case: &TestCase, policy: &Policy) -> Applica
     // Test shapes that only exist in XSLT 3.0, whatever the spec dependency says.
     let env_has_package = match &case.environment {
         Some(EnvRef::Inline(e)) => e.has_package,
-        Some(EnvRef::Ref(r)) => set.environments.get(r).map(|e| e.has_package).unwrap_or(false),
+        Some(EnvRef::Ref(r)) => set
+            .environments
+            .get(r)
+            .map(|e| e.has_package)
+            .unwrap_or(false),
         None => false,
     };
     if case.test.has_package || env_has_package {
@@ -79,12 +83,20 @@ pub fn applicability(set: &TestSet, case: &TestCase, policy: &Policy) -> Applica
         }
         match dependency_supported(d, policy) {
             Some(true) if !d.satisfied => {
-                return Applicability::Unsatisfied(format!("{}={} is supported but the test needs its absence", d.kind, d.value));
+                return Applicability::Unsatisfied(format!(
+                    "{}={} is supported but the test needs its absence",
+                    d.kind, d.value
+                ));
             }
             Some(false) if d.satisfied => {
                 return Applicability::Unsatisfied(format!("{}={} not supported", d.kind, d.value));
             }
-            None => return Applicability::Unsatisfied(format!("unknown dependency {}={}", d.kind, d.value)),
+            None => {
+                return Applicability::Unsatisfied(format!(
+                    "unknown dependency {}={}",
+                    d.kind, d.value
+                ))
+            }
             _ => {}
         }
     }
@@ -98,7 +110,11 @@ fn dependency_supported(d: &Dependency, policy: &Policy) -> Option<bool> {
     Some(match d.kind.as_str() {
         "feature" => match v {
             // Implemented by M3 (serialization, BC mode, d-o-e) or given by the XPath engine.
-            "serialization" | "backwards_compatibility" | "namespace_axis" | "disabling_output_escaping" | "built_in_derived_types" => true,
+            "serialization"
+            | "backwards_compatibility"
+            | "namespace_axis"
+            | "disabling_output_escaping"
+            | "built_in_derived_types" => true,
             "schema_aware" => policy.schema_aware,
             "XSD_1.1" => policy.schema_aware && policy.xsd11,
             // dtd, XML_1.1, streaming, streaming-fallback, higher_order_functions, dynamic_evaluation,
@@ -113,11 +129,14 @@ fn dependency_supported(d: &Dependency, policy: &Policy) -> Option<bool> {
         "additional_normalization_form" => true,
         "default_output_encoding" => v.eq_ignore_ascii_case("UTF-8"),
         // Q28: non-UTF encodings for unparsed-text() are not planned for the first cut.
-        "unparsed_text_encoding" => v.eq_ignore_ascii_case("UTF-8") || v.eq_ignore_ascii_case("UTF-16"),
+        "unparsed_text_encoding" => {
+            v.eq_ignore_ascii_case("UTF-8") || v.eq_ignore_ascii_case("UTF-16")
+        }
         // Q23: English-only xsl:number words/ordinals in v1.
         "default_language_for_numbering" | "languages_for_numbering" => v == "en",
         // Q24: Gregorian ("AD") and ISO calendars only.
-        "supported_calendars_in_date_formatting_functions" | "default_calendar_in_date_formatting_functions" => v == "AD" || v == "ISO",
+        "supported_calendars_in_date_formatting_functions"
+        | "default_calendar_in_date_formatting_functions" => v == "AD" || v == "ISO",
         // XTRE0540 policy: recover by default, signal in --strict mode.
         "on-multiple-match" => match v {
             "error" => policy.strict_recoverable,

@@ -296,7 +296,9 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
     }
 
     fn top(&mut self) -> &mut Open {
-        self.stack.last_mut().expect("the document level is never popped")
+        self.stack
+            .last_mut()
+            .expect("the document level is never popped")
     }
 
     fn in_element(&self) -> bool {
@@ -337,10 +339,8 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
             .iter()
             .map(|(n, _, _)| (n.prefix.as_str(), n.uri.as_str()))
             .collect();
-        let keep_refs: Vec<(&str, &str)> = keep
-            .iter()
-            .map(|(p, u)| (p.as_str(), u.as_str()))
-            .collect();
+        let keep_refs: Vec<(&str, &str)> =
+            keep.iter().map(|(p, u)| (p.as_str(), u.as_str())).collect();
         // Pushes the scope it computes; `end_element` pops it.
         let (decls, fixed) = self.fixup.declarations_for(
             (name.prefix.as_str(), name.uri.as_str()),
@@ -1167,7 +1167,9 @@ impl<'s, 't> SequenceCollector<'s, 't> {
     /// without a parent, so one is built around it and the navigator hides it.
     fn push_parentless(
         &mut self,
-        build: impl FnOnce(&mut ComplexContentNormalizer<'t, ResultBuilder<'t>>) -> Result<(), XsltError>,
+        build: impl FnOnce(
+            &mut ComplexContentNormalizer<'t, ResultBuilder<'t>>,
+        ) -> Result<(), XsltError>,
         locate: Locate,
     ) -> Result<(), XsltError> {
         let builder = self.new_builder(GroupKind::Element)?;
@@ -1216,11 +1218,7 @@ impl<'s, 't> SequenceCollector<'s, 't> {
     /// is not the node it was copied from — which is the whole difference
     /// between `xsl:copy-of` and `xsl:sequence` when the result lands in a
     /// sequence rather than in element content.
-    fn push_copy(
-        &mut self,
-        nav: &Nav<'t>,
-        namespaces: CopyNamespaces,
-    ) -> Result<(), XsltError> {
+    fn push_copy(&mut self, nav: &Nav<'t>, namespaces: CopyNamespaces) -> Result<(), XsltError> {
         match nav.node_type() {
             // A document node copies to a new document node, with its own
             // identity: "the instruction adds a new document node to the

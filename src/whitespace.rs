@@ -114,7 +114,10 @@ mod tests {
 
     #[test]
     fn tokens_split_on_xml_whitespace_only() {
-        assert_eq!(tokens("a b\tc\nd").collect::<Vec<_>>(), vec!["a", "b", "c", "d"]);
+        assert_eq!(
+            tokens("a b\tc\nd").collect::<Vec<_>>(),
+            vec!["a", "b", "c", "d"]
+        );
         assert_eq!(tokens("  a   b  ").collect::<Vec<_>>(), vec!["a", "b"]);
         assert_eq!(tokens("").collect::<Vec<_>>(), Vec::<&str>::new());
         assert_eq!(tokens("   ").collect::<Vec<_>>(), Vec::<&str>::new());

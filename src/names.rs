@@ -28,12 +28,18 @@ pub struct QName {
 impl QName {
     /// A name in no namespace.
     pub fn local(local: impl Into<String>) -> Self {
-        Self { uri: String::new(), local: local.into() }
+        Self {
+            uri: String::new(),
+            local: local.into(),
+        }
     }
 
     /// A name in a namespace.
     pub fn new(uri: impl Into<String>, local: impl Into<String>) -> Self {
-        Self { uri: uri.into(), local: local.into() }
+        Self {
+            uri: uri.into(),
+            local: local.into(),
+        }
     }
 
     /// Whether this is a name in the XSLT namespace.
@@ -91,7 +97,10 @@ pub fn resolve_qname(
     let name = whitespace::trim(name);
     let (prefix, local) = split_qname(name);
     if !is_ncname(local) || (!prefix.is_empty() && !is_ncname(prefix)) {
-        return Err(XsltError::new(code, format!("{name:?} is not a valid QName")));
+        return Err(XsltError::new(
+            code,
+            format!("{name:?} is not a valid QName"),
+        ));
     }
     if prefix.is_empty() {
         return Ok(QName::local(local));
@@ -125,7 +134,12 @@ mod tests {
     fn an_unprefixed_qname_attribute_is_in_no_namespace() {
         let q = resolve_qname("x", |_| Some("urn:d".into()), codes::XTSE0020).unwrap();
         assert_eq!(q, QName::local("x"));
-        let q = resolve_qname("p:x", |p| (p == "p").then(|| "urn:p".to_string()), codes::XTSE0020).unwrap();
+        let q = resolve_qname(
+            "p:x",
+            |p| (p == "p").then(|| "urn:p".to_string()),
+            codes::XTSE0020,
+        )
+        .unwrap();
         assert_eq!(q, QName::new("urn:p", "x"));
         assert_eq!(q.to_string(), "{urn:p}x");
     }

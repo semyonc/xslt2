@@ -68,15 +68,14 @@ impl ResolvedEnvironment {
 }
 
 pub fn resolve(case: &TestCase, set: &TestSet) -> Result<ResolvedEnvironment, String> {
-    let env: Option<&Environment> = match &case.environment {
-        None => None,
-        Some(EnvRef::Inline(e)) => Some(e),
-        Some(EnvRef::Ref(name)) => Some(
-            set.environments
-                .get(name)
-                .ok_or_else(|| format!("environment '{}' not found in test-set {}", name, set.name))?,
-        ),
-    };
+    let env: Option<&Environment> =
+        match &case.environment {
+            None => None,
+            Some(EnvRef::Inline(e)) => Some(e),
+            Some(EnvRef::Ref(name)) => Some(set.environments.get(name).ok_or_else(|| {
+                format!("environment '{}' not found in test-set {}", name, set.name)
+            })?),
+        };
     Ok(match env {
         None => ResolvedEnvironment::default(),
         Some(e) => materialize(e, &set.dir),
@@ -107,7 +106,11 @@ fn materialize(e: &Environment, dir: &Path) -> ResolvedEnvironment {
         stylesheets: e
             .stylesheets
             .iter()
-            .map(|s| ResolvedStylesheet { path: resolve_path(dir, &s.file), uri: s.uri.clone(), role: s.role.clone() })
+            .map(|s| ResolvedStylesheet {
+                path: resolve_path(dir, &s.file),
+                uri: s.uri.clone(),
+                role: s.role.clone(),
+            })
             .collect(),
         schemas: e
             .schemas
@@ -133,7 +136,10 @@ fn materialize(e: &Environment, dir: &Path) -> ResolvedEnvironment {
         collections: e
             .collections
             .iter()
-            .map(|c| ResolvedCollection { uri: c.uri.clone(), sources: c.sources.iter().map(|s| resolve_source(s, dir)).collect() })
+            .map(|c| ResolvedCollection {
+                uri: c.uri.clone(),
+                sources: c.sources.iter().map(|s| resolve_source(s, dir)).collect(),
+            })
             .collect(),
         params: e.params.clone(),
     }

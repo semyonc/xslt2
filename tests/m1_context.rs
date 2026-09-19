@@ -40,7 +40,9 @@ fn messages(sheet: &str, source: &str) -> Vec<String> {
         .expect("compile");
     let arena = Bump::new();
     let run = compiled.transformation(&arena, TransformOptions::default());
-    let outcome = run.transform_source("urn:test:in.xml", source).expect("run");
+    let outcome = run
+        .transform_source("urn:test:in.xml", source)
+        .expect("run");
     outcome.messages.into_iter().map(|m| m.content).collect()
 }
 

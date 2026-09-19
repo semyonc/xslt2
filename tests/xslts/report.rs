@@ -137,12 +137,18 @@ impl Report {
     pub fn record(&mut self, r: CaseRecord) {
         self.totals.add(r.status);
         self.by_set.entry(r.set.clone()).or_default().add(r.status);
-        self.by_family.entry(r.family.clone()).or_default().add(r.status);
+        self.by_family
+            .entry(r.family.clone())
+            .or_default()
+            .add(r.status);
         if r.status != Status::NotApplicable {
             self.by_profile.entry(r.profile).or_default().add(r.status);
         }
         if r.status == Status::NotRun {
-            *self.not_run_reasons.entry(r.message.clone().unwrap_or_default()).or_default() += 1;
+            *self
+                .not_run_reasons
+                .entry(r.message.clone().unwrap_or_default())
+                .or_default() += 1;
         }
         self.records.push(r);
     }
@@ -203,7 +209,17 @@ impl Report {
         }
         let t = &self.totals;
         let (hp, hr) = self.headline();
-        println!("\n== Totals ({} {}, suite {}, {}) ==", self.engine, self.engine_version, self.suite_version, if self.schema_aware { "schema-aware" } else { "basic" });
+        println!(
+            "\n== Totals ({} {}, suite {}, {}) ==",
+            self.engine,
+            self.engine_version,
+            self.suite_version,
+            if self.schema_aware {
+                "schema-aware"
+            } else {
+                "basic"
+            }
+        );
         println!("  test cases seen:          {}", t.total);
         println!("  XSLT 2.0-applicable:      {}", t.applicable);
         println!("  excluded (documented):    {}", t.excluded);
@@ -218,7 +234,11 @@ impl Report {
             "  headline (basic, non-regex): {} / {} = {:.2}%",
             hp,
             hr,
-            if hr == 0 { 0.0 } else { 100.0 * hp as f64 / hr as f64 }
+            if hr == 0 {
+                0.0
+            } else {
+                100.0 * hp as f64 / hr as f64
+            }
         );
         println!("  elapsed:                  {:.1}s", self.seconds);
     }
@@ -227,13 +247,33 @@ impl Report {
     pub fn write_w3c_xml(&self, path: &Path) -> std::io::Result<()> {
         let mut f = std::fs::File::create(path)?;
         writeln!(f, r#"<?xml version="1.0" encoding="UTF-8"?>"#)?;
-        writeln!(f, r#"<test-suite-result xmlns="http://www.w3.org/2012/11/xslt30-test-results">"#)?;
-        writeln!(f, r#"   <implementation name="{}" version="{}" anonymous-result-column="false">"#, esc(&self.engine), esc(&self.engine_version))?;
-        writeln!(f, r#"      <organization name="xsd-schema / xslt2" anonymous="false"/>"#)?;
+        writeln!(
+            f,
+            r#"<test-suite-result xmlns="http://www.w3.org/2012/11/xslt30-test-results">"#
+        )?;
+        writeln!(
+            f,
+            r#"   <implementation name="{}" version="{}" anonymous-result-column="false">"#,
+            esc(&self.engine),
+            esc(&self.engine_version)
+        )?;
+        writeln!(
+            f,
+            r#"      <organization name="xsd-schema / xslt2" anonymous="false"/>"#
+        )?;
         writeln!(f, r#"      <submitter name="xslts harness"/>"#)?;
-        writeln!(f, r#"      <configuration lang="XT20" schema-aware="{}"/>"#, self.schema_aware)?;
+        writeln!(
+            f,
+            r#"      <configuration lang="XT20" schema-aware="{}"/>"#,
+            self.schema_aware
+        )?;
         writeln!(f, r#"   </implementation>"#)?;
-        writeln!(f, r#"   <test-run dateRun="{}" testsuiteVersion="{}"/>"#, today(), esc(&self.suite_version))?;
+        writeln!(
+            f,
+            r#"   <test-run dateRun="{}" testsuiteVersion="{}"/>"#,
+            today(),
+            esc(&self.suite_version)
+        )?;
         let mut current: Option<&str> = None;
         for r in &self.records {
             if current != Some(r.set.as_str()) {
@@ -244,10 +284,22 @@ impl Report {
                 current = Some(r.set.as_str());
             }
             let comment = match r.status {
-                Status::NotRun => Some(format!("dependency not satisfied: {}", r.message.clone().unwrap_or_default())),
-                Status::NotApplicable => Some(format!("spec dependency: {}", r.message.clone().unwrap_or_default())),
-                Status::Excluded => Some(format!("excluded: {}", r.message.clone().unwrap_or_default())),
-                Status::HarnessError => Some(format!("harness: {}", r.message.clone().unwrap_or_default())),
+                Status::NotRun => Some(format!(
+                    "dependency not satisfied: {}",
+                    r.message.clone().unwrap_or_default()
+                )),
+                Status::NotApplicable => Some(format!(
+                    "spec dependency: {}",
+                    r.message.clone().unwrap_or_default()
+                )),
+                Status::Excluded => Some(format!(
+                    "excluded: {}",
+                    r.message.clone().unwrap_or_default()
+                )),
+                Status::HarnessError => Some(format!(
+                    "harness: {}",
+                    r.message.clone().unwrap_or_default()
+                )),
                 Status::NotImplemented => Some(format!(
                     "not implemented: {}",
                     r.message.clone().unwrap_or_default()
@@ -256,8 +308,19 @@ impl Report {
                 Status::Pass => None,
             };
             match comment {
-                Some(c) => writeln!(f, r#"      <test-case name="{}" result="{}" comment="{}"/>"#, esc(&r.name), r.status.w3c_name(), esc(&c))?,
-                None => writeln!(f, r#"      <test-case name="{}" result="{}"/>"#, esc(&r.name), r.status.w3c_name())?,
+                Some(c) => writeln!(
+                    f,
+                    r#"      <test-case name="{}" result="{}" comment="{}"/>"#,
+                    esc(&r.name),
+                    r.status.w3c_name(),
+                    esc(&c)
+                )?,
+                None => writeln!(
+                    f,
+                    r#"      <test-case name="{}" result="{}"/>"#,
+                    esc(&r.name),
+                    r.status.w3c_name()
+                )?,
             }
         }
         if current.is_some() {
@@ -309,7 +372,10 @@ fn esc(s: &str) -> String {
 
 /// Today's date (UTC) as YYYY-MM-DD without a date-time dependency.
 fn today() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let days = (secs / 86_400) as i64;
     // Howard Hinnant's civil_from_days.
     let z = days + 719_468;

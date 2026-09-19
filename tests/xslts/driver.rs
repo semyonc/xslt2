@@ -68,7 +68,9 @@ fn print_usage() {
     println!("Usage: cargo test --test xslts --release -- [OPTIONS]");
     println!();
     println!("Options:");
-    println!("  -s, --suite PATH      Path to the xslt30-test checkout (default: ../../xslt30-test)");
+    println!(
+        "  -s, --suite PATH      Path to the xslt30-test checkout (default: ../../xslt30-test)"
+    );
     println!("  -g, --group NAME      Only test-sets whose name contains NAME (repeatable)");
     println!("  -t, --test NAME       Only the test case named NAME (repeatable, exact)");
     println!("  -a, --all             Also run cases on the exclusion list");
@@ -88,7 +90,9 @@ fn print_usage() {
     println!("                        (Canonical-XML equivalence); this is for triage only.");
     println!("      --report FILE     Write results in the W3C xslt30-test-results XML format");
     println!("      --expect-pass N   Exit with status 1 if fewer than N cases pass");
-    println!("      --self-test       Run the harness's own checks (assertion evaluation) and exit");
+    println!(
+        "      --self-test       Run the harness's own checks (assertion evaluation) and exit"
+    );
     println!("  -h, --help            Show this help");
 }
 
@@ -127,10 +131,12 @@ fn parse_args() -> Options {
             "-g" | "--group" => o.groups.push(value(&mut i, "--group")),
             "-t" | "--test" => o.tests.push(value(&mut i, "--test")),
             "-a" | "--all" => o.all = true,
-            "-m" | "--max" => o.max = Some(value(&mut i, "--max").parse().unwrap_or_else(|_| {
-                eprintln!("--max needs a number");
-                exit(2)
-            })),
+            "-m" | "--max" => {
+                o.max = Some(value(&mut i, "--max").parse().unwrap_or_else(|_| {
+                    eprintln!("--max needs a number");
+                    exit(2)
+                }))
+            }
             "-v" | "--verbose" => o.verbose = true,
             "-f" | "--failed" => o.failed_only = true,
             "-l" | "--list" => o.list = true,
@@ -142,10 +148,12 @@ fn parse_args() -> Options {
             "--skip" => o.skip.push(value(&mut i, "--skip")),
             "--lenient-xml" => o.lenient_xml = true,
             "--report" => o.report = Some(PathBuf::from(value(&mut i, "--report"))),
-            "--expect-pass" => o.expect_pass = Some(value(&mut i, "--expect-pass").parse().unwrap_or_else(|_| {
-                eprintln!("--expect-pass needs a number");
-                exit(2)
-            })),
+            "--expect-pass" => {
+                o.expect_pass = Some(value(&mut i, "--expect-pass").parse().unwrap_or_else(|_| {
+                    eprintln!("--expect-pass needs a number");
+                    exit(2)
+                }))
+            }
             "--self-test" => {
                 let n = compare::self_test::run();
                 println!("xslts: {n} self-tests passed");
@@ -224,7 +232,12 @@ fn run_suite() {
             exit(2)
         }
     };
-    let policy = Policy { schema_aware: opts.schema_aware, xsd11: opts.xsd11, strict_recoverable: opts.strict, run_excluded: opts.all };
+    let policy = Policy {
+        schema_aware: opts.schema_aware,
+        xsd11: opts.xsd11,
+        strict_recoverable: opts.strict,
+        run_excluded: opts.all,
+    };
     let engine: Box<dyn Engine> = if opts.stub {
         Box::new(StubEngine)
     } else {
@@ -248,13 +261,21 @@ fn run_suite() {
         report.engine_version
     );
     if opts.list {
-        println!("{:<34} {:>6} {:>10} {:>8}  file", "test-set", "cases", "applicable", "runnable");
+        println!(
+            "{:<34} {:>6} {:>10} {:>8}  file",
+            "test-set", "cases", "applicable", "runnable"
+        );
     }
 
     let mut load_errors = 0usize;
     let mut ran = 0usize;
     'sets: for set_ref in &catalog.test_sets {
-        if !opts.groups.is_empty() && !opts.groups.iter().any(|g| set_ref.name.contains(g.as_str())) {
+        if !opts.groups.is_empty()
+            && !opts
+                .groups
+                .iter()
+                .any(|g| set_ref.name.contains(g.as_str()))
+        {
             continue;
         }
         if opts.skip.iter().any(|s| set_ref.name.contains(s.as_str())) {
@@ -283,7 +304,14 @@ fn run_suite() {
                     _ => applicable += 1,
                 }
             }
-            println!("{:<34} {:>6} {:>10} {:>8}  {}", set.name, set.cases.len(), applicable, runnable, set.rel_file);
+            println!(
+                "{:<34} {:>6} {:>10} {:>8}  {}",
+                set.name,
+                set.cases.len(),
+                applicable,
+                runnable,
+                set.rel_file
+            );
             continue;
         }
 
@@ -344,7 +372,10 @@ fn run_suite() {
                             None => "engine not implemented".to_string(),
                         });
                     } else {
-                        let cx = CompareContext { set_dir: &set.dir, lenient_xml: opts.lenient_xml };
+                        let cx = CompareContext {
+                            set_dir: &set.dir,
+                            lenient_xml: opts.lenient_xml,
+                        };
                         let v = compare::evaluate_guarded(&case.result, &exec.output, &cx);
                         rec.status = match v.outcome {
                             Outcome::Pass => Status::Pass,
@@ -377,7 +408,10 @@ fn run_suite() {
     }
     if let Some(n) = opts.expect_pass {
         if report.totals.pass < n {
-            eprintln!("xslts: expected at least {n} passing cases, got {}", report.totals.pass);
+            eprintln!(
+                "xslts: expected at least {n} passing cases, got {}",
+                report.totals.pass
+            );
             exit(1);
         }
     }

@@ -19,12 +19,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::error::{codes, XsltError};
 use bumpalo::Bump;
 use slotmap::{new_key_type, SlotMap};
 use xsd_schema::document::{BufferDocNavigator, BufferDocument};
 use xsd_schema::namespace::NameTable;
 use xsd_schema::navigator::{DomNavigator, DomNodeType};
-use crate::error::{codes, XsltError};
 
 new_key_type! {
     /// Identifies one document inside a [`DocumentStore`].
@@ -159,14 +159,14 @@ impl<'t> DocumentStore<'t> {
     ) -> Result<&'t BufferDocument<'t>, XsltError> {
         let mut doc = BufferDocument::from_reader_default(xml.as_bytes(), self.arena, self.names)
             .map_err(|e| {
-                XsltError::new(
-                    codes::XTDE1170,
-                    match base_uri {
-                        Some(uri) => format!("could not read the document {uri:?}: {e}"),
-                        None => format!("could not read a document: {e}"),
-                    },
-                )
-            })?;
+            XsltError::new(
+                codes::XTDE1170,
+                match base_uri {
+                    Some(uri) => format!("could not read the document {uri:?}: {e}"),
+                    None => format!("could not read a document: {e}"),
+                },
+            )
+        })?;
         if let Some(uri) = base_uri {
             doc.set_document_base_uri(Some(self.arena.alloc_str(uri)));
         }

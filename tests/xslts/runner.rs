@@ -65,7 +65,10 @@ impl Engine for StubEngine {
         env!("CARGO_PKG_VERSION").to_string()
     }
     fn run(&self, _run: &TestRun<'_>) -> RunOutput {
-        RunOutput { not_implemented: true, ..Default::default() }
+        RunOutput {
+            not_implemented: true,
+            ..Default::default()
+        }
     }
 }
 
@@ -84,7 +87,15 @@ pub fn prepare<'a>(
     strict_recoverable: bool,
 ) -> TestRun<'a> {
     let stylesheet = principal_stylesheet(case, &env, set);
-    TestRun { set, case, env, stylesheet, base_dir: set.dir.clone(), schema_aware, strict_recoverable }
+    TestRun {
+        set,
+        case,
+        env,
+        stylesheet,
+        base_dir: set.dir.clone(),
+        schema_aware,
+        strict_recoverable,
+    }
 }
 
 fn pick(refs: &[StylesheetRef]) -> Option<&StylesheetRef> {
@@ -94,7 +105,11 @@ fn pick(refs: &[StylesheetRef]) -> Option<&StylesheetRef> {
         .or_else(|| refs.first())
 }
 
-fn principal_stylesheet(case: &TestCase, env: &ResolvedEnvironment, set: &TestSet) -> Option<PathBuf> {
+fn principal_stylesheet(
+    case: &TestCase,
+    env: &ResolvedEnvironment,
+    set: &TestSet,
+) -> Option<PathBuf> {
     if let Some(s) = pick(&case.test.stylesheets) {
         return s.file.as_ref().map(|f| set.dir.join(f));
     }
@@ -109,8 +124,16 @@ fn principal_stylesheet(case: &TestCase, env: &ResolvedEnvironment, set: &TestSe
 pub fn execute(engine: &dyn Engine, run: &TestRun<'_>) -> Execution {
     let start = Instant::now();
     match catch_unwind(AssertUnwindSafe(|| engine.run(run))) {
-        Ok(output) => Execution { output, duration: start.elapsed(), panic: None },
-        Err(payload) => Execution { output: RunOutput::default(), duration: start.elapsed(), panic: Some(panic_message(payload)) },
+        Ok(output) => Execution {
+            output,
+            duration: start.elapsed(),
+            panic: None,
+        },
+        Err(payload) => Execution {
+            output: RunOutput::default(),
+            duration: start.elapsed(),
+            panic: Some(panic_message(payload)),
+        },
     }
 }
 
