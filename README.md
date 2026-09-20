@@ -39,11 +39,11 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 |---|---|
 | XSLT 2.0-applicable | 6,619 |
 | runnable (dependencies satisfied) | 5,751 |
-| pass | 3,977 |
-| fail / wrongError / harnessError | 424 / 42 / 5 |
+| pass | 4,160 |
+| fail / wrongError / harnessError | 254 / 29 / 5 |
 | not implemented (`XSLT2-NOTIMPL`, M2–M4) | 1,303 |
-| pass rate over runnable | 69.15% |
-| headline (basic profile, non-regex families) | 2,904 / 4,233 = **68.6%** |
+| pass rate over runnable | 72.34% |
+| headline (basic profile, non-regex families) | 3,025 / 4,233 = **71.5%** |
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the
@@ -52,7 +52,9 @@ that exists only under the strict comparison starts with `assert-xml namespace m
 today, all real namespace-fixup / inheritance / `xsl:namespace-alias` bugs). Figures are from
 2026-09-19, after the M1 review fixes (`../../XSLT2_M1_REVIEW_FIXES.md`) and the M2a groundwork
 (`../../XSLT2_M2A_REPORT.md`), which re-labelled 114 cases from "fail" to "not implemented": they
-need `format-number` / `format-date`, which are stubs until M3d.
+need `format-number` / `format-date`, which are stubs until M3d. They are measured against the
+sibling `../xsd-schema` checkout with its current additive XPath fixes (navigation, `/` evaluation,
+operator errors, regex dialect, string literals, linear general comparison): 3,977 → 4,160.
 
 The sixteen test-sets M1 targets:
 
@@ -87,10 +89,12 @@ cargo test --test xslts --release -- -l                 # list test-sets and cou
 cargo test --test xslts --release -- --self-test        # the harness's own checks
 ```
 
-`unicode-90` is left out of the figures above with `--skip unicode-90`: its stylesheets compare
-a sequence of ~1.1 million codepoints against ~10⁵ nodes of a 53 MB source with a general
-comparison, which this engine evaluates pairwise. That is a performance limit, not a
-conformance answer, and the set is in the `misc/regex` family, outside the headline denominator.
+`unicode-90` is left out of the figures above with `--skip unicode-90`: 1,444 of its cases evaluate
+`$validrange[not(. = $c)]` — a general comparison against a large sequence, repeated about 1.1
+million times over a 53 MB source — which takes 30–60 s per case. That is a performance limit,
+not a conformance answer (it needs a comparison index cached across evaluations); the other 16
+cases use XPath 3.0 syntax. The set is in the `misc/regex` family, outside the headline
+denominator.
 
 Dependency policy: `tests/xslts/filter.rs`. Assertion semantics: `tests/xslts/compare.rs`
 (`assert` XPaths are evaluated with the `xsd-schema` engine over the re-parsed result). The

@@ -55,7 +55,7 @@ cargo test --test xslts --release                       # whole applicable suite
 cargo test --test xslts --release -- -g value-of -f     # one test-set, failures only
 cargo test --test xslts --release -- -t lre-027 -v      # one case, by name
 cargo test --test xslts --release -- --stub             # the M0 stub engine
-cargo test --test xslts --release -- --self-test        # the harness's own checks (15)
+cargo test --test xslts --release -- --self-test        # the harness's own checks (16)
 cargo test --test xslts --release -- --lenient-xml      # triage: ignore prefixes/namespaces in assert-xml
 cargo test --test xslts --release -- --report /tmp/x.xml
 cargo test --test xslts --release -- -l                 # list test-sets with counts

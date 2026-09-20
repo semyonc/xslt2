@@ -78,6 +78,10 @@ pub enum XsltFn {
     FormatDate,
     /// `format-time(…)` (§16.5).
     FormatTime,
+    /// `fn:error()` … `fn:error($error, $description, $error-object)` — F&O's
+    /// error-raising function. The engine ships the implementation but does not
+    /// register it among its built-ins, so it is registered here.
+    Error,
 }
 
 impl XsltFn {
@@ -106,6 +110,7 @@ impl XsltFn {
             XsltFn::FormatDateTime => "format-dateTime",
             XsltFn::FormatDate => "format-date",
             XsltFn::FormatTime => "format-time",
+            XsltFn::Error => "error",
         }
     }
 }
@@ -333,6 +338,39 @@ impl XsltFunctions {
                 string_opt(),
             );
         }
+
+        // ── fn:error, arities 0 to 3 ─────────────────────────────────────
+        //
+        // The XPath engine provides the implementation
+        // (`xpath::functions::special::error`) but deliberately leaves it out
+        // of its built-in catalog, so a host that wants the function registers
+        // it. It needs no running transformation, and the evaluator calls the
+        // engine's function straight through. Registered with `add`, not
+        // `add_stub`: it works, so `function-available('error')` is true.
+        //
+        // One signature per arity, with the types F&O gives that arity: the
+        // one-argument form takes `xs:QName`, with no occurrence indicator, and
+        // only the two- and three-argument forms accept an empty `$error`. The
+        // engine's implementation enforces the same types itself, so a wrong
+        // declaration here could not loosen them — but a right one is what
+        // XPath 1.0 compatibility mode converts against.
+        let qname = SequenceType::one(ItemType::AtomicType(xsd_schema::types::XmlTypeCode::QName));
+        let qname_opt =
+            SequenceType::optional(ItemType::AtomicType(xsd_schema::types::XmlTypeCode::QName));
+        this.add(XsltFn::Error, "error", vec![], SequenceType::empty());
+        this.add(XsltFn::Error, "error", vec![qname], SequenceType::empty());
+        this.add(
+            XsltFn::Error,
+            "error",
+            vec![qname_opt.clone(), string()],
+            SequenceType::empty(),
+        );
+        this.add(
+            XsltFn::Error,
+            "error",
+            vec![qname_opt, string(), items()],
+            SequenceType::empty(),
+        );
         this
     }
 

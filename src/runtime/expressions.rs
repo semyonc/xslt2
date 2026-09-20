@@ -103,6 +103,11 @@ impl<'a, 't> Transformation<'a, 't> {
         if let Some(parked) = self.parked_error.borrow_mut().take() {
             return parked;
         }
+        // An error the engine identifies by an error QName (what `fn:error`
+        // raises) is reported by that QName's local name.
+        if let Some(raised) = crate::error::raised_error_to_xslt(&e) {
+            return raised;
+        }
         match e.error_code() {
             Some(code) => XsltError::new(code, e.to_string()),
             None => match e {

@@ -159,7 +159,7 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
             format!("<{}> has no @code, so nothing is asserted", a.label()),
         ),
         Error { code } => match &out.error {
-            Some(e) if code_matches(code, &e.code) => Verdict::pass(),
+            Some(e) if code_matches(code, e) => Verdict::pass(),
             Some(e) => Verdict::wrong_error(format!(
                 "expected error {code}, got {}: {}",
                 e.code, e.message
@@ -169,7 +169,7 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
             )),
         },
         AssertSerializationError { code } => match &out.error {
-            Some(e) if code_matches(code, &e.code) => Verdict::pass(),
+            Some(e) if code_matches(code, e) => Verdict::pass(),
             Some(e) => Verdict::wrong_error(format!(
                 "expected serialization error {code}, got {}: {}",
                 e.code, e.message
@@ -393,17 +393,43 @@ fn join(a: Option<String>, b: Option<String>) -> Option<String> {
 
 /// `*` matches any code; a prefixed code (`err:XTSE0010`) or an EQName
 /// (`Q{http://example.com/err}XXXX8888`) is compared by local part.
-fn code_matches(expected: &str, actual: &str) -> bool {
-    let local = |s: &str| {
-        let s = s.trim();
-        match s.strip_prefix("Q{") {
-            // The namespace URI of an EQName contains `:`; the local part is
-            // what follows the closing brace.
-            Some(rest) => rest.rsplit('}').next().unwrap_or(rest).to_string(),
-            None => s.rsplit(':').next().unwrap_or(s).to_string(),
-        }
-    };
-    expected == "*" || local(expected) == local(actual)
+///
+/// One exception: when the catalog writes an EQName **and** the actual error
+/// carries an error QName namespace of its own — which only `fn:error` produces,
+/// so only `XsltError::error_namespace` can report it — both parts must match.
+/// Comparing local names alone would let `Q{urn:a}boom` pass on a
+/// `Q{urn:b}boom`, which is a different error. Where the expected code carries
+/// no namespace information at all (`XTDE0040`, `err:XPTY0004`, `*`), or the
+/// actual error is one the processor raised, nothing changes.
+fn code_matches(expected: &str, actual: &xslt2::XsltError) -> bool {
+    if expected.trim() == "*" {
+        return true;
+    }
+    if let (Some(want_ns), Some(got_ns)) = (eqname_namespace(expected), actual.error_namespace()) {
+        return want_ns == got_ns && local_part(expected) == actual.code;
+    }
+    local_part(expected) == local_part(&actual.code)
+}
+
+/// The local part of an expected or actual error code, however it is spelled.
+fn local_part(code: &str) -> &str {
+    let code = code.trim();
+    match code.strip_prefix("Q{") {
+        // The namespace URI of an EQName contains `:`; the local part is what
+        // follows the closing brace.
+        Some(rest) => rest.rsplit('}').next().unwrap_or(rest),
+        None => code.rsplit(':').next().unwrap_or(code),
+    }
+}
+
+/// The namespace URI of an expected code written as the EQName `Q{uri}local`;
+/// `None` for a bare or prefixed code, which says nothing about a namespace.
+fn eqname_namespace(expected: &str) -> Option<&str> {
+    expected
+        .trim()
+        .strip_prefix("Q{")?
+        .split_once('}')
+        .map(|(ns, _)| ns)
 }
 
 fn bool_result(out: &RunOutput, want: bool) -> Verdict {
@@ -1353,23 +1379,54 @@ pub mod self_test {
 
     /// An expected code may be written `err:CODE`, `Q{uri}CODE` or bare; all name the same error.
     fn error_codes_compare_by_local_part() {
-        assert!(code_matches("XTSE0010", "XTSE0010"));
-        assert!(code_matches("err:XTSE0010", "XTSE0010"));
+        let processor = |code: &str| xslt2::XsltError::new(code, "m");
+        assert!(code_matches("XTSE0010", &processor("XTSE0010")));
+        assert!(code_matches("err:XTSE0010", &processor("XTSE0010")));
         assert!(code_matches(
             "Q{http://www.w3.org/2005/xqt-errors}XTDE1420",
-            "XTDE1420"
+            &processor("XTDE1420")
         ));
         assert!(code_matches(
             "Q{http://example.com/err}XXXX8888",
-            "my:XXXX8888"
+            &processor("my:XXXX8888")
         ));
-        assert!(code_matches("Q{}XX99", "XX99"));
-        assert!(code_matches("*", "anything"));
+        assert!(code_matches("Q{}XX99", &processor("XX99")));
+        assert!(code_matches("*", &processor("anything")));
         assert!(!code_matches(
             "Q{http://www.w3.org/2005/xqt-errors}XTDE1420",
-            "XTDE1425"
+            &processor("XTDE1425")
         ));
-        assert!(!code_matches("", "XTSE0010"));
+        assert!(!code_matches("", &processor("XTSE0010")));
+    }
+
+    /// When the catalog writes an EQName and the error carries an error QName of
+    /// its own — which only `fn:error` produces — both halves must match.
+    fn raised_error_codes_compare_the_namespace_too() {
+        let raised = |ns: &str, local: &str| xslt2::XsltError::raised(ns, local, "why");
+
+        // Same namespace, same local name.
+        assert!(code_matches("Q{urn:e}boom", &raised("urn:e", "boom")));
+        // Same local name, different namespace: a different error.
+        assert!(!code_matches("Q{urn:e}boom", &raised("urn:other", "boom")));
+        // Same namespace, different local name.
+        assert!(!code_matches("Q{urn:e}boom", &raised("urn:e", "bang")));
+        // An error QName in no namespace against `Q{}local`.
+        assert!(code_matches("Q{}bare", &raised("", "bare")));
+        assert!(!code_matches("Q{urn:e}bare", &raised("", "bare")));
+        // An expected code with no namespace information still compares by
+        // local part alone, whatever namespace the error carries.
+        assert!(code_matches("boom", &raised("urn:e", "boom")));
+        assert!(code_matches("err:boom", &raised("urn:e", "boom")));
+        assert!(code_matches("*", &raised("urn:e", "boom")));
+        // And `fn:error`'s own default QName keeps matching its bare code.
+        assert!(code_matches(
+            "FOER0000",
+            &raised("http://www.w3.org/2005/xqt-errors", "FOER0000")
+        ));
+        assert!(code_matches(
+            "Q{http://www.w3.org/2005/xqt-errors}FOER0000",
+            &raised("http://www.w3.org/2005/xqt-errors", "FOER0000")
+        ));
     }
 
     /// Run every self-test; panics on the first failure. Returns the number of checks run.
@@ -1389,6 +1446,7 @@ pub mod self_test {
         panic_in_assertion_evaluation_is_a_harness_error();
         unverifiable_assertions_are_harness_errors();
         error_codes_compare_by_local_part();
-        15
+        raised_error_codes_compare_the_namespace_too();
+        16
     }
 }

@@ -323,8 +323,11 @@ impl<'a, 't> Transformation<'a, 't> {
         let result = self.run_entry(&mut cx, &mut out);
         match result {
             Ok(()) => {}
-            Err(e) if e.code == codes::XTMM9000 => {
+            Err(e) if e.is_termination() => {
                 // `terminate="yes"`: the message is kept, the result is not.
+                // `is_termination` rather than a comparison against the code
+                // string, so that a stylesheet cannot reach this arm by giving
+                // its own `fn:error` QName the local name `XTMM9000`.
                 return Err(e);
             }
             Err(e) => return Err(e),

@@ -237,6 +237,16 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
             // §16.4, §16.5. These are in the catalog as stubs only, so that a
             // call to one is reported as a missing feature rather than as an
             // unknown function (XPST0017) at compile time.
+            // F&O's `fn:error`: the engine ships the implementation but does
+            // not register it, so the catalog registers it here and the call
+            // goes straight through. It never returns a value.
+            // `XsltError::from` keeps the whole error QName and the `Raised`
+            // origin for an error the engine identifies by a QName, so the
+            // error the stylesheet asked for reaches §5.5.4's recovery as the
+            // dynamic error it is, whatever its local name.
+            XsltFn::Error => {
+                xsd_schema::xpath::functions::special::error(ctx, args).map_err(XsltError::from)
+            }
             XsltFn::FormatNumber
             | XsltFn::FormatDateTime
             | XsltFn::FormatDate

@@ -50,7 +50,7 @@ pub mod stylesheet;
 pub mod whitespace;
 
 pub use compile::Compiler;
-pub use error::{ErrorKind, Location, XsltError};
+pub use error::{ErrorKind, ErrorOrigin, Location, XsltError};
 pub use functions::XsltFunctions;
 pub use model::{CompiledStylesheet, ModeKey};
 pub use names::QName;
