@@ -11,8 +11,8 @@ use super::dispatch::children_of;
 use super::{Frame, Message, Transformation};
 use crate::error::{codes, XsltError};
 use crate::model::*;
-use crate::names::{is_ncname, split_qname, QName, XML_NS};
-use crate::receiver::{CopyNamespaces, Name, Nav, Receiver};
+use crate::names::{is_ncname, QName, XML_NS};
+use crate::receiver::{namespace_nodes_of, CopyNamespaces, Name, Nav, Receiver};
 use crate::whitespace;
 
 impl<'a, 't> Transformation<'a, 't> {
@@ -181,9 +181,13 @@ impl<'a, 't> Transformation<'a, 't> {
                 namespaces,
                 attrs,
                 attr_sets,
+                inherit_namespaces,
                 body,
             } => {
                 out.start_element(name, None, false)?;
+                if !*inherit_namespaces {
+                    out.no_inherit_namespaces()?;
+                }
                 for (prefix, uri) in namespaces {
                     out.namespace(prefix, uri)?;
                 }
@@ -201,19 +205,23 @@ impl<'a, 't> Transformation<'a, 't> {
                 name,
                 namespace,
                 attr_sets,
+                inherit_namespaces,
                 body,
-                ..
             } => {
                 let lexical = self.avt(name, frame, cx)?;
-                let (prefix, local) = split_qname(whitespace::trim(&lexical));
-                if !is_ncname(local) || (!prefix.is_empty() && !is_ncname(prefix)) {
-                    return Err(XsltError::new(
-                        codes::XTDE0820,
-                        format!("{lexical:?} is not a lexical QName"),
-                    ));
-                }
+                let (prefix, local) =
+                    lexical_qname(whitespace::trim(&lexical)).ok_or_else(|| {
+                        XsltError::new(
+                            codes::XTDE0820,
+                            format!("{lexical:?} is not a lexical QName"),
+                        )
+                    })?;
                 let uri = match namespace {
-                    Some(avt) => self.avt(avt, frame, cx)?,
+                    Some(avt) => {
+                        let uri = self.avt(avt, frame, cx)?;
+                        check_namespace_uri(&uri, codes::XTDE0835)?;
+                        uri
+                    }
                     None => self.static_prefix(instruction, prefix).ok_or_else(|| {
                         XsltError::new(
                             codes::XTDE0830,
@@ -223,6 +231,9 @@ impl<'a, 't> Transformation<'a, 't> {
                 };
                 let prefix = if uri.is_empty() { "" } else { prefix };
                 out.start_element(&Name::qualified(prefix, local, &uri), None, false)?;
+                if !*inherit_namespaces {
+                    out.no_inherit_namespaces()?;
+                }
                 self.attribute_sets(attr_sets, frame, cx, out)?;
                 out.end_start_tag()?;
                 self.eval_body(body, frame, cx, out)?;
@@ -236,13 +247,13 @@ impl<'a, 't> Transformation<'a, 't> {
                 value,
             } => {
                 let lexical = self.avt(name, frame, cx)?;
-                let (prefix, local) = split_qname(whitespace::trim(&lexical));
-                if !is_ncname(local) || (!prefix.is_empty() && !is_ncname(prefix)) {
-                    return Err(XsltError::new(
-                        codes::XTDE0850,
-                        format!("{lexical:?} is not a lexical QName"),
-                    ));
-                }
+                let (prefix, local) =
+                    lexical_qname(whitespace::trim(&lexical)).ok_or_else(|| {
+                        XsltError::new(
+                            codes::XTDE0850,
+                            format!("{lexical:?} is not a lexical QName"),
+                        )
+                    })?;
                 if namespace.is_none() && whitespace::trim(&lexical) == "xmlns" {
                     return Err(XsltError::new(
                         codes::XTDE0855,
@@ -250,7 +261,11 @@ impl<'a, 't> Transformation<'a, 't> {
                     ));
                 }
                 let uri = match namespace {
-                    Some(avt) => self.avt(avt, frame, cx)?,
+                    Some(avt) => {
+                        let uri = self.avt(avt, frame, cx)?;
+                        check_namespace_uri(&uri, codes::XTDE0865)?;
+                        uri
+                    }
                     None if prefix.is_empty() => String::new(),
                     None => self.static_prefix(instruction, prefix).ok_or_else(|| {
                         XsltError::new(
@@ -292,6 +307,7 @@ impl<'a, 't> Transformation<'a, 't> {
                         "xsl:namespace must not produce a zero-length namespace URI",
                     ));
                 }
+                check_namespace_uri(&uri, codes::XTDE0905)?;
                 if (prefix == "xml") != (uri == XML_NS) {
                     return Err(XsltError::new(
                         codes::XTDE0925,
@@ -325,16 +341,27 @@ impl<'a, 't> Transformation<'a, 't> {
                 // §11.5: a new document node whose content is the sequence
                 // constructor; in element content it contributes its children.
                 out.start_document()?;
+                out.document_base_uri(&self.sheet.static_contexts.get(instruction.ctx).base_uri)?;
                 self.eval_body(body, frame, cx, out)?;
                 out.end_document()
             }
 
             InstructionKind::Copy {
                 copy_namespaces,
+                inherit_namespaces,
                 attr_sets,
                 body,
-                ..
-            } => self.copy_shallow(*copy_namespaces, attr_sets, body, frame, cx, out),
+            } => self.copy_shallow(
+                ShallowCopyNamespaces {
+                    copy: copy_scope(*copy_namespaces),
+                    inherit: *inherit_namespaces,
+                },
+                attr_sets,
+                body,
+                frame,
+                cx,
+                out,
+            ),
 
             InstructionKind::CopyOf {
                 select,
@@ -397,7 +424,7 @@ impl<'a, 't> Transformation<'a, 't> {
     /// §11.9.1 `xsl:copy`.
     fn copy_shallow(
         &self,
-        copy_namespaces: bool,
+        namespaces: ShallowCopyNamespaces,
         attr_sets: &[QName],
         body: &Body,
         frame: &mut Frame<'t>,
@@ -424,16 +451,19 @@ impl<'a, 't> Transformation<'a, 't> {
             }
             DomNodeType::Element => {
                 out.start_element(&Name::of(&nav), None, false)?;
-                if copy_namespaces {
-                    let mut ns = nav.clone();
-                    if ns.move_to_first_namespace(NamespaceAxisScope::ExcludeXml) {
-                        loop {
-                            let (prefix, uri) = (ns.local_name().to_string(), ns.value());
-                            out.namespace(&prefix, &uri)?;
-                            if !ns.move_to_next_namespace(NamespaceAxisScope::ExcludeXml) {
-                                break;
-                            }
-                        }
+                if !namespaces.inherit {
+                    out.no_inherit_namespaces()?;
+                }
+                if namespaces.copy == CopyNamespaces::All {
+                    // §11.9.2: "all the namespace nodes of the original element
+                    // are copied". A namespace *node* never has a zero-length
+                    // URI, so an `xmlns=""` on the source element contributes
+                    // none — and because the element `xsl:copy` produces is a
+                    // **newly constructed** element, §5.7.1's last rule lets it
+                    // inherit the default namespace of the element it is being
+                    // constructed in (`namespace-3002`, spec bug 5857).
+                    for (prefix, uri) in namespace_nodes_of(&nav, NamespaceAxisScope::ExcludeXml) {
+                        out.namespace(&prefix, &uri)?;
                     }
                 }
                 self.attribute_sets(attr_sets, frame, cx, out)?;
@@ -445,7 +475,7 @@ impl<'a, 't> Transformation<'a, 't> {
             // the context node … The sequence constructor, if present, is not
             // evaluated." A *new* node: `append_copy`, so that a copy landing
             // in a sequence is parentless rather than the original node.
-            _ => out.append_copy(&XmlItem::Node(nav), copy_scope(copy_namespaces)),
+            _ => out.append_copy(&XmlItem::Node(nav), namespaces.copy),
         }
     }
 
@@ -515,6 +545,74 @@ impl<'a, 't> Transformation<'a, 't> {
         }
         sc.resolve_prefix(prefix)
     }
+}
+
+/// `name` split into prefix and local part if it is a **lexical QName**, and
+/// `None` if it is not.
+///
+/// `split_qname` alone is not a check: it reads `":foo"` as an unprefixed
+/// `foo`, so `<xsl:element name="{$prefix}:foo"/>` with an empty `$prefix`
+/// built an element instead of raising XTDE0820 / XTDE0850 (`namespace-3203`).
+/// A lexical QName is `NCName (":" NCName)?` — at most one colon, and neither
+/// part may be empty.
+fn lexical_qname(name: &str) -> Option<(&str, &str)> {
+    let (prefix, local) = match name.split_once(':') {
+        Some((prefix, local)) if prefix.is_empty() || local.contains(':') => return None,
+        Some((prefix, local)) => (prefix, local),
+        None => ("", name),
+    };
+    if !is_ncname(local) || (!prefix.is_empty() && !is_ncname(prefix)) {
+        return None;
+    }
+    Some((prefix, local))
+}
+
+/// The namespace URI a node-construction instruction was handed, checked
+/// against §11.2 / §11.3 / §11.7.
+///
+/// > \[ERR XTDE0835\] It is a non-recoverable dynamic error if the effective
+/// > value of the `namespace` attribute is not in the lexical space of the
+/// > `xs:anyURI` data type or if it is the string
+/// > `http://www.w3.org/2000/xmlns/`.
+///
+/// XTDE0865 (`xsl:attribute`) and XTDE0905 (`xsl:namespace`, on the node's
+/// string value) are the same sentence, so the check is shared and the caller
+/// passes its code.
+///
+/// The XMLNS namespace is named outright, which is what every case in this
+/// milestone's clusters needs. The `xs:anyURI` half is deliberately minimal:
+/// `xs:anyURI`'s lexical space is famously wider than the set of
+/// RFC-conformant URIs — the corpus is full of URIs that no RFC would accept,
+/// `namespace-3005` builds one containing a `"` and expects it to work — so
+/// only two things are rejected, a control character and a second `#` (a URI
+/// reference has exactly one fragment separator at most, which is what
+/// `error-0905a`'s `####` trips over). Anything stricter costs passing cases.
+fn check_namespace_uri(uri: &str, code: &str) -> Result<(), XsltError> {
+    /// The namespace `xmlns` declarations themselves nominally live in; no
+    /// node may be in it (§5.7.3's XDM constraints, erratum E6).
+    const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
+    if uri == XMLNS_NS {
+        return Err(XsltError::new(
+            code,
+            format!("{XMLNS_NS} cannot be used as a namespace URI"),
+        ));
+    }
+    if uri.chars().any(char::is_control) || uri.matches('#').count() > 1 {
+        return Err(XsltError::new(
+            code,
+            format!("{uri:?} is not in the lexical space of xs:anyURI"),
+        ));
+    }
+    Ok(())
+}
+
+/// The two namespace settings of `xsl:copy` (§11.9.1): which of the source
+/// element's namespace nodes the copy carries, and whether the copy's own
+/// namespace nodes reach the content constructed inside it.
+#[derive(Clone, Copy)]
+struct ShallowCopyNamespaces {
+    copy: CopyNamespaces,
+    inherit: bool,
 }
 
 /// The `copy-namespaces` setting of a copying instruction (§11.9.1, §11.9.2).

@@ -989,6 +989,22 @@ pub fn base_uri_of(nav: &Nav<'_>, module_uri: &str) -> String {
 /// The in-scope namespace bindings of an element, prefix → URI, sorted.
 ///
 /// The `xml` prefix is left out: it is implicit everywhere and never declared.
+///
+/// A namespace **undeclaration** — `xmlns=""`, or the XML 1.1 `xmlns:p=""` —
+/// is *not* a binding: it cancels one. The axis this walks
+/// ([`NamespaceAxisScope::ExcludeXml`]) is upstream's view of the
+/// *declarations*, which keeps an undeclaration so that serialization and
+/// shallow copy can see it; the dedup by prefix therefore does the shadowing
+/// for us — the innermost declaration for a prefix is the one that survives —
+/// and dropping the zero-length URIs afterwards leaves exactly the bindings
+/// that are in scope. An outer default namespace cancelled by an inner
+/// `xmlns=""` is already gone at that point, so it cannot leak back.
+///
+/// Every caller wants bindings, not declarations: §11.1.2's namespace nodes of
+/// a literal result element, §5.4.1's statically known namespaces, and the
+/// `[xsl:]exclude-result-prefixes` / `[xsl:]extension-element-prefixes` prefix
+/// lists — where an undeclared default namespace must make `#default`
+/// XTSE0809 (§11.1.3), not resolve to the zero-length URI.
 pub fn in_scope_namespaces(nav: &Nav<'_>) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut ns = nav.clone();
@@ -1005,6 +1021,7 @@ pub fn in_scope_namespaces(nav: &Nav<'_>) -> Vec<(String, String)> {
             }
         }
     }
+    out.retain(|(_, uri)| !uri.is_empty());
     out.sort();
     out
 }
@@ -1068,29 +1085,95 @@ pub fn static_context_of(nav: &Nav<'_>, module: &Module<'_>) -> Result<StaticCon
         }
         if let Some(v) = standard_attr(a, "exclude-result-prefixes") {
             for token in whitespace::tokens(&v) {
-                push_namespace(&mut ctx.excluded_namespaces, token, &in_scope)?;
+                push_namespace(
+                    &mut ctx.excluded_namespaces,
+                    token,
+                    &in_scope,
+                    PrefixList::ExcludeResult,
+                )?;
             }
         }
         if let Some(v) = standard_attr(a, "extension-element-prefixes") {
             for token in whitespace::tokens(&v) {
-                push_namespace(&mut ctx.extension_namespaces, token, &in_scope)?;
+                push_namespace(
+                    &mut ctx.extension_namespaces,
+                    token,
+                    &in_scope,
+                    PrefixList::ExtensionElement,
+                )?;
             }
         }
     }
     Ok(ctx)
 }
 
+/// Which attribute a prefix list serves — and so which error an unusable token
+/// raises. The two lists look alike and are spelled alike, but §11.1.3 and
+/// §18.2.1 give them different codes, and §11.1.3 gives `#default` a code of
+/// its own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PrefixList {
+    /// `[xsl:]exclude-result-prefixes` (§11.1.3): XTSE0808 for a prefix with no
+    /// binding in scope, XTSE0809 for `#default` with no default namespace.
+    ExcludeResult,
+    /// `[xsl:]extension-element-prefixes` (§18.2.1): XTSE1430 for both.
+    ExtensionElement,
+}
+
+impl PrefixList {
+    /// The attribute name, for the message.
+    fn attribute(self) -> &'static str {
+        match self {
+            Self::ExcludeResult => "exclude-result-prefixes",
+            Self::ExtensionElement => "extension-element-prefixes",
+        }
+    }
+
+    /// The code for a token other than `#default` that names no in-scope
+    /// prefix.
+    fn unbound_code(self) -> &'static str {
+        match self {
+            Self::ExcludeResult => codes::XTSE0808,
+            Self::ExtensionElement => codes::XTSE1430,
+        }
+    }
+
+    /// The code for `#default` where no default namespace is in force.
+    fn no_default_code(self) -> &'static str {
+        match self {
+            Self::ExcludeResult => codes::XTSE0809,
+            Self::ExtensionElement => codes::XTSE1430,
+        }
+    }
+}
+
 /// One token of `exclude-result-prefixes` / `extension-element-prefixes`:
 /// an NCName, `#default`, or `#all`, resolved to the namespace URI (or URIs)
 /// it designates in `in_scope`.
 ///
+/// > \[ERR XTSE0808\] It is a static error if a namespace prefix is used within
+/// > the `[xsl:]exclude-result-prefixes` attribute and there is no namespace
+/// > binding in scope for that prefix.
+/// >
+/// > \[ERR XTSE0809\] It is a static error if the value `#default` is used
+/// > within the `[xsl:]exclude-result-prefixes` attribute and the parent
+/// > element of the `[xsl:]exclude-result-prefixes` attribute has no default
+/// > namespace.
+/// >
 /// > \[ERR XTSE1430\] It is a static error if there is no namespace bound to
-/// > the prefix on the element bearing the `[xsl:]exclude-result-prefixes` or
-/// > `[xsl:]extension-element-prefixes` attribute.
+/// > the prefix on the element bearing the `[xsl:]extension-element-prefixes`
+/// > attribute or, when `#default` is specified, if there is no default
+/// > namespace.
+///
+/// XTSE1430 is scoped to `extension-element-prefixes`; the engine used to raise
+/// it for both lists. The tokens are separated by *whitespace* only — a comma
+/// is part of the token, and so is simply not a prefix in scope
+/// (`error-0808b`).
 fn push_namespace(
     out: &mut Vec<String>,
     token: &str,
     in_scope: &[(String, String)],
+    list: PrefixList,
 ) -> Result<(), XsltError> {
     let mut push = |uri: &str| {
         if !out.iter().any(|u| u == uri) {
@@ -1103,18 +1186,32 @@ fn push_namespace(
                 push(uri);
             }
         }
-        other => {
-            let prefix = if other == "#default" { "" } else { other };
-            match in_scope.iter().find(|(p, _)| p == prefix) {
-                Some((_, uri)) => push(uri),
-                None => {
-                    return Err(XsltError::new(
-                        codes::XTSE1430,
-                        format!("the prefix {other:?} listed in a prefix list is not in scope"),
-                    ))
-                }
+        "#default" => match in_scope.iter().find(|(p, _)| p.is_empty()) {
+            Some((_, uri)) => push(uri),
+            // An `xmlns=""` undeclaration leaves no default-namespace binding,
+            // so `#default` designates nothing — see `in_scope_namespaces`.
+            None => {
+                return Err(XsltError::new(
+                    list.no_default_code(),
+                    format!(
+                        "#default is listed in {} but no default namespace is in force",
+                        list.attribute()
+                    ),
+                ))
             }
-        }
+        },
+        other => match in_scope.iter().find(|(p, _)| p == other) {
+            Some((_, uri)) => push(uri),
+            None => {
+                return Err(XsltError::new(
+                    list.unbound_code(),
+                    format!(
+                        "the prefix {other:?} listed in {} is not bound to a namespace",
+                        list.attribute()
+                    ),
+                ))
+            }
+        },
     }
     Ok(())
 }

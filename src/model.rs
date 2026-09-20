@@ -289,6 +289,9 @@ pub enum InstructionKind {
         namespaces: Vec<(String, String)>,
         attrs: Vec<(crate::receiver::Name, Avt)>,
         attr_sets: Vec<QName>,
+        /// §11.1's `[xsl:]inherit-namespaces`: whether this element's namespace
+        /// nodes reach its descendants (§5.7.1's last rule).
+        inherit_namespaces: bool,
         body: Body,
     },
     Element {

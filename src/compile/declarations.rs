@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use xsd_schema::navigator::{DomNavigator, DomNodeType};
 
 use super::attributes::{check_attributes, STANDARD_ATTRS};
+use super::Alias;
 use super::Builder;
 use super::ScopeEntry;
 use crate::error::{codes, XsltError};
@@ -102,6 +103,9 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             }
         }
         self.declare_globals(&global_decls)?;
+        // §11.1.4 is a whole-stylesheet mapping resolved by import precedence,
+        // so it is settled before the first literal result element compiles.
+        self.collect_aliases()?;
 
         // Pass 2: everything, now that names resolve.
         for unit_index in 0..self.modules.units.len() {
@@ -235,7 +239,9 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 self.space_declaration(nav, ctx, precedence, module)
             }
             "attribute-set" => self.attribute_set(nav, module_id, ctx, precedence),
-            "namespace-alias" => self.namespace_alias(nav, ctx, module),
+            // Collected by `collect_aliases` before this pass; only the
+            // attribute check above still applies here.
+            "namespace-alias" => Ok(()),
             name if unimplemented_declaration(name).is_some() => Err(XsltError::not_implemented(
                 format!("xsl:{name}"),
                 unimplemented_declaration(name).expect("checked"),
@@ -372,34 +378,141 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         Ok(())
     }
 
+    /// §11.1.4 `xsl:namespace-alias`.
+    ///
+    /// Two rules the engine used to miss, both of them about what a prefix is
+    /// allowed to be:
+    ///
+    /// > The default namespace (as declared by `xmlns`) may be specified by
+    /// > using `#default` instead of a prefix. **If no default namespace is in
+    /// > force, specifying `#default` denotes the null namespace URI.** This
+    /// > allows elements that are in no namespace in the stylesheet to acquire
+    /// > a namespace in the result document, or vice versa.
+    /// >
+    /// > \[ERR XTSE0812\] It is a static error if a value **other than
+    /// > `#default`** is specified for either the `stylesheet-prefix` or the
+    /// > `result-prefix` attributes of the `xsl:namespace-alias` element when
+    /// > there is no in-scope binding for that namespace prefix.
+    ///
+    /// So `#default` is never an error — it simply denotes the null namespace
+    /// URI when nothing is bound — and a real prefix that is unbound is
+    /// XTSE0812, not the generic XTSE0280 of §5.1.
+    ///
+    /// > If a literal namespace URI is declared to be an alias for multiple
+    /// > different target namespace URIs, then the declaration with the highest
+    /// > import precedence is used.
+    /// >
+    /// > \[ERR XTSE0810\] It is a static error if there is more than one such
+    /// > declaration with the same literal namespace URI and the same import
+    /// > precedence and different values for the target namespace URI, unless
+    /// > there is also an `xsl:namespace-alias` declaration with the same
+    /// > literal namespace URI and a higher import precedence.
     fn namespace_alias(
         &mut self,
         nav: &Nav<'t>,
         ctx: StaticContextId,
         module: &Module<'t>,
-    ) -> Result<(), XsltError> {
+        precedence: u32,
+    ) -> Result<(String, Alias), XsltError> {
         let sc = self.static_contexts.get(ctx).clone();
-        let resolve = |token: Option<String>| -> Result<(String, String), XsltError> {
-            let token = token.ok_or_else(|| {
-                XsltError::new(codes::XTSE0010, "xsl:namespace-alias needs both prefixes")
-            })?;
-            let prefix = if whitespace::trim(&token) == "#default" {
-                ""
-            } else {
-                whitespace::trim(&token)
-            };
-            let uri = sc.resolve_prefix(prefix).ok_or_else(|| {
+        let resolve = |attr: &str| -> Result<(String, String), XsltError> {
+            let token = attr_local(nav, attr).ok_or_else(|| {
                 XsltError::new(
-                    codes::XTSE0280,
-                    format!("the prefix {prefix:?} in xsl:namespace-alias is not bound"),
+                    codes::XTSE0010,
+                    format!("xsl:namespace-alias has no {attr} attribute"),
                 )
+                .with_location(module.location(nav))
             })?;
-            Ok((uri, prefix.to_string()))
+            let token = whitespace::trim(&token);
+            if token == "#default" {
+                // The null namespace URI is a legitimate answer here.
+                return Ok((sc.resolve_prefix("").unwrap_or_default(), String::new()));
+            }
+            let uri = sc.resolve_prefix(token).ok_or_else(|| {
+                XsltError::new(
+                    codes::XTSE0812,
+                    format!("the prefix {token:?} in xsl:namespace-alias/@{attr} is not bound"),
+                )
+                .with_location(module.location(nav))
+            })?;
+            Ok((uri, token.to_string()))
         };
-        let (from_uri, _) = resolve(attr_local(nav, "stylesheet-prefix"))?;
-        let (to_uri, to_prefix) = resolve(attr_local(nav, "result-prefix"))?;
-        let _ = module;
-        self.aliases.insert(from_uri, (to_uri, to_prefix));
+        let (literal, _) = resolve("stylesheet-prefix")?;
+        let (target, target_prefix) = resolve("result-prefix")?;
+        Ok((
+            literal,
+            Alias {
+                uri: target,
+                prefix: target_prefix,
+                precedence,
+            },
+        ))
+    }
+
+    /// The `xsl:namespace-alias` pass (§11.1.4).
+    ///
+    /// It runs **before** any literal result element is compiled, and over the
+    /// whole module graph, for two reasons. First, the aliasing of a literal
+    /// namespace URI is a property of the stylesheet, not of the module the
+    /// declaration sits in, so a declaration in the principal module has to
+    /// reach a literal result element in an included one — with the alias
+    /// collected in declaration order, `namespace-alias-4201` and `bug-0303`
+    /// saw the literal URI reach the output. Second, XTSE0810 is only an error
+    /// when no declaration of *higher* precedence exists for the same literal
+    /// URI, which cannot be decided until every declaration has been seen.
+    fn collect_aliases(&mut self) -> Result<(), XsltError> {
+        // One entry per declaration, so the winner can be picked afterwards.
+        let mut declared: Vec<(String, Alias)> = Vec::new();
+        for unit_index in 0..self.modules.units.len() {
+            let precedence = self.modules.units[unit_index].precedence;
+            let decls: Vec<(ModuleId, Nav<'t>, DeclKind)> =
+                self.modules.units[unit_index].decls.clone();
+            for (module_id, nav, kind) in decls {
+                if kind != DeclKind::Declaration
+                    || nav.namespace_uri() != XSLT_NS
+                    || nav.local_name() != "namespace-alias"
+                {
+                    continue;
+                }
+                let module = self.modules.module(module_id);
+                let ctx = self.context_of(&nav, module)?;
+                let module = self.modules.module(module_id);
+                declared.push(self.namespace_alias(&nav, ctx, module, precedence)?);
+            }
+        }
+        // Per literal namespace URI: the highest precedence wins, and only at
+        // *that* precedence is a disagreement an error — "unless there is also
+        // an xsl:namespace-alias declaration with the same literal namespace
+        // URI and a higher import precedence". So the maximum has to be known
+        // before any conflict is judged; two declarations that disagree are
+        // legal as long as something above them overrides both.
+        let mut highest: HashMap<&str, u32> = HashMap::new();
+        for (literal, alias) in &declared {
+            let slot = highest.entry(literal.as_str()).or_insert(alias.precedence);
+            *slot = (*slot).max(alias.precedence);
+        }
+        let highest: HashMap<String, u32> = highest
+            .into_iter()
+            .map(|(uri, precedence)| (uri.to_string(), precedence))
+            .collect();
+        for (literal, alias) in declared {
+            if highest.get(&literal).copied() != Some(alias.precedence) {
+                continue;
+            }
+            if let Some(won) = self.aliases.get(&literal) {
+                if won.uri != alias.uri {
+                    return Err(XsltError::new(
+                        codes::XTSE0810,
+                        format!(
+                            "two xsl:namespace-alias declarations of the same import precedence \
+                             alias {literal:?} to {:?} and {:?}",
+                            won.uri, alias.uri
+                        ),
+                    ));
+                }
+            }
+            self.aliases.insert(literal, alias);
+        }
         Ok(())
     }
 

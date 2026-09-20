@@ -71,6 +71,65 @@ impl Name {
     }
 }
 
+/// The namespace **nodes** of an existing element, prefix → URI.
+///
+/// §11.9.1 and §11.9.2 both say "all the namespace nodes of the original
+/// element are copied", so this is the list a copying instruction pushes. The
+/// axis walked with [`NamespaceAxisScope::ExcludeXml`] is upstream's view of
+/// the *declarations* — it keeps `xmlns=""` so that serialization and shallow
+/// copy can see it — and the walk dedups by prefix innermost-first, so
+/// dropping the zero-length URIs afterwards leaves exactly the bindings that
+/// are in scope: the element's namespace nodes. An undeclaration is the
+/// absence of a node, not a node (§5.7.1 speaks only of "a namespace node with
+/// no name").
+pub(crate) fn namespace_nodes_of(
+    nav: &Nav<'_>,
+    scope: NamespaceAxisScope,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut ns = nav.clone();
+    if ns.move_to_first_namespace(scope) {
+        loop {
+            // `local_name()` of a namespace node is its prefix.
+            let (prefix, uri) = (ns.local_name().to_string(), ns.value());
+            if !uri.is_empty() {
+                out.push((prefix, uri));
+            }
+            if !ns.move_to_next_namespace(scope) {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// A prefix for an element whose own one is taken by a namespace node it
+/// carries (§11.7), derived from the prefix that was asked for.
+///
+/// §5.7.3 leaves the choice open — "the actual namespace nodes that are added
+/// to the tree by the namespace fixup process are implementation-dependent" —
+/// so the only requirements are that the prefix be free and that the choice be
+/// deterministic. `p` becomes `p_0`, `p_1`, … , which is what the suite's
+/// reference results were produced with (`namespace-2614`, `namespace-2001`,
+/// `namespace-alias-1903`); an unprefixed name, which has no prefix to derive
+/// from, becomes `ns_0`.
+fn invented_prefix(requested: &str, keep: &[(String, String)], fixup: &NamespaceFixup) -> String {
+    let stem = if requested.is_empty() {
+        "ns"
+    } else {
+        requested
+    };
+    for n in 0u32.. {
+        let candidate = format!("{stem}_{n}");
+        let taken = keep.iter().any(|(prefix, _)| *prefix == candidate)
+            || fixup.in_scope(&candidate).is_some();
+        if !taken {
+            return candidate;
+        }
+    }
+    unreachable!("u32 is not exhausted by the prefixes of one element")
+}
+
 /// Which namespace nodes a deep copy carries (§11.9.2 `copy-namespaces`).
 ///
 /// > If this attribute is omitted, or takes the value `yes`, then all the
@@ -154,6 +213,35 @@ pub trait Receiver<'t> {
     /// That decision belongs to the normalizer, never to an instruction.
     fn append_item(&mut self, item: &XmlItem<Nav<'t>>) -> Result<(), XsltError>;
 
+    /// The base URI of a document node just opened with
+    /// [`start_document`](Receiver::start_document) (§11.5).
+    ///
+    /// §9.4 fixes the base URI of a temporary tree to that of the variable
+    /// binding element, and §11.5's `xsl:document` is the same shape: the node
+    /// the instruction creates takes the instruction's own base URI. Only a
+    /// receiver that produces a document node with an identity of its own — a
+    /// [`SequenceCollector`] building a `GroupKind::Document` — has anywhere to
+    /// put it, hence the no-op default.
+    fn document_base_uri(&mut self, _uri: &str) -> Result<(), XsltError> {
+        Ok(())
+    }
+
+    /// `inherit-namespaces="no"` on the instruction that created the element
+    /// just opened (§11.1's `[xsl:]inherit-namespaces`, §11.2, §11.9.1).
+    ///
+    /// > When constructing the content of an element, the `inherit-namespaces`
+    /// > attribute of the `xsl:element` or `xsl:copy` instruction, or the
+    /// > `xsl:inherit-namespaces` property of the literal result element,
+    /// > determines whether namespace nodes are to be inherited.
+    ///
+    /// Called between [`start_element`](Receiver::start_element) and the first
+    /// child. The default implementation is a no-op, which is right for every
+    /// receiver that sits *behind* a [`ComplexContentNormalizer`]: inheritance
+    /// is the normalizer's business.
+    fn no_inherit_namespaces(&mut self) -> Result<(), XsltError> {
+        Ok(())
+    }
+
     /// Appends a **copy** of an item: what `xsl:copy-of` and `xsl:copy` do
     /// (§11.9.1, §11.9.2), as opposed to [`append_item`](Receiver::append_item),
     /// which appends the item itself (`xsl:sequence`, §11.10).
@@ -197,6 +285,30 @@ struct Open {
     children_started: bool,
     /// The item appended last was an atomic value — §5.7.1's separator rule.
     last_atomic: bool,
+    /// The element is known to have **no** namespace node with no name, even
+    /// though a default namespace is in scope in the result tree — so §5.7.1's
+    /// inheritance rule does not reach it and fixup has to write `xmlns=""`.
+    ///
+    /// A producer states this by sending a namespace event with an empty
+    /// prefix *and* an empty URI: the undeclaration is not a namespace node
+    /// (see [`push_namespace`](ComplexContentNormalizer::push_namespace)), it
+    /// is the absence of one, and this is where that absence is recorded.
+    no_default: bool,
+    /// Whether this element's namespace nodes are copied to its descendants —
+    /// §5.7.1's last rule, switched off by `inherit-namespaces="no"`
+    /// ([`Receiver::no_inherit_namespaces`]). `true` at the document level, so
+    /// a top-level element is unaffected.
+    inherit: bool,
+}
+
+impl Open {
+    /// A container that inherits, which is the default everywhere.
+    fn inheriting() -> Self {
+        Self {
+            inherit: true,
+            ..Self::default()
+        }
+    }
 }
 
 /// XSLT 2.0 §5.7.1 *Constructing Complex Content*, applied once for every
@@ -274,7 +386,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
     pub fn with_annotations(out: R, annotations: Annotations) -> Self {
         Self {
             out,
-            stack: vec![Open::default()],
+            stack: vec![Open::inheriting()],
             text: String::new(),
             text_pending: false,
             fixup: NamespaceFixup::new(),
@@ -328,12 +440,38 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         }
         let open = self.stack.last_mut().expect("checked");
         open.flushed = true;
-        let name = open.name.clone().unwrap_or_default();
+        let mut name = open.name.clone().unwrap_or_default();
         let binding = open.binding;
         let nilled = open.nilled;
-        let keep: Vec<(String, String)> = open.namespaces.clone();
+        let mut keep: Vec<(String, String)> = open.namespaces.clone();
+        // §5.7.1: the element has no namespace node with no name, so a default
+        // namespace already in scope in the result tree must be undeclared.
+        // Upstream fixup reads a `("", "")` entry as exactly that request and
+        // drops it again when no default is in scope. The guard is for the one
+        // shape that would contradict it — an unprefixed name *in* a namespace
+        // has a default-namespace node by definition.
+        let name_has_a_default = name.prefix.is_empty() && !name.uri.is_empty();
+        if open.no_default && !name_has_a_default {
+            keep.push((String::new(), String::new()));
+        }
         let attrs: Vec<(Name, String, Option<NodeSchemaBinding>)> =
             std::mem::take(&mut open.attributes);
+
+        // §11.7: "If a namespace prefix is mapped to a particular namespace URI
+        // using the xsl:namespace instruction, or by using xsl:copy or
+        // xsl:copy-of to copy a namespace node, this prevents the namespace
+        // fixup process (and hence the serializer) from using the same prefix
+        // for a different namespace URI on the same element." The explicit
+        // namespace node wins and the element's own prefix is re-derived; the
+        // engine used to drop the explicit node instead. §11.7's own example is
+        // `namespace-2615`'s stylesheet.
+        if !name.uri.is_empty() {
+            if let Some((_, bound)) = keep.iter().find(|(prefix, _)| *prefix == name.prefix) {
+                if *bound != name.uri {
+                    name.prefix = invented_prefix(&name.prefix, &keep, &self.fixup);
+                }
+            }
+        }
 
         let attr_names: Vec<(&str, &str)> = attrs
             .iter()
@@ -405,6 +543,24 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
     }
 
     /// Records one namespace node; duplicates collapse, conflicts are XTDE0430.
+    ///
+    /// A zero-length URI is a namespace **undeclaration**, which is *not* a
+    /// namespace node: §5.7.1 knows only "a namespace node with no name",
+    /// which maps the empty prefix to a namespace, and XTDE0430 speaks of
+    /// nodes that "map the same prefix to different namespace URIs". So no
+    /// such node is ever recorded. What an empty-prefix undeclaration *does*
+    /// say is that the element has no namespace node with no name, which
+    /// §5.7.1's inheritance rule needs to know — that is
+    /// [`Open::no_default`], and namespace fixup (§5.7.3) turns it back into a
+    /// written `xmlns=""` only where one is needed. A **prefixed**
+    /// undeclaration (`xmlns:p=""`, XML 1.1 only) says nothing that XML 1.0
+    /// output can express and is dropped.
+    ///
+    /// This is the one gate every producer passes through: literal result
+    /// elements, `xsl:copy` / `xsl:copy-of` copying a source element's
+    /// namespace nodes, the whitespace-stripping source copy, and
+    /// `xsl:namespace` (whose own zero-length URI is XTDE0930, raised before
+    /// it gets here).
     fn push_namespace(&mut self, prefix: &str, uri: &str) -> Result<(), XsltError> {
         if !self.in_element() {
             return Err(XsltError::new(
@@ -420,6 +576,14 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                      nor a namespace"
                 ),
             ));
+        }
+        if uri.is_empty() {
+            let open = self.top();
+            if prefix.is_empty() && !open.namespaces.iter().any(|(p, _)| p.is_empty()) {
+                open.no_default = true;
+            }
+            open.last_atomic = false;
+            return Ok(());
         }
         if prefix.is_empty()
             && self
@@ -449,6 +613,9 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
             ));
         }
         open.namespaces.push((prefix.to_string(), uri.to_string()));
+        if prefix.is_empty() {
+            open.no_default = false;
+        }
         open.last_atomic = false;
         Ok(())
     }
@@ -466,12 +633,46 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         nav: &Nav<'t>,
         namespaces: CopyNamespaces,
     ) -> Result<(), XsltError> {
+        self.copy_subtree(nav, namespaces, false)
+    }
+
+    /// The recursive half of [`copy_node`](Self::copy_node).
+    ///
+    /// `default_blocked` carries §5.7.1's last rule down the copied subtree:
+    ///
+    /// > If the newly constructed node is an element node, and if namespaces
+    /// > are inherited, then each namespace node of the newly constructed
+    /// > element (including any produced as a result of the namespace fixup
+    /// > process) is copied to each descendant element of the newly
+    /// > constructed element, unless that element **or an intermediate
+    /// > element** already has a namespace node with the same name (or absence
+    /// > of a name) …
+    ///
+    /// The copy's own elements are not newly constructed, so nothing
+    /// propagates *from* them; what propagates is the namespace nodes of the
+    /// element (or nothing, for a document node) the copy is being attached
+    /// to. Once an element inside the copy carries a default-namespace node of
+    /// its own, it is an "intermediate element" and the propagation stops
+    /// there — so a deeper element that has *no* default-namespace node must
+    /// end up with none, which is what `no_default` asks fixup for.
+    ///
+    /// This is the whole difference between `namespace-3001` (a deep copy
+    /// attached to a document node: the inner `xmlns=""` survives) and
+    /// `namespace-3004` (the same deep copy attached to a literal result
+    /// element with a default namespace: the copy root inherits it, and the
+    /// undeclaration disappears).
+    fn copy_subtree(
+        &mut self,
+        nav: &Nav<'t>,
+        namespaces: CopyNamespaces,
+        default_blocked: bool,
+    ) -> Result<(), XsltError> {
         match nav.node_type() {
             DomNodeType::Root => {
                 let mut child = nav.clone();
                 if child.move_to_first_child() {
                     loop {
-                        self.copy_node(&child, namespaces)?;
+                        self.copy_subtree(&child, namespaces, default_blocked)?;
                         if !child.move_to_next_sibling() {
                             break;
                         }
@@ -486,17 +687,20 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                 self.start_element(&Name::of(nav), binding, nilled)?;
                 // §11.9.2: with `copy-namespaces="no"` none of the namespace
                 // nodes are copied and fixup supplies what the names need.
+                let mut blocked = default_blocked;
                 if let Some(scope) = namespaces.scope() {
-                    let mut ns = nav.clone();
-                    if ns.move_to_first_namespace(scope) {
-                        loop {
-                            // `local_name()` of a namespace node is its prefix.
-                            let (prefix, uri) = (ns.local_name().to_string(), ns.value());
-                            self.namespace(&prefix, &uri)?;
-                            if !ns.move_to_next_namespace(scope) {
-                                break;
-                            }
-                        }
+                    let nodes = namespace_nodes_of(nav, scope);
+                    let has_default = nodes.iter().any(|(prefix, _)| prefix.is_empty());
+                    for (prefix, uri) in &nodes {
+                        self.namespace(prefix, uri)?;
+                    }
+                    if has_default {
+                        blocked = true;
+                    } else if default_blocked {
+                        // An element above this one *inside the copy* has a
+                        // default-namespace node, so the attachment point's
+                        // default never reaches here: this element has none.
+                        self.namespace("", "")?;
                     }
                 }
                 let mut attr = nav.clone();
@@ -512,7 +716,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                 let mut child = nav.clone();
                 if child.move_to_first_child() {
                     loop {
-                        self.copy_node(&child, namespaces)?;
+                        self.copy_subtree(&child, namespaces, blocked)?;
                         if !child.move_to_next_sibling() {
                             break;
                         }
@@ -569,11 +773,19 @@ impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
         let parent = self.top();
         parent.children_started = true;
         parent.last_atomic = false;
+        // §5.7.1: with `inherit-namespaces="no"` on the parent's instruction
+        // this element gets none of the parent's namespace nodes, so it starts
+        // out with no namespace node with no name. A default namespace the
+        // parent declared therefore has to be undeclared here — the one part of
+        // the effect XML 1.0 output can express, as §11.1's own note says. A
+        // default namespace of this element's own clears the flag again.
+        let no_default = !parent.inherit;
         self.stack.push(Open {
             name: Some(name.clone()),
             binding,
             nilled,
-            ..Open::default()
+            no_default,
+            ..Open::inheriting()
         });
         Ok(())
     }
@@ -581,6 +793,11 @@ impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
     fn namespace(&mut self, prefix: &str, uri: &str) -> Result<(), XsltError> {
         self.flush_text()?;
         self.push_namespace(prefix, uri)
+    }
+
+    fn no_inherit_namespaces(&mut self) -> Result<(), XsltError> {
+        self.top().inherit = false;
+        Ok(())
     }
 
     fn attribute(
@@ -1074,6 +1291,8 @@ pub struct SequenceCollector<'s, 't> {
     nested: Option<ComplexContentNormalizer<'t, ResultBuilder<'t>>>,
     /// What the open group will produce.
     group: GroupKind,
+    /// The base URI the open `GroupKind::Document` group takes (§11.5).
+    base_uri: Option<String>,
     /// How many containers (elements and document nodes) are open.
     depth: usize,
 }
@@ -1099,6 +1318,7 @@ impl<'s, 't> SequenceCollector<'s, 't> {
             items: Vec::new(),
             nested: None,
             group: GroupKind::Element,
+            base_uri: None,
             depth: 0,
         }
     }
@@ -1117,6 +1337,7 @@ impl<'s, 't> SequenceCollector<'s, 't> {
         let builder = self.new_builder(group)?;
         self.nested = Some(ComplexContentNormalizer::new(builder));
         self.group = group;
+        self.base_uri = None;
         Ok(())
     }
 
@@ -1140,7 +1361,13 @@ impl<'s, 't> SequenceCollector<'s, 't> {
             return Ok(());
         };
         let group = self.group;
-        let doc = nested.into_inner().finish()?;
+        let mut doc = nested.into_inner().finish()?;
+        // §11.5: the document node `xsl:document` builds takes the base URI of
+        // the instruction, exactly as §9.4's temporary tree takes that of the
+        // variable binding element.
+        if let Some(base) = self.base_uri.take() {
+            doc.set_document_base_uri(Some(self.store.borrow().intern_uri(&base)));
+        }
         let id = self.store.borrow_mut().insert(doc, None);
         let root = self.store.borrow().navigator(id);
         let item = match group {
@@ -1175,7 +1402,30 @@ impl<'s, 't> SequenceCollector<'s, 't> {
         let builder = self.new_builder(GroupKind::Element)?;
         let mut pipeline = ComplexContentNormalizer::new(builder);
         build(&mut pipeline)?;
-        let doc = pipeline.into_inner().finish()?;
+        self.push_holder(pipeline.into_inner().finish()?, locate)
+    }
+
+    /// A parentless namespace node (§11.7, §6.3).
+    ///
+    /// Unlike every other node kind this one does **not** go through the
+    /// normalizer, and deliberately so: the holder element is an implementation
+    /// artefact, not a constructed element, so §5.7.1's rules about the content
+    /// of an element — in particular XTDE0440, "it is an error to define a
+    /// default namespace when the element is in no namespace" — have nothing to
+    /// say about it. Routing `<xsl:namespace name="">` through the normalizer
+    /// raised XTDE0440 against the holder (`namespace-3005`, whose point is that
+    /// `deep-equal` compares two unnamed namespace nodes).
+    fn push_namespace_node(&mut self, prefix: &str, uri: &str) -> Result<(), XsltError> {
+        let mut builder = self.new_builder(GroupKind::Element)?;
+        builder.start_element(&Name::local(HOLDER), None, false)?;
+        builder.namespace(prefix, uri)?;
+        builder.end_start_tag()?;
+        builder.end_element()?;
+        self.push_holder(builder.finish()?, Locate::Namespace)
+    }
+
+    /// Finds the node a holder document was built around and appends it.
+    fn push_holder(&mut self, doc: BufferDocument<'t>, locate: Locate) -> Result<(), XsltError> {
         let id = self.store.borrow_mut().insert(doc, None);
         let root = self.store.borrow().navigator(id);
         let mut cursor = root.clone();
@@ -1235,10 +1485,16 @@ impl<'s, 't> SequenceCollector<'s, 't> {
                 self.items.push(XmlItem::Node(root));
                 Ok(())
             }
+            // A namespace node's copy is a new node with the same name and
+            // value, which is what its identity turns on, and the holder is
+            // built without the normalizer for the reason given there.
+            DomNodeType::Namespace => {
+                let (prefix, uri) = (nav.local_name().to_string(), nav.value());
+                self.push_namespace_node(&prefix, &uri)
+            }
             kind => {
                 let locate = match kind {
                     DomNodeType::Attribute => Locate::Attribute,
-                    DomNodeType::Namespace => Locate::Namespace,
                     _ => Locate::Child,
                 };
                 let source = nav.clone();
@@ -1332,10 +1588,10 @@ impl<'t> Receiver<'t> for SequenceCollector<'_, 't> {
     fn namespace(&mut self, prefix: &str, uri: &str) -> Result<(), XsltError> {
         match self.nested.as_mut() {
             Some(nested) => nested.namespace(prefix, uri),
-            // A parentless namespace node cannot be represented at all.
-            None => Err(XsltError::internal(
-                "a namespace node cannot stand on its own in a sequence",
-            )),
+            // §6.3 and §11.7: a namespace node may stand on its own in a
+            // sequence. `BufferDocument` cannot hold one without a parent, so
+            // it gets the synthetic holder — see `Locate::Namespace`.
+            None => self.push_namespace_node(prefix, uri),
         }
     }
 
@@ -1365,6 +1621,22 @@ impl<'t> Receiver<'t> for SequenceCollector<'_, 't> {
             Some(nested) => nested.end_start_tag(),
             None => Ok(()),
         }
+    }
+
+    fn no_inherit_namespaces(&mut self) -> Result<(), XsltError> {
+        match self.nested.as_mut() {
+            Some(nested) => nested.no_inherit_namespaces(),
+            None => Ok(()),
+        }
+    }
+
+    fn document_base_uri(&mut self, uri: &str) -> Result<(), XsltError> {
+        // Only the outermost group is a document node of its own; an inner
+        // `xsl:document` contributes its children to the element around it.
+        if self.depth == 1 && self.group == GroupKind::Document && !uri.is_empty() {
+            self.base_uri = Some(uri.to_string());
+        }
+        Ok(())
     }
 
     fn text(&mut self, s: &str, disable_escaping: bool) -> Result<(), XsltError> {

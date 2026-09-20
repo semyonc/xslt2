@@ -139,11 +139,24 @@ struct Builder<'a, 'm, 't> {
     decl_order: u32,
     /// `xsl:namespace-alias` (§11.1.4).
     ///
-    /// Keyed by the namespace **URI** the `stylesheet-prefix` is bound to — not
-    /// by a prefix — because §11.1.4 aliases the namespace, so any prefix bound
-    /// to that URI in a literal result element is rewritten. The value is the
-    /// result namespace URI and the preferred prefix to write it with.
-    aliases: HashMap<String, (String, String)>,
+    /// Keyed by the **literal namespace URI** — the URI the `stylesheet-prefix`
+    /// is bound to, not the prefix — because §11.1.4 aliases the namespace, so
+    /// any prefix bound to that URI in a literal result element is rewritten.
+    aliases: HashMap<String, Alias>,
+}
+
+/// One winning `xsl:namespace-alias` declaration (§11.1.4).
+struct Alias {
+    /// The target namespace URI — what appears in the result tree.
+    uri: String,
+    /// The prefix the target namespace is written with: "the namespace prefix
+    /// in that expanded-QName is replaced by the prefix indicated by the
+    /// `result-prefix` attribute".
+    prefix: String,
+    /// The import precedence of the declaration that won. Kept because
+    /// XTSE0810 is about two declarations at the **same** precedence, and
+    /// "the declaration with the highest import precedence is used".
+    precedence: u32,
 }
 
 impl<'a, 'm, 't> Builder<'a, 'm, 't> {
