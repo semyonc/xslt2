@@ -258,9 +258,10 @@ fn a_prebuilt_typed_document_is_rejected_with_xtde1665() {
         "the message should name the offending node: {error}"
     );
 
-    // The check is cached per document, and only a tree that *passed* may be
-    // remembered: running the same `Transformation` over the same typed tree a
-    // second time must fail the same way, not slip through the cache.
+    // Nothing about a rejected tree may be remembered as "checked": running the
+    // same `Transformation` over the same typed tree a second time must fail
+    // the same way. (An earlier version cached the verdict per document and
+    // let the second run through.)
     let again = match run.transform_document(id) {
         Err(e) => e,
         Ok(_) => panic!("the second run over the same typed tree must be rejected too"),
@@ -309,9 +310,10 @@ fn a_typed_node_parameter_is_rejected_with_xtde1665() {
     assert_eq!(error.code, codes::XTDE1665, "{error}");
 }
 
-/// The check costs one walk per externally supplied document, and a tree this
-/// processor parsed itself is never walked at all — so an ordinary run is
-/// unaffected and an untyped prebuilt document is admitted.
+/// The check asks the document, in constant time, whether it carries any type
+/// annotation (`BufferDocument::has_type_annotations`) and walks it only when
+/// it does — so an ordinary run is unaffected and an untyped prebuilt document
+/// is admitted without being visited.
 #[test]
 fn an_untyped_prebuilt_document_is_still_admitted() {
     let names = NameTable::new();

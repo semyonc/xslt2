@@ -46,12 +46,6 @@ impl<'a, 't> Transformation<'a, 't> {
         let parsed = parsed?;
         let doc = self.strip_source(parsed, uri)?;
         let stripped = !std::ptr::eq(doc, parsed);
-        // §21.1/XTDE1665: this tree was parsed here, by a plain (non-validating)
-        // `BufferDocument` build, and the stripped copy was rebuilt through a
-        // `ResultBuilder` with no schema. Neither can carry a type annotation,
-        // so neither ever needs the walk — record that instead of doing it.
-        self.trust_annotation_free(parsed);
-        self.trust_annotation_free(doc);
         if let Some(uri) = uri {
             self.store.borrow_mut().register_source(uri, xml);
         }
@@ -200,13 +194,6 @@ impl<'a, 't> Transformation<'a, 't> {
 
     // ── §21.1 XTDE1665: the input may not be schema-typed ─────────────────
 
-    /// Records that a tree this run built itself cannot carry a type
-    /// annotation, so [`check_input_annotations`](Self::check_input_annotations)
-    /// never walks it.
-    fn trust_annotation_free(&self, doc: &'t BufferDocument<'t>) {
-        self.annotation_free.borrow_mut().insert(doc.serial());
-    }
-
     /// Rejects an externally supplied tree that carries type annotations.
     ///
     /// > \[ERR XTDE1665\] A basic XSLT processor must raise a non-recoverable
@@ -232,11 +219,15 @@ impl<'a, 't> Transformation<'a, 't> {
     /// [`Transformation::run`](Self::run) — the point where they first become
     /// *input*.
     ///
-    /// One walk per document: the result is cached by
-    /// [`BufferDocument::serial`], so a second parameter pointing into the same
-    /// tree, or the same tree used as both source and parameter, costs nothing.
-    /// There is no cheap "does this document carry any annotation at all"
-    /// accessor upstream today; with one, this whole function would be O(1).
+    /// The question is asked of the document, in constant time:
+    /// [`BufferDocument::has_type_annotations`] is exact — `true` iff some
+    /// element or attribute of the document would report a type annotation —
+    /// and is maintained where bindings are attached, so an untyped tree, which
+    /// is every tree this processor parses itself and almost every tree a caller
+    /// hands it, is admitted without being visited. Only a document that does
+    /// carry annotations is walked, to name the offending node in the message;
+    /// the walk can still come back empty when the annotations belong to another
+    /// tree of the same document, and then this tree is admitted.
     ///
     /// `input-type-annotations="strip"` would make the error "not arise", but
     /// this crate does not implement that attribute at all (it is accepted and
@@ -244,17 +235,14 @@ impl<'a, 't> Transformation<'a, 't> {
     pub(super) fn check_input_annotations(&self, node: &Nav<'t>) -> Result<(), XsltError> {
         let mut root = node.clone();
         root.move_to_root();
-        let serial = root.document().serial();
-        if self.annotation_free.borrow().contains(&serial) {
+        if !root.document().has_type_annotations() {
             return Ok(());
         }
+        // Nothing is remembered between calls: a rejected tree must be rejected
+        // again if the same `Transformation` is run a second time, and an
+        // admitted one costs nothing to admit again.
         match first_annotated(&root) {
-            // Only a tree that *passed* is remembered: a rejected one must be
-            // rejected again if the same `Transformation` is run a second time.
-            None => {
-                self.annotation_free.borrow_mut().insert(serial);
-                Ok(())
-            }
+            None => Ok(()),
             Some(found) => Err(XsltError::new(
                 codes::XTDE1665,
                 format!(

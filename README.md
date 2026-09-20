@@ -39,11 +39,11 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 |---|---|
 | XSLT 2.0-applicable | 6,619 |
 | runnable (dependencies satisfied) | 5,751 |
-| pass | 4,297 |
-| fail / wrongError / harnessError | 143 / 10 / 5 |
+| pass | 4,299 |
+| fail / wrongError / harnessError | 141 / 10 / 5 |
 | not implemented (`XSLT2-NOTIMPL`, M2–M4) | 1,296 |
-| pass rate over runnable | 74.72% |
-| headline (basic profile, non-regex families) | 3,159 / 4,233 = **74.6%** |
+| pass rate over runnable | 74.75% |
+| headline (basic profile, non-regex families) | 3,161 / 4,233 = **74.7%** |
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the
@@ -56,7 +56,8 @@ need `format-number` / `format-date`, which are stubs until M3d. They are measur
 sibling `../xsd-schema` checkout with its current additive XPath fixes (navigation, `/` evaluation,
 operator errors, regex dialect, string literals, linear general comparison): 3,977 → 4,160; M2b
 (namespace correctness) and M2c (one table-driven static-checking pass, `src/compile/checks.rs`) then
-took it to 4,297.
+took it to 4,297, and two further upstream fixes (`fn:deep-equal` on namespace nodes, atomization of a
+namespace node) to 4,299.
 
 The sixteen test-sets M1 targets:
 
