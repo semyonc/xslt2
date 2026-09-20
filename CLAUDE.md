@@ -26,6 +26,7 @@ PSVI, `BufferDocument`). Separate git repository.
 | `src/stylesheet.rs` | §3.10 module graph, import precedence, §5.4.1 lexical static contexts, §4.2 whitespace |
 | `src/model.rs` | The `Instruction` tree (§7.4), declaration tables (§7.3), `CompiledStylesheet` |
 | `src/pattern.rs` | Pattern grammar (§5.5.2), the §6.4 default priorities, the dispatch-index key |
+| `src/compile/checks.rs` | The **static-checking table**: one `ElementSpec` row per XSLT 2.0 element (category, required/optional attributes, AVTs, content model) transcribed from the spec's syntax summaries, and the single pass that validates a module against it before compilation. A new element = a new row here |
 | `src/compile/` | `Compiler`: modules → declarations and instructions. `mod.rs` (builder core), `declarations`, `instructions`, `literal`, `expressions`, `avt`, `patterns`, `modes`, `attributes`, `tree`. Walk stylesheet children **only** through `Module::children()` / `Builder::children()` — it applies §3.12 `use-when` exclusion by construction |
 | `src/runtime/` | `Transformation`: `mod.rs` (entry points), `context` (§5.4), `dispatch` (§6), `patterns`, `eval` (instructions), `content`, `variables`, `documents` (loading, §4.4 admission), `functions` (the §16 evaluator), `expressions`, `serialize` |
 | `src/receiver.rs` | `Receiver`, `ComplexContentNormalizer` (§5.7.1), `ResultBuilder`, `SequenceCollector` |
@@ -39,6 +40,7 @@ PSVI, `BufferDocument`). Separate git repository.
 cargo build
 cargo clippy --all-targets         # 0 warnings expected
 cargo test                         # unit + m0b_invariants + m1_context + m1_smoke + m1_review + m2a_groundwork + m2a_review
+                                   # + fn_error + m2b_namespaces + m2c_static_checks
                                    # (the W3C harness skips itself in a debug build)
 ```
 

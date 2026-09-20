@@ -54,26 +54,53 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         // > precedence.
         //
         // The target rule is what makes `xmlns:xsl` survive in
-        // `namespace-alias-1902`, where the XSLT namespace — otherwise always
-        // excluded — is the target of an alias. It is also the mechanism behind
-        // §11.1.4's own note: the result element gets its `result-prefix` →
-        // target binding from the stylesheet's own declaration of that prefix,
-        // not from rewriting the literal one.
+        // `namespace-alias-1902` and `-4201`, where the XSLT namespace —
+        // otherwise always excluded — is the target of an alias.
         //
-        // The order below puts the **literal** rule first, which is the one
-        // deviation from the wording above, and it is the suite that forces it:
-        // `namespace-alias-1006` is a circular chain of five aliases in which
-        // every URI is both a literal and a target URI, and its expected result
-        // copies **none** of them — each result element carries only the
-        // declaration its own aliased name needs. Reading "the second of these
-        // rules takes precedence" literally would copy all five. Both readings
-        // agree wherever a URI plays only one of the two roles, which is every
-        // other case in the suite.
+        // What the precedence sentence is *about* is spelled out by §11.1.4's
+        // own note, which is the key to reading it:
+        //
+        // > These rules achieve the effect that the element generated from the
+        // > literal result element will have an in-scope namespace node that
+        // > binds **the `result-prefix`** to the target namespace URI, provided
+        // > that the namespace declaration associating **this prefix with this
+        // > URI** is in scope for both the `xsl:namespace-alias` instruction
+        // > and for the literal result element.
+        //
+        // So the node the precedence protects is the one binding an alias's
+        // `result-prefix` to that alias's target URI: that node has to reach the
+        // result even when its URI is *also* a literal namespace URI (the chain
+        // `a → b`, `b → c`, where `b`'s URI is both) and even when it is an
+        // excluded namespace. A node that merely happens to carry a target URI
+        // under some other prefix is not what the note guarantees, so for it
+        // rule 1 still applies — which is why `namespace-alias-1006`, a circular
+        // chain of five aliases whose prefix bindings sit on the
+        // `xsl:namespace-alias` elements and are therefore **not** in scope on
+        // any literal result element, copies none of them: the only namespace
+        // node in scope on `<v xmlns="http://a.com/"/>` binds the *default*
+        // prefix, and no alias has `result-prefix="#default"`, so rule 1 drops
+        // it and the `b:v` binding comes from namespace fixup (§5.7.3) instead.
+        //
+        // Hence the three tests below, in the order the rules are resolved.
         let mut namespaces = Vec::new();
         for (prefix, uri) in in_scope_namespaces(nav) {
+            // Rule 2, taking precedence over rule 1: an alias's own
+            // `result-prefix` → target-URI binding, copied whatever else the URI
+            // is used for and whether or not it is excluded.
+            if self
+                .aliases
+                .values()
+                .any(|alias| alias.uri == uri && alias.prefix == prefix)
+            {
+                namespaces.push((prefix, uri));
+                continue;
+            }
+            // Rule 1: a literal namespace URI is a stylesheet-internal fiction.
             if self.aliases.contains_key(&uri) {
                 continue;
             }
+            // Rule 2 for every other binding of a target namespace URI: copied
+            // "whether or not the URI identifies an excluded namespace".
             if self.aliases.values().any(|alias| alias.uri == uri) {
                 namespaces.push((prefix, uri));
                 continue;

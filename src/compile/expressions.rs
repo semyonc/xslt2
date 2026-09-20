@@ -211,6 +211,8 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         Ok(Some(name))
     }
 
+    /// The `use-attribute-sets` attribute of `xsl:element`, `xsl:copy` or
+    /// `xsl:attribute-set`.
     pub(super) fn qname_list(
         &mut self,
         nav: &Nav<'t>,
@@ -225,14 +227,29 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             .map_err(|e| e.or_location(&module.location(nav)))
     }
 
+    /// One `use-attribute-sets` / `xsl:use-attribute-sets` value (§10.2).
+    ///
+    /// > \[ERR XTSE0710\] It is a static error if the value of the
+    /// > `use-attribute-sets` attribute of an `xsl:copy`, `xsl:element`, or
+    /// > `xsl:attribute-set` element, or the `xsl:use-attribute-sets` attribute
+    /// > of a literal result element, is not a whitespace-separated sequence of
+    /// > EQNames, or if it contains a QName that does not match the `name`
+    /// > attribute of any `xsl:attribute-set` declaration in the stylesheet.
+    ///
+    /// Both halves of that rule are XTSE0710, and both are **static**: every
+    /// name is remembered here and checked against the declared sets once the
+    /// declaration walk is over ([`Builder::check_attribute_set_references`]),
+    /// so an attribute set that is never used at run time is validated too.
     pub(super) fn qname_list_value(
         &mut self,
         text: &str,
         ctx: StaticContextId,
     ) -> Result<Vec<QName>, XsltError> {
-        whitespace::tokens(text)
-            .map(|token| self.resolve(token, ctx, codes::XTSE0020))
-            .collect()
+        let names: Vec<QName> = whitespace::tokens(text)
+            .map(|token| self.resolve(token, ctx, codes::XTSE0710))
+            .collect::<Result<_, _>>()?;
+        self.attr_set_refs.extend(names.iter().cloned());
+        Ok(names)
     }
 
     pub(super) fn resolve(

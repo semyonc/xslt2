@@ -3,6 +3,7 @@
 use xsd_schema::navigator::{DomNavigator, DomNodeType};
 
 use super::attributes::check_attributes;
+use super::checks;
 use super::{Builder, ScopeEntry};
 use crate::error::{codes, Location, XsltError};
 use crate::model::*;
@@ -421,27 +422,30 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     /// replaced by the `XSLT2-NOTIMPL` below, which hid genuine `XTSE` errors —
     /// M2a review, finding 1).
     ///
-    /// The `None` arm is **not** conformant and is left as it was: §3.9 asks for
-    /// the same static error as the non-forwards-compatible branch raises
-    /// (`XTSE0010`), not for an error deferred to evaluation — that was the
-    /// XSLT 1.0 rule. Deferring it is a separate defect, recorded in
-    /// `XSLT2_M2A_REVIEW_FIXES.md` under "Noticed, not done".
+    /// The `None` arm raises the same **static** error as the
+    /// non-forwards-compatible branch, which is what §3.9 asks for: deferring it
+    /// to evaluation was the XSLT 1.0 rule, and until M2c the compiler kept it
+    /// (`XSLT2_M2A_REVIEW_FIXES.md`, "Noticed, not done"). The element table
+    /// normally reports this before the instruction is ever compiled
+    /// ([`checks`]); the arm is kept so that the rule holds here too rather than
+    /// depending on the order the two passes run in.
     fn fallback_or_error(
         &mut self,
         nav: &Nav<'t>,
         module_id: ModuleId,
         name: &str,
     ) -> Result<InstructionKind, XsltError> {
-        Ok(match self.fallback_bodies(nav, module_id)? {
-            Some(body) => InstructionKind::Choose {
+        match self.fallback_bodies(nav, module_id)? {
+            Some(body) => Ok(InstructionKind::Choose {
                 whens: Vec::new(),
                 otherwise: Some(body),
-            },
-            None => InstructionKind::NotImplemented {
-                feature: format!("the unknown XSLT instruction xsl:{name}"),
-                milestone: "M3",
-            },
-        })
+            }),
+            None => Err(XsltError::new(
+                codes::XTSE0010,
+                format!("xsl:{name} is not an XSLT instruction and has no xsl:fallback child"),
+            )
+            .with_location(self.modules.module(module_id).location(nav))),
+        }
     }
 
     fn choose(
@@ -560,14 +564,22 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         Ok(out)
     }
 
+    /// The `mode` attribute of `xsl:apply-templates` (§6.3).
+    ///
+    /// §6.5 scopes XTSE0550 to the *list* of modes an `xsl:template` declares;
+    /// `xsl:apply-templates/@mode` names one mode and is a `token`, not an
+    /// attribute value template, so a value that is neither an EQName nor
+    /// `#default` nor `#current` is §3.4's XTSE0020 — which is what
+    /// [`checks::bad_value_code`] reads out of the element table.
     fn mode_ref(&mut self, nav: &Nav<'t>, ctx: StaticContextId) -> Result<ModeRef, XsltError> {
         let _ = &self.names;
+        let code = checks::bad_value_code("apply-templates", "mode");
         Ok(match attr_local(nav, "mode") {
             None => ModeRef::Default,
             Some(text) => match whitespace::trim(&text) {
                 "#default" => ModeRef::Default,
                 "#current" => ModeRef::Current,
-                name => ModeRef::Named(self.resolve(name, ctx, codes::XTSE0550)?),
+                name => ModeRef::Named(self.resolve(name, ctx, code)?),
             },
         })
     }

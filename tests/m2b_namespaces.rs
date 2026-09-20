@@ -678,3 +678,253 @@ fn xsl_document_in_a_sequence_has_the_stylesheet_base_uri() {
     .expect("xsl:document in a sequence");
     assert_eq!(out, r#"<out base="file:///m2b/main.xsl"/>"#);
 }
+
+// ═══ Review 3, finding 2 — a URI that is both alias source and alias target ═
+
+/// §11.1.4's three sentences about the namespace nodes of a literal result
+/// element:
+///
+/// > A namespace node whose string value is a **literal namespace URI** is not
+/// > copied to the result tree.
+/// >
+/// > A namespace node whose string value is a **target namespace URI** is copied
+/// > to the result tree, whether or not the URI identifies an excluded
+/// > namespace.
+/// >
+/// > In the event that the same URI is used as a literal namespace URI and a
+/// > target namespace URI, the second of these rules takes precedence.
+///
+/// In the chain `a → b`, `b → c` the URI bound to `b` is **both**, so the second
+/// rule decides and its namespace node is copied. The M2b code applied the first
+/// rule first and dropped it.
+///
+/// The literal result element here is in **no** namespace, so nothing but the
+/// copy rules can put `b` on it — namespace fixup (§5.7.3) has no name to fix up.
+#[test]
+fn a_uri_that_is_both_alias_source_and_target_is_copied() {
+    let out = run_sheet(
+        &format!(
+            r#"<xsl:stylesheet version="2.0" xmlns:xsl="{NS}"
+                 xmlns:a="http://a/" xmlns:b="http://b/" xmlns:c="http://c/">
+                 <xsl:namespace-alias stylesheet-prefix="a" result-prefix="b"/>
+                 <xsl:namespace-alias stylesheet-prefix="b" result-prefix="c"/>
+                 <xsl:template match="/"><out/></xsl:template>
+               </xsl:stylesheet>"#
+        ),
+        IN,
+    )
+    .expect("a chain of aliases");
+    // `a` is a literal URI only — rule 1 drops it. `b` is both — rule 2 wins.
+    // `c` is a target only — rule 2 copies it.
+    assert_eq!(out, r#"<out xmlns:b="http://b/" xmlns:c="http://c/"/>"#);
+}
+
+/// The same, read off the namespace **axis** of the constructed element rather
+/// than off the serialization, and with the `a` binding *absent*: the node for
+/// `b` can then only come from the copy rules, never from rewriting the `a` one.
+#[test]
+fn the_namespace_axis_of_the_constructed_element_carries_the_both_role_uri() {
+    let out = run_sheet(
+        &format!(
+            r#"<xsl:stylesheet version="2.0" xmlns:xsl="{NS}"
+                 xmlns:b="http://b/" xmlns:c="http://c/">
+                 <xsl:namespace-alias stylesheet-prefix="a" result-prefix="b" xmlns:a="http://a/"/>
+                 <xsl:namespace-alias stylesheet-prefix="b" result-prefix="c"/>
+                 <xsl:template match="/">
+                   <xsl:variable name="e" as="element()"><out/></xsl:variable>
+                   <xsl:variable name="ns" select="$e/namespace::*[name() != 'xml']"/>
+                   <xsl:value-of select="concat(
+                     count($ns), ' ',
+                     string($ns[name() = 'b']), ' ',
+                     string($ns[name() = 'c']))"/>
+                 </xsl:template>
+               </xsl:stylesheet>"#
+        ),
+        IN,
+    )
+    .expect("a chain of aliases, read off the namespace axis");
+    // Two namespace nodes besides the implicit `xml` one: the both-role URI
+    // under its own result-prefix, and the target-only URI.
+    assert_eq!(out, "2 http://b/ http://c/");
+}
+
+/// `namespace-alias-1006`: a circular chain of five aliases in which every URI
+/// is both a literal and a target URI. Its prefix bindings sit on the
+/// `xsl:namespace-alias` elements, so the **only** namespace node in scope on
+/// each literal result element is the *default* one — and no alias has
+/// `result-prefix="#default"`, so §11.1.4's note ("an in-scope namespace node
+/// that binds **the `result-prefix`** to the target namespace URI, provided that
+/// the namespace declaration associating this prefix with this URI is in scope
+/// … for the literal result element") does not protect it. Rule 1 drops it, and
+/// each result element carries only what namespace fixup gives its aliased name.
+#[test]
+fn a_circular_chain_copies_only_what_fixup_needs() {
+    let out = run_sheet(
+        &format!(
+            r#"<xsl:stylesheet version="2.0" xmlns:xsl="{NS}">
+                 <xsl:namespace-alias stylesheet-prefix="a" result-prefix="b" xmlns:a="http://a.com/" xmlns:b="http://b.com/"/>
+                 <xsl:namespace-alias stylesheet-prefix="b" result-prefix="c" xmlns:b="http://b.com/" xmlns:c="http://c.com/"/>
+                 <xsl:namespace-alias stylesheet-prefix="c" result-prefix="d" xmlns:c="http://c.com/" xmlns:d="http://d.com/"/>
+                 <xsl:namespace-alias stylesheet-prefix="d" result-prefix="e" xmlns:d="http://d.com/" xmlns:e="http://e.com/"/>
+                 <xsl:namespace-alias stylesheet-prefix="e" result-prefix="a" xmlns:e="http://e.com/" xmlns:a="http://a.com/"/>
+                 <xsl:template match="/"><out>
+                   <v xmlns="http://a.com/"/><w xmlns="http://b.com/"/><x xmlns="http://c.com/"/>
+                   <y xmlns="http://d.com/"/><z xmlns="http://e.com/"/></out></xsl:template>
+               </xsl:stylesheet>"#
+        ),
+        IN,
+    )
+    .expect("a circular chain of aliases");
+    assert_eq!(
+        out,
+        concat!(
+            "<out>",
+            r#"<b:v xmlns:b="http://b.com/"/>"#,
+            r#"<c:w xmlns:c="http://c.com/"/>"#,
+            r#"<d:x xmlns:d="http://d.com/"/>"#,
+            r#"<e:y xmlns:e="http://e.com/"/>"#,
+            r#"<a:z xmlns:a="http://a.com/"/>"#,
+            "</out>"
+        )
+    );
+}
+
+/// The same circular chain with every `result-prefix` → target binding **in
+/// scope on the literal result element**. §11.1.4's note then applies to all
+/// five, so all five are copied: that is what the note guarantees, and the
+/// difference from the case above is exactly the proviso it states.
+#[test]
+fn a_circular_chain_with_the_bindings_in_scope_copies_them_all() {
+    let out = run_sheet(
+        &format!(
+            r#"<xsl:stylesheet version="2.0" xmlns:xsl="{NS}"
+                 xmlns:a="http://a.com/" xmlns:b="http://b.com/" xmlns:c="http://c.com/"
+                 xmlns:d="http://d.com/" xmlns:e="http://e.com/">
+                 <xsl:namespace-alias stylesheet-prefix="a" result-prefix="b"/>
+                 <xsl:namespace-alias stylesheet-prefix="b" result-prefix="c"/>
+                 <xsl:namespace-alias stylesheet-prefix="c" result-prefix="d"/>
+                 <xsl:namespace-alias stylesheet-prefix="d" result-prefix="e"/>
+                 <xsl:namespace-alias stylesheet-prefix="e" result-prefix="a"/>
+                 <xsl:template match="/"><a:v/></xsl:template>
+               </xsl:stylesheet>"#
+        ),
+        IN,
+    )
+    .expect("a circular chain with every binding in scope");
+    assert_eq!(
+        out,
+        concat!(
+            r#"<b:v xmlns:a="http://a.com/" xmlns:b="http://b.com/" xmlns:c="http://c.com/" "#,
+            r#"xmlns:d="http://d.com/" xmlns:e="http://e.com/"/>"#
+        )
+    );
+}
+
+/// Rule 2's own clause: a target namespace URI is copied "**whether or not** the
+/// URI identifies an excluded namespace".
+#[test]
+fn a_target_namespace_survives_being_excluded() {
+    let out = run_sheet(
+        &format!(
+            r#"<xsl:stylesheet version="2.0" xmlns:xsl="{NS}"
+                 xmlns:a="http://a/" xmlns:b="http://b/" exclude-result-prefixes="a b">
+                 <xsl:namespace-alias stylesheet-prefix="a" result-prefix="b"/>
+                 <xsl:template match="/"><out/></xsl:template>
+               </xsl:stylesheet>"#
+        ),
+        IN,
+    )
+    .expect("an excluded target namespace");
+    // `a` is excluded *and* a literal URI: gone either way. `b` is excluded but
+    // is the target, so it is copied anyway.
+    assert_eq!(out, r#"<out xmlns:b="http://b/"/>"#);
+}
+
+// ═══ Review 3, finding 4 — what is in the lexical space of xs:anyURI ═══════
+//
+// XTDE0835 / XTDE0865 / XTDE0905 all say "not in the lexical space of the
+// xs:anyURI data type … or … the string http://www.w3.org/2000/xmlns/".
+// `datatypes.html` §3.3.17.2 makes that lexical space every finite-length
+// sequence of XML `Char`s, and says outright that the RFC syntax "is not part of
+// this datatype as defined here" — so a control-character test had no basis.
+
+/// A tab and a U+0085 are XML `Char`s (`#x9`, and `#x85` is inside
+/// `[#x20-#xD7FF]`), so a URI containing one is in the lexical space. Saxon and
+/// the committed baseline accept them; M2b's `char::is_control` did not.
+#[test]
+fn a_namespace_uri_may_contain_a_tab_or_u0085() {
+    for (label, escape) in [("tab", "&#9;"), ("U+0085", "&#133;"), ("newline", "&#10;")] {
+        let out = run(
+            &format!(
+                r#"<xsl:template match="/"><out><xsl:namespace name="p">urn:a{escape}b</xsl:namespace></out></xsl:template>"#
+            ),
+            IN,
+        )
+        .unwrap_or_else(|e| panic!("a {label} in a namespace URI is in the lexical space: {e}"));
+        assert!(out.starts_with("<out xmlns:p=\"urn:a"), "{label}: {out}");
+    }
+    // The same through xsl:element's namespace attribute (XTDE0835).
+    let out = run(
+        r#"<xsl:template match="/"><xsl:element name="e" namespace="urn:a&#9;b"/></xsl:template>"#,
+        IN,
+    )
+    .expect("a tab in xsl:element/@namespace");
+    assert!(out.contains("urn:a"), "{out}");
+}
+
+/// The two rules that do survive. The `#` one is XSD **1.0**'s reading of
+/// `anyURI` (a URI reference per RFC 2396 has at most one fragment separator),
+/// which is what the suite selects for a processor that is not XSD 1.1:
+/// `error-0905a` feeds `####` to `xsl:namespace` and requires XTDE0905, under
+/// `<feature value="XSD_1.1" satisfied="false"/>`.
+#[test]
+fn a_namespace_uri_with_two_hashes_or_the_xmlns_namespace_is_rejected() {
+    let ns = |body: &str| {
+        run(
+            &format!(
+                r#"<xsl:template match="/"><out><xsl:namespace name="p">{body}</xsl:namespace></out></xsl:template>"#
+            ),
+            IN,
+        )
+    };
+    // `error-0905a`.
+    assert_eq!(
+        ns("####").expect_err("two fragment separators").code,
+        "XTDE0905"
+    );
+    // One `#` is a perfectly good fragment separator.
+    assert_eq!(
+        ns("urn:a#b").expect("one fragment separator"),
+        r#"<out xmlns:p="urn:a#b"/>"#
+    );
+    // `error-0905c`: the XMLNS namespace is named outright by the error.
+    assert_eq!(
+        ns("http://www.w3.org/2000/xmlns/")
+            .expect_err("the XMLNS namespace")
+            .code,
+        "XTDE0905"
+    );
+    // XTDE0865 for xsl:attribute, on the same sentence.
+    assert_eq!(
+        run(
+            r#"<xsl:template match="/"><out><xsl:attribute name="a" namespace="http://www.w3.org/2000/xmlns/">v</xsl:attribute></out></xsl:template>"#,
+            IN,
+        )
+        .expect_err("the XMLNS namespace on xsl:attribute")
+        .code,
+        "XTDE0865"
+    );
+}
+
+/// The empty string is a namespace URI wherever a namespace URI is optional:
+/// §3.3.17.2's lexical space is "zero or more characters", and `xsl:element`
+/// with `namespace=""` builds an element in no namespace.
+#[test]
+fn the_empty_namespace_uri_is_accepted() {
+    let out = run(
+        r#"<xsl:template match="/"><xsl:element name="e" namespace=""><xsl:attribute name="a" namespace="">v</xsl:attribute></xsl:element></xsl:template>"#,
+        IN,
+    )
+    .expect("an empty namespace URI puts the name in no namespace");
+    assert_eq!(out, r#"<e a="v"/>"#);
+}

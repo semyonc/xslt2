@@ -8,6 +8,7 @@
 
 mod attributes;
 mod avt;
+pub(crate) mod checks;
 mod declarations;
 mod expressions;
 mod instructions;
@@ -143,6 +144,9 @@ struct Builder<'a, 'm, 't> {
     /// is bound to, not the prefix — because §11.1.4 aliases the namespace, so
     /// any prefix bound to that URI in a literal result element is rewritten.
     aliases: HashMap<String, Alias>,
+    /// Every name a `use-attribute-sets` / `xsl:use-attribute-sets` attribute
+    /// mentions, for the static half of XTSE0710 (§10.2).
+    attr_set_refs: Vec<QName>,
 }
 
 /// One winning `xsl:namespace-alias` declaration (§11.1.4).
@@ -181,11 +185,19 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             frame_size: 0,
             decl_order: 0,
             aliases: HashMap::new(),
+            attr_set_refs: Vec::new(),
         }
     }
 
     fn build(&mut self) -> Result<CompiledStylesheet<'a>, XsltError> {
+        // §3.4: the element table first, over every module, so that a misplaced
+        // element or a content model the spec does not allow is reported even
+        // when it stands in a subtree nothing would compile (M2c).
+        checks::check(self.modules)?;
         self.build_declarations()?;
+        // §10.1.1's XTSE0680 needs the declaration tables, so it runs over the
+        // compiled tree rather than over the stylesheet tree.
+        checks::check_call_template_params(self)?;
         let modes = self.build_mode_table();
         let principal = self.modules.module(self.modules.principal);
         let base_uri = principal.uri.clone();

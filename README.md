@@ -39,22 +39,24 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 |---|---|
 | XSLT 2.0-applicable | 6,619 |
 | runnable (dependencies satisfied) | 5,751 |
-| pass | 4,160 |
-| fail / wrongError / harnessError | 254 / 29 / 5 |
-| not implemented (`XSLT2-NOTIMPL`, M2–M4) | 1,303 |
-| pass rate over runnable | 72.34% |
-| headline (basic profile, non-regex families) | 3,025 / 4,233 = **71.5%** |
+| pass | 4,297 |
+| fail / wrongError / harnessError | 143 / 10 / 5 |
+| not implemented (`XSLT2-NOTIMPL`, M2–M4) | 1,296 |
+| pass rate over runnable | 74.72% |
+| headline (basic profile, non-regex families) | 3,159 / 4,233 = **74.6%** |
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the
 assertion says `ignore-prefixes="true"`. `--lenient-xml` switches that off for triage; a failure
-that exists only under the strict comparison starts with `assert-xml namespace mismatch:` (8 cases
-today, all real namespace-fixup / inheritance / `xsl:namespace-alias` bugs). Figures are from
+that exists only under the strict comparison starts with `assert-xml namespace mismatch:` (one case
+today, `attribute-0004`, which pins an invented prefix that §5.7.3 leaves implementation-dependent). Figures are from
 2026-09-19, after the M1 review fixes (`../../XSLT2_M1_REVIEW_FIXES.md`) and the M2a groundwork
 (`../../XSLT2_M2A_REPORT.md`), which re-labelled 114 cases from "fail" to "not implemented": they
 need `format-number` / `format-date`, which are stubs until M3d. They are measured against the
 sibling `../xsd-schema` checkout with its current additive XPath fixes (navigation, `/` evaluation,
-operator errors, regex dialect, string literals, linear general comparison): 3,977 → 4,160.
+operator errors, regex dialect, string literals, linear general comparison): 3,977 → 4,160; M2b
+(namespace correctness) and M2c (one table-driven static-checking pass, `src/compile/checks.rs`) then
+took it to 4,297.
 
 The sixteen test-sets M1 targets:
 

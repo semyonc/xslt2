@@ -18,6 +18,21 @@ pub const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema";
 /// The codepoint collation, the only one this implementation knows (§9.5).
 pub const CODEPOINT_COLLATION: &str = "http://www.w3.org/2005/xpath-functions/collation/codepoint";
 
+/// Whether `uri` names one of the collations \[Functions and Operators\]
+/// defines, other than the codepoint collation this processor implements.
+///
+/// §5.4.1 makes an unrecognised `[xsl:]default-collation` the static error
+/// XTSE0125, and for a URI that names no collation anywhere that is the right
+/// answer. A **standard** collation URI is a different thing: the stylesheet is
+/// correct and it is this processor that has no collation registry yet (§9.5,
+/// owned by M2e), so the honest report is `XSLT2-NOTIMPL` naming that
+/// milestone. Reporting both as XTSE0125 would claim conformance the processor
+/// does not have, and would classify a missing feature as a wrong answer.
+pub fn is_standard_collation(uri: &str) -> bool {
+    uri.starts_with("http://www.w3.org/2005/xpath-functions/collation/")
+        || uri.starts_with("http://www.w3.org/2013/collation/")
+}
+
 /// An expanded name: namespace URI (empty for none) plus local part.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct QName {

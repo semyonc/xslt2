@@ -49,6 +49,9 @@ pub struct OutputDefinition {
 pub struct Setting<T> {
     value: Option<T>,
     precedence: u32,
+    /// The highest import precedence at which two declarations gave this
+    /// attribute different explicit values (§20, XTSE1560).
+    conflict: Option<u32>,
 }
 
 impl<T> Default for Setting<T> {
@@ -56,6 +59,7 @@ impl<T> Default for Setting<T> {
         Self {
             value: None,
             precedence: 0,
+            conflict: None,
         }
     }
 }
@@ -67,6 +71,18 @@ impl<T> Setting<T> {
             self.value = Some(value);
             self.precedence = precedence;
         }
+    }
+
+    /// Whether the winning value came from a precedence at which two
+    /// declarations disagreed (§20, XTSE1560).
+    ///
+    /// A disagreement at a *lower* precedence is excused by the spec — "unless
+    /// there is another `xsl:output` declaration within the same output
+    /// definition that has higher import precedence and that specifies an
+    /// explicit value for the same attribute" — which is exactly the case where
+    /// `precedence` has since moved above the recorded conflict.
+    pub fn conflicts(&self) -> bool {
+        self.conflict == Some(self.precedence)
     }
 
     pub fn get(&self) -> Option<&T> {
@@ -84,7 +100,46 @@ impl<T: Copy> Setting<T> {
     }
 }
 
+impl<T: PartialEq> Setting<T> {
+    /// Records `value`, remembering a disagreement with an equally-precedent
+    /// declaration for §20's XTSE1560.
+    pub fn set_checked(&mut self, value: T, precedence: u32) {
+        if let Some(existing) = &self.value {
+            if precedence == self.precedence && *existing != value {
+                self.conflict = Some(precedence);
+            }
+        }
+        self.set(value, precedence);
+    }
+}
+
 impl OutputDefinition {
+    /// The first serialization parameter two equally-precedent `xsl:output`
+    /// declarations of this definition gave different explicit values for
+    /// (§20, XTSE1560).
+    ///
+    /// `cdata-section-elements` and `use-character-maps` are exempt by the same
+    /// rule — §20 unions them rather than overriding — and are not stored here
+    /// at all, so they cannot appear.
+    pub fn conflicting_attribute(&self) -> Option<&'static str> {
+        [
+            ("method", self.method.conflicts()),
+            ("version", self.version.conflicts()),
+            ("encoding", self.encoding.conflicts()),
+            ("indent", self.indent.conflicts()),
+            (
+                "omit-xml-declaration",
+                self.omit_xml_declaration.conflicts(),
+            ),
+            ("standalone", self.standalone.conflicts()),
+            ("doctype-public", self.doctype_public.conflicts()),
+            ("doctype-system", self.doctype_system.conflicts()),
+            ("media-type", self.media_type.conflicts()),
+        ]
+        .into_iter()
+        .find_map(|(name, conflicts)| conflicts.then_some(name))
+    }
+
     /// The method actually used, with `Unspecified` resolved to `xml`.
     ///
     /// §20 lets a processor pick `html` when the first element is `html`; M1

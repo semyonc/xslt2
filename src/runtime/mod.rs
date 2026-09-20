@@ -348,6 +348,19 @@ impl<'a, 't> Transformation<'a, 't> {
         cx: &mut XsltContext<'t>,
         out: &mut dyn Receiver<'t>,
     ) -> Result<(), XsltError> {
+        // > [ERR XTDE0047] It is a non-recoverable dynamic error if the
+        // > invocation of the stylesheet specifies both an initial mode and an
+        // > initial template.
+        //
+        // Checked before XTDE0040 and XTDE0045: the invocation is wrong however
+        // well-formed the names it carries are.
+        if self.options.initial_template.is_some() && self.options.initial_mode != ModeKey::Default
+        {
+            return Err(XsltError::new(
+                codes::XTDE0047,
+                "the invocation specifies both an initial mode and an initial template",
+            ));
+        }
         if let Some(name) = self.options.initial_template.clone() {
             let id = self.sheet.named_template(&name).ok_or_else(|| {
                 XsltError::new(

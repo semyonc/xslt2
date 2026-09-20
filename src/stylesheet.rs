@@ -19,7 +19,7 @@ use xsd_schema::xpath::{XPathContext, XPathExpr};
 
 use crate::error::{codes, Location, XsltError};
 use crate::functions::{StaticEvaluator, XsltFunctions};
-use crate::names::{CODEPOINT_COLLATION, XML_NS, XSLT_NS};
+use crate::names::{is_standard_collation, CODEPOINT_COLLATION, XML_NS, XSLT_NS};
 use crate::receiver::Nav;
 use crate::resolver::{self, Resolver};
 use crate::whitespace;
@@ -380,6 +380,9 @@ pub struct Loader<'a, 't> {
     /// URIs on the current load path, with the edge that reached them.
     stack: Vec<(String, Inclusion)>,
     next_precedence: u32,
+    /// The `input-type-annotations` values the modules of this stylesheet ask
+    /// for, for §3.6's XTSE0265 across the whole module graph.
+    input_type_annotations: HashSet<String>,
 }
 
 impl<'a, 't> Loader<'a, 't> {
@@ -398,6 +401,7 @@ impl<'a, 't> Loader<'a, 't> {
             units: Vec::new(),
             stack: Vec::new(),
             next_precedence: 0,
+            input_type_annotations: HashSet::new(),
         }
     }
 
@@ -405,6 +409,19 @@ impl<'a, 't> Loader<'a, 't> {
     /// includes.
     pub fn load(mut self, uri: &str, text: Option<String>) -> Result<ModuleSet<'t>, XsltError> {
         let (principal, simplified) = self.visit(uri, text, Inclusion::Import, true)?;
+        // > [ERR XTSE0265] It is a static error if there is a stylesheet module
+        // > in the stylesheet that specifies input-type-annotations="strip" and
+        // > another stylesheet module that specifies
+        // > input-type-annotations="preserve".
+        if self.input_type_annotations.contains("strip")
+            && self.input_type_annotations.contains("preserve")
+        {
+            return Err(XsltError::new(
+                codes::XTSE0265,
+                "one stylesheet module specifies input-type-annotations=\"strip\" and another \
+                 specifies input-type-annotations=\"preserve\"",
+            ));
+        }
         Ok(ModuleSet {
             modules: self.modules,
             units: self.units,
@@ -578,8 +595,16 @@ impl<'a, 't> Loader<'a, 't> {
                         root.local_name()
                     ),
                 )),
+                // §3.7: the document element is then a literal result element,
+                // and "[ERR XTSE0150] A literal result element that is used as
+                // the outermost element of a simplified stylesheet module must
+                // have an xsl:version attribute." §3.10.1 also allows XTSE0165
+                // when the module was reached through xsl:include/xsl:import,
+                // because "the resource that is retrieved does not contain a
+                // stylesheet module conforming to this specification"; the
+                // suite accepts either, so the more specific code is used.
                 None => Err(XsltError::new(
-                    codes::XTSE0010,
+                    codes::XTSE0150,
                     format!(
                         "{module_uri:?} is neither an xsl:stylesheet nor a simplified stylesheet \
                          (its document element {} has no xsl:version attribute)",
@@ -600,6 +625,24 @@ impl<'a, 't> Loader<'a, 't> {
             )
         })?;
         check_version(&version, &module_uri)?;
+        // §3.6: the three values of `input-type-annotations`, collected across
+        // the module graph for XTSE0265 (checked once, in `load`).
+        if let Some(value) = attr_local(&root, "input-type-annotations") {
+            match whitespace::trim(&value) {
+                v @ ("strip" | "preserve" | "unspecified") => {
+                    self.input_type_annotations.insert(v.to_string());
+                }
+                other => {
+                    return Err(XsltError::new(
+                        codes::XTSE0020,
+                        format!(
+                            "input-type-annotations must be \"strip\", \"preserve\" or \
+                             \"unspecified\", not {other:?}"
+                        ),
+                    ))
+                }
+            }
+        }
 
         let mut seen_non_import = false;
         // §3.12: an excluded declaration is not there — in particular an
@@ -806,22 +849,38 @@ fn evaluate_use_when(
     functions: &XsltFunctions,
 ) -> Result<bool, XsltError> {
     let sc = static_context_of(nav, module)?;
+    // §3.12's "In scope functions" row: the F&O core plus `element-available`,
+    // `function-available`, `type-available` and `system-property`, and nothing
+    // else — so a call to an XSLT-specific function such as `generate-id()` or
+    // `key()` does not bind, which is XPST0017.
+    let use_when_catalog = functions.use_when_catalog();
     let mut ctx = XPathContext::new(names)
         .with_namespaces(sc.snapshot(names))
         .with_base_uri(sc.base_uri.clone())
-        .with_function_catalog(functions.catalog());
+        .with_function_catalog(&use_when_catalog);
     if !sc.xpath_default_namespace.is_empty() {
         ctx = ctx.with_default_element_ns(names.add(&sc.xpath_default_namespace));
     }
     let fail = |e: xsd_schema::xpath::XPathError| {
-        XsltError::new(
-            e.error_code().unwrap_or(codes::XTSE0010),
-            format!("the use-when expression {source:?} cannot be evaluated: {e}"),
-        )
-        .with_location(module.location(nav))
+        // An error the engine identifies by an error QName — `fn:error`, and the
+        // FODC0002 §3.12 makes `fn:doc` raise — keeps that identity; anything
+        // else that has no code of its own is an error in the `use-when`
+        // attribute itself, which §3.12 leaves as XTSE0010.
+        crate::error::raised_error_to_xslt(&e)
+            .unwrap_or_else(|| {
+                XsltError::new(
+                    e.error_code().unwrap_or(codes::XTSE0010),
+                    format!("the use-when expression {source:?} cannot be evaluated: {e}"),
+                )
+            })
+            .or_location(&module.location(nav))
     };
     let expr = XPathExpr::compile(source, &ctx).map_err(fail)?;
-    let evaluator = StaticEvaluator::new(functions, sc.namespaces.clone());
+    let evaluator = StaticEvaluator::new(
+        functions,
+        sc.namespaces.clone(),
+        sc.xpath_default_namespace.clone(),
+    );
     let value = expr
         .evaluator(&ctx)
         .run_with_node_and_setup::<Nav<'_>, _>(None, |ev| {
@@ -832,18 +891,20 @@ fn evaluate_use_when(
 }
 
 /// §3.6: the `version` attribute must be a number.
+///
+/// > \[ERR XTSE0110\] The value of the `version` attribute must be a number:
+/// > specifically, it must be a valid instance of the type `xs:decimal` as
+/// > defined in \[XML Schema Part 2\].
 fn check_version(version: &str, module_uri: &str) -> Result<(), XsltError> {
-    whitespace::trim(version)
-        .parse::<f64>()
-        .map(|_| ())
-        .map_err(|_| {
-            XsltError::new(
-                codes::XTSE0110,
-                format!(
-                    "the version attribute of {module_uri:?} is {version:?}, which is not a number"
-                ),
-            )
-        })
+    if crate::compile::checks::is_xs_decimal(version) {
+        return Ok(());
+    }
+    Err(XsltError::new(
+        codes::XTSE0110,
+        format!(
+            "the version attribute of {module_uri:?} is {version:?}, which is not an xs:decimal"
+        ),
+    ))
 }
 
 fn require_href(nav: &Nav<'_>, what: &str) -> Result<String, XsltError> {
@@ -1066,7 +1127,18 @@ pub fn static_context_of(nav: &Nav<'_>, module: &Module<'_>) -> Result<StaticCon
         if let Some(base) = attr_ns(a, XML_NS, "base") {
             ctx.base_uri = resolver::resolve_uri(&ctx.base_uri, &base);
         }
-        if let Some(v) = standard_attr(a, "version") {
+        // §3.9: "These rules do not apply to the version attribute of the
+        // xsl:output element, which has an entirely different purpose: it is
+        // used to define the version of the output method to be used for
+        // serialization."
+        let is_output = a.namespace_uri() == XSLT_NS && a.local_name() == "output";
+        if let Some(v) = standard_attr(a, "version").filter(|_| !is_output) {
+            if !crate::compile::checks::is_xs_decimal(&v) {
+                return Err(XsltError::new(
+                    codes::XTSE0110,
+                    format!("version {v:?} is not an xs:decimal"),
+                ));
+            }
             let n = whitespace::trim(&v).parse::<f64>().map_err(|_| {
                 XsltError::new(codes::XTSE0110, format!("version {v:?} is not a number"))
             })?;
@@ -1076,12 +1148,41 @@ pub fn static_context_of(nav: &Nav<'_>, module: &Module<'_>) -> Result<StaticCon
             ctx.xpath_default_namespace = v;
         }
         if let Some(v) = standard_attr(a, "default-collation") {
-            // §5.4.1: a list of collation URIs; the first one the processor
-            // recognizes is used.
-            ctx.default_collation = whitespace::tokens(&v)
-                .find(|u| *u == CODEPOINT_COLLATION)
-                .unwrap_or(CODEPOINT_COLLATION)
-                .to_string();
+            // §5.4.1: a whitespace-separated list of collation URIs, each
+            // resolved against the base URI of the attribute's parent element;
+            // the first one the processor recognizes is used.
+            //
+            // > [ERR XTSE0125] It is a static error if the value of an
+            // > [xsl:]default-collation attribute, after resolving against the
+            // > base URI, contains no URI that the implementation recognizes as
+            // > a collation URI.
+            let base = base_uri_of(a, &module.uri);
+            let candidates: Vec<String> = whitespace::tokens(&v)
+                .map(|token| resolver::resolve_uri(&base, token))
+                .collect();
+            ctx.default_collation = match candidates.iter().find(|uri| *uri == CODEPOINT_COLLATION)
+            {
+                Some(uri) => uri.clone(),
+                // A standard collation this processor has not built is a
+                // missing feature, not a broken stylesheet (§9.5, M2e).
+                None => match candidates.iter().find(|uri| is_standard_collation(uri)) {
+                    Some(uri) => {
+                        return Err(XsltError::not_implemented(
+                            format!("the collation {uri}"),
+                            "M2e",
+                        ))
+                    }
+                    None => {
+                        return Err(XsltError::new(
+                            codes::XTSE0125,
+                            format!(
+                                "no collation URI in default-collation={v:?} is one this processor \
+                                 recognizes"
+                            ),
+                        ))
+                    }
+                },
+            };
         }
         if let Some(v) = standard_attr(a, "exclude-result-prefixes") {
             for token in whitespace::tokens(&v) {

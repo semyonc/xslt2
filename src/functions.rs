@@ -85,6 +85,33 @@ pub enum XsltFn {
 }
 
 impl XsltFn {
+    /// Whether §3.12 puts this function in the static context of a `use-when`
+    /// expression.
+    ///
+    /// > In scope functions: The core functions defined in \[Functions and
+    /// > Operators\], together with the functions `element-available`,
+    /// > `function-available`, `type-available`, and `system-property` defined in
+    /// > this specification …
+    ///
+    /// So the four named ones are in scope, and so are the F&O functions this
+    /// crate happens to register itself rather than inherit from the engine —
+    /// `fn:doc`, `fn:doc-available`, `fn:document-uri` and `fn:error` are all
+    /// F&O core, not XSLT additions. Every other §16 function is XSLT-specific
+    /// and is simply absent, which makes a call to it XPST0017.
+    pub fn in_use_when_scope(self) -> bool {
+        matches!(
+            self,
+            XsltFn::ElementAvailable
+                | XsltFn::FunctionAvailable
+                | XsltFn::TypeAvailable
+                | XsltFn::SystemProperty
+                | XsltFn::Doc
+                | XsltFn::DocAvailable
+                | XsltFn::DocumentUri
+                | XsltFn::Error
+        )
+    }
+
     /// The name a diagnostic uses.
     pub fn name(self) -> &'static str {
         match self {
@@ -421,6 +448,30 @@ impl XsltFunctions {
         &self.set
     }
 
+    /// The catalog §3.12 gives a `use-when` expression: the same one with every
+    /// XSLT-specific function removed (see [`XsltFn::in_use_when_scope`]).
+    pub fn use_when_catalog(&self) -> UseWhenCatalog<'_> {
+        UseWhenCatalog { functions: self }
+    }
+
+    /// Whether a name and arity is in scope in a `use-when` expression, which is
+    /// what `function-available()` must answer there (§3.12: "The effect of this
+    /// rule is to ensure that `function-available` returns true in respect of
+    /// functions that can be called within the scope of the `use-when`
+    /// attribute").
+    pub fn is_available_in_use_when(&self, namespace: &str, local: &str, arity: usize) -> bool {
+        match self.set.lookup(namespace, local, arity) {
+            Some(handle) if self.stubs.contains(&handle) => false,
+            Some(handle) => match self.by_handle.get(&handle) {
+                Some(which) => which.in_use_when_scope(),
+                // Not one of ours: an engine built-in, i.e. an F&O core
+                // function, which §3.12 keeps in scope.
+                None => true,
+            },
+            None => false,
+        }
+    }
+
     /// Which XSLT function a handle stands for, if it is one of ours.
     pub fn resolve(&self, handle: FunctionHandle) -> Option<XsltFn> {
         self.by_handle.get(&handle).copied()
@@ -440,6 +491,37 @@ impl XsltFunctions {
     }
 }
 
+/// The function catalog of a `use-when` expression (§3.12).
+///
+/// A view over [`XsltFunctions`] that hides every XSLT-specific function, so
+/// that a `use-when` expression calling one fails to bind — XPST0017 — exactly
+/// as it would against a processor that never defined it. Hiding them here
+/// rather than refusing them in the evaluator is what makes
+/// `function-available()`, the sequence-type checks and the error code all agree.
+pub struct UseWhenCatalog<'f> {
+    functions: &'f XsltFunctions,
+}
+
+impl std::fmt::Debug for UseWhenCatalog<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("UseWhenCatalog")
+    }
+}
+
+impl FunctionCatalog for UseWhenCatalog<'_> {
+    fn lookup(&self, namespace: &str, local_name: &str, arity: usize) -> Option<FunctionHandle> {
+        let handle = self.functions.set.lookup(namespace, local_name, arity)?;
+        match self.functions.by_handle.get(&handle) {
+            Some(which) if !which.in_use_when_scope() => None,
+            _ => Some(handle),
+        }
+    }
+
+    fn get_signature(&self, handle: FunctionHandle) -> Option<DynamicFunctionSignature> {
+        self.functions.set.get_signature(handle)
+    }
+}
+
 /// The XSLT functions that need no running transformation: `system-property`,
 /// `element-available`, `function-available` and `type-available`.
 ///
@@ -448,29 +530,35 @@ impl XsltFunctions {
 pub struct StaticEvaluator<'f> {
     functions: &'f XsltFunctions,
     /// The in-scope namespace bindings of the element carrying the
-    /// `use-when` attribute.
+    /// `use-when` attribute — §3.12's "In scope namespaces".
     namespaces: Vec<(String, String)>,
+    /// §3.12's "Default element/type namespace: determined by the
+    /// `xpath-default-namespace` attribute if present … otherwise the null
+    /// namespace". Without it an unprefixed **type** name in a `use-when`
+    /// expression would expand differently here than it does at run time.
+    xpath_default_namespace: String,
 }
 
 impl<'f> StaticEvaluator<'f> {
-    pub fn new(functions: &'f XsltFunctions, namespaces: Vec<(String, String)>) -> Self {
+    pub fn new(
+        functions: &'f XsltFunctions,
+        namespaces: Vec<(String, String)>,
+        xpath_default_namespace: String,
+    ) -> Self {
         Self {
             functions,
             namespaces,
+            xpath_default_namespace,
         }
     }
 
-    fn resolve(&self, prefix: &str) -> Option<String> {
-        if prefix.is_empty() {
-            return Some(String::new());
+    /// The static context these four functions expand their argument against —
+    /// the same type the run-time evaluator builds.
+    fn scope(&self) -> NameScope<'_> {
+        NameScope {
+            bindings: &self.namespaces,
+            xpath_default_namespace: &self.xpath_default_namespace,
         }
-        if prefix == crate::names::XML_PREFIX {
-            return Some(crate::names::XML_NS.to_string());
-        }
-        self.namespaces
-            .iter()
-            .find(|(p, _)| p == prefix)
-            .map(|(_, u)| u.clone())
     }
 }
 
@@ -497,10 +585,15 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
                 }
             })
             .unwrap_or_default();
-        let (prefix, local) = crate::names::split_qname(crate::whitespace::trim(&name));
+        let scope = self.scope();
+        // An unbound prefix leaves the name unexpandable; §3.12 gives no error of
+        // its own for that, so it answers negatively as it always has here.
+        let expand = |unprefixed| {
+            expand_available_name(&scope, &name, unprefixed).unwrap_or_else(|| (String::new(), ""))
+        };
         match which {
             XsltFn::SystemProperty => {
-                let uri = self.resolve(prefix).unwrap_or_default();
+                let (uri, local) = expand(Unprefixed::NoNamespace);
                 Ok(XPathValue::string(if uri == crate::names::XSLT_NS {
                     system_property(local)
                 } else {
@@ -508,28 +601,159 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
                 }))
             }
             XsltFn::ElementAvailable => {
-                let uri = self.resolve(prefix).unwrap_or_default();
+                let (uri, local) = expand(Unprefixed::DefaultElementNamespace);
                 Ok(XPathValue::boolean(element_available(&uri, local)))
             }
             XsltFn::FunctionAvailable => {
-                let uri = if prefix.is_empty() {
-                    crate::names::FN_NS.to_string()
-                } else {
-                    self.resolve(prefix).unwrap_or_default()
-                };
-                Ok(XPathValue::boolean(function_available(
-                    self.functions,
-                    &uri,
-                    local,
-                )))
+                let (uri, local) = expand(Unprefixed::FunctionNamespace);
+                // §3.12: the answer is about the functions that can be called
+                // *from here*, which is the use-when set, not the stylesheet's.
+                Ok(XPathValue::boolean((0..=MAX_ARITY).any(|arity| {
+                    self.functions.is_available_in_use_when(&uri, local, arity)
+                })))
             }
-            XsltFn::TypeAvailable => Ok(XPathValue::boolean(false)),
+            XsltFn::TypeAvailable => {
+                let (uri, local) = expand(Unprefixed::TypeNamespace);
+                Ok(XPathValue::boolean(type_available(&uri, local)))
+            }
+            // \[Functions and Operators\] §15.5.4 `fn:doc`: if the argument is
+            // the empty sequence the result is the empty sequence. No URI is
+            // looked up, so §3.12's empty set of available documents is never
+            // consulted and there is nothing to report — `empty(doc(()))` is
+            // true in a `use-when` expression as it is anywhere else.
+            //
+            // (F&O is not available locally; this is the wording from memory,
+            // corroborated by XQTS 1.0.2 `fn-doc-4`, whose whole query is
+            // `fn:count(fn:doc(()))` with the expected result `0`.)
+            XsltFn::Doc if args.first().is_none_or(XPathValue::is_empty) => Ok(XPathValue::empty()),
+            // §3.12: "Statically known documents: None" and "Available
+            // documents: None", so `fn:doc` can never find its document. F&O
+            // gives that FODC0002; the engine has no variant of its own for it,
+            // so it travels as an error QName, which
+            // `error::raised_error_to_xslt` turns back into the code.
+            XsltFn::Doc => Err(XPathError::internal(format!(
+                "Q{{{}}}FODC0002: a use-when expression has no available documents, so doc({name:?}) \
+                 cannot be resolved",
+                crate::error::XQT_ERRORS_NAMESPACE
+            ))),
+            // F&O `fn:doc-available`: "If `$uri` is the empty sequence, this
+            // function returns false" (from memory) — and with no available
+            // documents at all, false is the answer for every other argument
+            // too, so one arm covers both.
+            XsltFn::DocAvailable => Ok(XPathValue::boolean(false)),
+            // F&O `fn:document-uri`: the empty sequence for an empty argument,
+            // and for anything that is not a document node with a URI — and a
+            // `use-when` expression has no nodes at all. XQTS
+            // `K-DocumentURIFunc-3` (`empty(document-uri(()))` = `true`) and
+            // `fn-document-uri-2` (`count(document-uri(()))` = `0`).
+            XsltFn::DocumentUri => Ok(XPathValue::empty()),
+            XsltFn::Error => BuiltinEvaluator.eval(handle, ctx, args),
             other => Err(XPathError::internal(format!(
                 "{}() cannot be called from a use-when expression",
                 other.name()
             ))),
         }
     }
+}
+
+/// The highest arity any function of XSLT 2.0 or \[Functions and Operators\] has
+/// (`fn:format-dateTime`, `fn:format-date` and `fn:format-time` take five),
+/// plus room for a variadic `fn:concat`.
+///
+/// `function-available()` with one argument asks whether the function exists at
+/// *any* arity (§18.1.2), and the catalog can only be asked one arity at a time,
+/// so the range has to cover every signature that could answer yes. Scanning to
+/// 4 — as the helper did before M2c — made `function-available('format-date')`
+/// and `function-available('concat')` answer false for the 5-argument forms.
+const MAX_ARITY: usize = 20;
+
+// ── Expanding the lexical QName these four functions are given ──────────────
+
+/// The slice of a static context that `system-property()` and the three
+/// `*-available()` functions need in order to expand their argument.
+///
+/// One type, built by the `use-when` evaluator (§3.12) and by the run-time
+/// evaluator (§16) alike, so that a name cannot expand one way statically and
+/// another way at run time.
+pub struct NameScope<'a> {
+    /// The expression's in-scope namespace bindings, prefix → URI. The entry for
+    /// the empty prefix, when there is one, is the **default namespace of the
+    /// defining element** (§5.1).
+    pub bindings: &'a [(String, String)],
+    /// `[xsl:]xpath-default-namespace` — the default namespace for element and
+    /// type names (§5.2), and the "Default element/type namespace" of §3.12's
+    /// static-context table for a `use-when` expression.
+    pub xpath_default_namespace: &'a str,
+}
+
+impl NameScope<'_> {
+    /// §5.1: a prefix is expanded "using the namespace declarations in effect on
+    /// its defining element". The `xml` prefix is always bound.
+    fn resolve_prefix(&self, prefix: &str) -> Option<&str> {
+        if prefix == crate::names::XML_PREFIX {
+            return Some(crate::names::XML_NS);
+        }
+        self.bindings
+            .iter()
+            .find(|(p, _)| p == prefix)
+            .map(|(_, u)| u.as_str())
+    }
+}
+
+/// Which namespace an **unprefixed** lexical QName gets. §5.1 is explicit that
+/// this differs per function, and lists the exceptions:
+///
+/// > The default namespace of the defining element … is **not** used for
+/// > unprefixed names. There are three cases where the default namespace of the
+/// > defining element is used when expanding an unprefixed QName: … The default
+/// > namespace is used when expanding the first argument of the function
+/// > `element-available`. …
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unprefixed {
+    /// §5.1's general rule: the name is in no namespace. `system-property()`
+    /// (§16.6.5, which expands "as described in 5.1 Qualified Names").
+    NoNamespace,
+    /// §5.1's second exception: the default namespace of the defining element —
+    /// the `xmlns=` default, *not* `xpath-default-namespace`. §18.2.2 says the
+    /// same: "If there is a default namespace in scope, then it is used to
+    /// expand an unprefixed QName." `element-available()`.
+    DefaultElementNamespace,
+    /// §18.1.1: "If the lexical QName is unprefixed, then the standard function
+    /// namespace is used in the expanded QName." `function-available()`.
+    FunctionNamespace,
+    /// §18.1.4: "If the lexical QName is unprefixed, then the default namespace
+    /// is used in the expanded QName" — for a *type* name that is the default
+    /// namespace for element and type names, which §5.2 defines as the effective
+    /// value of `[xsl:]xpath-default-namespace`. `type-available()`.
+    TypeNamespace,
+}
+
+/// Expand the lexical QName `name` the way the function `unprefixed` belongs to
+/// expands it, and return `(namespace URI, local name)`.
+///
+/// `None` means the name carries a prefix that is not bound in scope; each
+/// caller turns that into the error or the `false` its own section prescribes
+/// (XTDE1390, XTDE1400, XTDE1428, XTDE1440).
+pub fn expand_available_name<'n>(
+    scope: &NameScope<'_>,
+    name: &'n str,
+    unprefixed: Unprefixed,
+) -> Option<(String, &'n str)> {
+    let (prefix, local) = crate::names::split_qname(crate::whitespace::trim(name));
+    if !prefix.is_empty() {
+        return scope
+            .resolve_prefix(prefix)
+            .map(|uri| (uri.to_string(), local));
+    }
+    let uri = match unprefixed {
+        Unprefixed::NoNamespace => String::new(),
+        Unprefixed::DefaultElementNamespace => {
+            scope.resolve_prefix("").unwrap_or_default().to_string()
+        }
+        Unprefixed::FunctionNamespace => crate::names::FN_NS.to_string(),
+        Unprefixed::TypeNamespace => scope.xpath_default_namespace.to_string(),
+    };
+    Some((uri, local))
 }
 
 // ── The three functions that are answerable without a running transformation
@@ -583,11 +807,67 @@ pub fn element_available(uri: &str, local: &str) -> bool {
         )
 }
 
-/// §18.1.2: whether a function of this name is available at any arity M1
-/// knows about.
+/// §18.1.2: whether a function of this name is available at any arity.
 pub fn function_available(functions: &XsltFunctions, uri: &str, local: &str) -> bool {
-    (0..=4).any(|arity| functions.is_available(uri, local, arity))
+    (0..=MAX_ARITY).any(|arity| functions.is_available(uri, local, arity))
 }
+
+/// §18.1.4: whether a schema type of this name is in the static context.
+///
+/// > A schema type (that is, a simple type or a complex type) is said to be
+/// > available within an XPath expression if it is a type definition that is
+/// > present in the in-scope schema types for that expression … The function
+/// > returns true if and only if there is an available type whose name matches
+/// > the value of the `$type-name` argument.
+///
+/// For a **basic** XSLT processor those are exactly the types §3.13 lists, and
+/// §21.1 repeats the list: "The static context, which defines the full set of
+/// type names recognized by an XSLT processor and also by the XPath processor,
+/// includes these atomic types, plus `xs:anyType`, `xs:anySimpleType`,
+/// `xs:untyped`, and `xs:anyAtomicType`." Nothing else is available, because
+/// XTSE1650 forbids `xsl:import-schema`.
+pub fn type_available(uri: &str, local: &str) -> bool {
+    uri == crate::names::XSD_NS && BUILT_IN_TYPES.contains(&local)
+}
+
+/// §3.13 Built-in Types: every named type definition an XSLT 2.0 processor has
+/// in its in-scope schema components without a schema.
+///
+/// "All the primitive atomic types defined in \[XML Schema Part 2\], with the
+/// exception of `xs:NOTATION`", the derived `xs:integer`, `xs:anyType` and
+/// `xs:anySimpleType`, and the five types \[XPath 2.0\] adds.
+const BUILT_IN_TYPES: &[&str] = &[
+    // The 18 primitive atomic types, less xs:NOTATION.
+    "string",
+    "boolean",
+    "decimal",
+    "double",
+    "float",
+    "date",
+    "time",
+    "dateTime",
+    "duration",
+    "QName",
+    "anyURI",
+    "gDay",
+    "gMonthDay",
+    "gMonth",
+    "gYearMonth",
+    "gYear",
+    "base64Binary",
+    "hexBinary",
+    // The one derived atomic type.
+    "integer",
+    // The two structural types.
+    "anyType",
+    "anySimpleType",
+    // The five from XPath 2.0.
+    "yearMonthDuration",
+    "dayTimeDuration",
+    "anyAtomicType",
+    "untyped",
+    "untypedAtomic",
+];
 
 #[cfg(test)]
 mod tests {

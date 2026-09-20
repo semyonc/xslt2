@@ -492,10 +492,15 @@ fn a_missing_version_attribute_is_xtse0010() {
 }
 
 #[test]
-fn a_document_element_that_is_not_a_stylesheet_is_xtse0010() {
+fn a_document_element_that_is_not_a_stylesheet_is_xtse0150() {
+    // §3.7: a document element that is not xsl:stylesheet/xsl:transform is read
+    // as the literal result element of a simplified stylesheet module, and
+    // "[ERR XTSE0150] A literal result element that is used as the outermost
+    // element of a simplified stylesheet module must have an xsl:version
+    // attribute." M1 reported the generic XTSE0010 here (M2c, D-E6).
     assert_eq!(
         transform("<not-a-stylesheet/>", "<doc/>").unwrap_err().code,
-        "XTSE0010"
+        "XTSE0150"
     );
 }
 

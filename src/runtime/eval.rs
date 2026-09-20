@@ -158,10 +158,21 @@ impl<'a, 't> Transformation<'a, 't> {
                 // §10.1.1 / §9.10 row 9: a parameter the callee does not
                 // declare is a static error, unless backwards-compatible
                 // behaviour is enabled for the xsl:call-template instruction.
+                // The compiler makes the same test over the whole stylesheet
+                // (`compile::checks::check_call_template_params`), so this is a
+                // belt-and-braces check on the path an embedder could otherwise
+                // reach with a hand-built call; a **tunnel** `xsl:param` of the
+                // callee does not satisfy a non-tunnel `xsl:with-param` (§10.1.2
+                // keeps the two sets of parameters apart).
                 if !self.sheet.is_backwards(instruction.ctx) {
                     let rule = self.sheet.template(id);
                     for param in params {
-                        if !param.tunnel && !rule.params.iter().any(|p| p.name == param.name) {
+                        if !param.tunnel
+                            && !rule
+                                .params
+                                .iter()
+                                .any(|p| !p.tunnel && p.name == param.name)
+                        {
                             return Err(XsltError::new(
                                 codes::XTSE0680,
                                 format!(
@@ -579,14 +590,43 @@ fn lexical_qname(name: &str) -> Option<(&str, &str)> {
 /// string value) are the same sentence, so the check is shared and the caller
 /// passes its code.
 ///
-/// The XMLNS namespace is named outright, which is what every case in this
-/// milestone's clusters needs. The `xs:anyURI` half is deliberately minimal:
-/// `xs:anyURI`'s lexical space is famously wider than the set of
-/// RFC-conformant URIs — the corpus is full of URIs that no RFC would accept,
-/// `namespace-3005` builds one containing a `"` and expects it to work — so
-/// only two things are rejected, a control character and a second `#` (a URI
-/// reference has exactly one fragment separator at most, which is what
-/// `error-0905a`'s `####` trips over). Anything stricter costs passing cases.
+/// The XMLNS namespace is named outright. The `xs:anyURI` half is two rules, and
+/// nothing more, because nothing more is derivable:
+///
+/// 1. **Every character must match XML's `Char` production.** `datatypes.html`
+///    §3.3.17.2: "The ·lexical space· of `anyURI` is the set of finite-length
+///    sequences of zero or more characters (as defined in \[XML\]) that ·match·
+///    the `Char` production from \[XML\]." That is the *whole* constraint the
+///    datatype imposes; the same section says so outright: "Because it is
+///    impractical for processors to check that a value is a context-appropriate
+///    URI reference, neither the syntactic constraints defined by the definitions
+///    of individual schemes nor the generic syntactic constraints defined by
+///    \[RFC 3987\] and \[RFC 3986\] and their successors are part of this
+///    datatype as defined here."
+///
+///    So tab, newline, carriage return and U+0085 — all of them XML `Char`s —
+///    are **in** the lexical space, as are `"` (`namespace-3005` builds such a
+///    URI and expects it to work) and every other printable character. Only the
+///    C0 controls XML itself forbids, the surrogates and the two non-characters
+///    `#xFFFE`/`#xFFFF` are out; a `char::is_control` test rejected far more
+///    than that.
+///
+/// 2. **At most one `#`.** This is *not* derivable from the local
+///    `datatypes.html`, which is XSD 1.1. It comes from XSD **1.0** Part 2
+///    §3.2.17, where `anyURI`'s lexical space is a URI reference "as defined in
+///    \[RFC 2396\], as amended by \[RFC 2732\]" — a grammar with at most one
+///    fragment separator. (That wording is from memory: no XSD 1.0 datatypes
+///    document is available locally.) The suite selects that reading explicitly:
+///    `error-0905a` feeds `####` to `xsl:namespace` and requires XTDE0905, under
+///    the dependency `<feature value="XSD_1.1" satisfied="false"/>`, while its
+///    twin `error-0905b` runs the same stylesheet for an XSD 1.1 processor and
+///    requires **no** error, citing W3C bug 30180. This processor reports itself
+///    as not XSD-1.1-schema-aware, so it is `error-0905a` that applies to it.
+///
+/// Nothing else. `error-0835a` (`##not-a-uri`) and `error-0865a`
+/// (`http://####/`) were relaxed in 2019 — "Processors have dispensation to
+/// treat all strings as valid namespaces" — and now accept either the error or
+/// success, so they constrain nothing either way.
 fn check_namespace_uri(uri: &str, code: &str) -> Result<(), XsltError> {
     /// The namespace `xmlns` declarations themselves nominally live in; no
     /// node may be in it (§5.7.3's XDM constraints, erratum E6).
@@ -597,13 +637,22 @@ fn check_namespace_uri(uri: &str, code: &str) -> Result<(), XsltError> {
             format!("{XMLNS_NS} cannot be used as a namespace URI"),
         ));
     }
-    if uri.chars().any(char::is_control) || uri.matches('#').count() > 1 {
+    if !uri.chars().all(is_xml_char) || uri.matches('#').count() > 1 {
         return Err(XsltError::new(
             code,
             format!("{uri:?} is not in the lexical space of xs:anyURI"),
         ));
     }
     Ok(())
+}
+
+/// XML 1.0 `Char`: `#x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] |
+/// [#x10000-#x10FFFF]`.
+///
+/// Rust's `char` cannot hold a surrogate, so the two printable ranges reduce to
+/// "at least `#x20`, and not `#xFFFE`/`#xFFFF`".
+fn is_xml_char(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\r') || (c >= '\u{20}' && c != '\u{FFFE}' && c != '\u{FFFF}')
 }
 
 /// The two namespace settings of `xsl:copy` (§11.9.1): which of the source

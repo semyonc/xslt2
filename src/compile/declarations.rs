@@ -15,10 +15,7 @@ use crate::model::*;
 use crate::names::{parse_yes_no, split_qname, QName, XSLT_NS};
 use crate::output::parse_method;
 use crate::receiver::Nav;
-use crate::stylesheet::{
-    attr_local, attributes, is_stripped_stylesheet_text, DeclKind, Module, ModuleId,
-    StaticContextId,
-};
+use crate::stylesheet::{attr_local, attributes, DeclKind, Module, ModuleId, StaticContextId};
 use crate::whitespace;
 
 impl<'a, 'm, 't> Builder<'a, 'm, 't> {
@@ -138,6 +135,56 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 self.declaration(&nav, module_id, precedence, subtree_min)?;
             }
         }
+        self.check_attribute_set_references()?;
+        self.check_output_conflicts()?;
+        Ok(())
+    }
+
+    /// The static half of XTSE0710: every `use-attribute-sets` name must be the
+    /// name of an `xsl:attribute-set` declaration (§10.2).
+    ///
+    /// Run once the whole declaration walk is over, so that a reference in one
+    /// module to a set declared in another — and a reference from an attribute
+    /// set that is never used — is checked all the same.
+    pub(super) fn check_attribute_set_references(&self) -> Result<(), XsltError> {
+        for name in &self.attr_set_refs {
+            if !self.attribute_sets.contains_key(name) {
+                return Err(XsltError::new(
+                    codes::XTSE0710,
+                    format!("use-attribute-sets names {name}, which no xsl:attribute-set declares"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// > \[ERR XTSE1560\] It is a static error if two `xsl:output` declarations
+    /// > within an output definition specify explicit values for the same
+    /// > attribute (other than `cdata-section-elements` and
+    /// > `use-character-maps`), with the values of the attributes being not
+    /// > equal, unless there is another `xsl:output` declaration within the same
+    /// > output definition that has higher import precedence and that specifies
+    /// > an explicit value for the same attribute.
+    fn check_output_conflicts(&self) -> Result<(), XsltError> {
+        let named: Vec<(Option<&QName>, &crate::output::OutputDefinition)> =
+            std::iter::once((None, &self.output))
+                .chain(self.named_outputs.iter().map(|(n, d)| (Some(n), d)))
+                .collect();
+        for (name, definition) in named {
+            if let Some(attribute) = definition.conflicting_attribute() {
+                let which = match name {
+                    Some(name) => format!("the output definition named {name}"),
+                    None => "the unnamed output definition".to_string(),
+                };
+                return Err(XsltError::new(
+                    codes::XTSE1560,
+                    format!(
+                        "two xsl:output declarations of {which} give different values for \
+                         {attribute} at the same import precedence"
+                    ),
+                ));
+            }
+        }
         Ok(())
     }
     // ── Declarations (§7.3) ──────────────────────────────────────────────
@@ -204,6 +251,22 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 .map(|v| parse_yes_no(&v, "required"))
                 .transpose()?
                 .unwrap_or(false);
+            // §9.2: `tunnel` on a stylesheet parameter — "the value yes may be
+            // specified only for template parameters", so a top-level
+            // xsl:param may write only tunnel="no". §3.4 gives an attribute
+            // whose value is not one of the permitted values XTSE0020.
+            if let Some(tunnel) = attr_local(nav, "tunnel") {
+                if parse_yes_no(&tunnel, "tunnel")? {
+                    return Err(XsltError::new(
+                        codes::XTSE0020,
+                        format!(
+                            "the stylesheet parameter {name} cannot be a tunnel parameter; \
+                             tunnel=\"yes\" is allowed only on a template parameter"
+                        ),
+                    )
+                    .with_location(module.location(nav)));
+                }
+            }
             self.globals.push(GlobalVar {
                 name: name.clone(),
                 is_param,
@@ -281,25 +344,25 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             }
             match local.as_str() {
                 "name" => {}
-                "method" => target.method.set(parse_method(&value)?, precedence),
-                "version" => target.version.set(value, precedence),
-                "encoding" => target.encoding.set(value, precedence),
+                "method" => target.method.set_checked(parse_method(&value)?, precedence),
+                "version" => target.version.set_checked(value, precedence),
+                "encoding" => target.encoding.set_checked(value, precedence),
                 "indent" => target
                     .indent
-                    .set(parse_yes_no(&value, "indent")?, precedence),
+                    .set_checked(parse_yes_no(&value, "indent")?, precedence),
                 "omit-xml-declaration" => target
                     .omit_xml_declaration
-                    .set(parse_yes_no(&value, "omit-xml-declaration")?, precedence),
+                    .set_checked(parse_yes_no(&value, "omit-xml-declaration")?, precedence),
                 "standalone" => {
                     let value = match whitespace::trim(&value) {
                         "omit" => None,
                         other => Some(parse_yes_no(other, "standalone")?),
                     };
-                    target.standalone.set(value, precedence);
+                    target.standalone.set_checked(value, precedence);
                 }
-                "doctype-public" => target.doctype_public.set(value, precedence),
-                "doctype-system" => target.doctype_system.set(value, precedence),
-                "media-type" => target.media_type.set(value, precedence),
+                "doctype-public" => target.doctype_public.set_checked(value, precedence),
+                "doctype-system" => target.doctype_system.set_checked(value, precedence),
+                "media-type" => target.media_type.set_checked(value, precedence),
                 // Serialization parameters M1 does not act on but must accept.
                 "cdata-section-elements"
                 | "escape-uri-attributes"
@@ -597,6 +660,9 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         // alternative keeps the default priority `pattern::PathPattern`
         // computed from its own syntax, and conflict resolution treats the
         // alternatives as separate rules.
+        //
+        // The lexical form is checked by the element table (XTSE0530 for
+        // anything that is not an xs:decimal), so only the value is read here.
         let explicit_priority = match attr_local(nav, "priority") {
             Some(text) => Some(whitespace::trim(&text).parse::<f64>().map_err(|_| {
                 XsltError::new(
@@ -607,6 +673,16 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             })?),
             None => None,
         };
+        // §6.4: "An xsl:template element that has no match attribute must have
+        // no mode attribute and no priority attribute." `modes_of` enforces the
+        // `mode` half.
+        if match_text.is_none() && explicit_priority.is_some() {
+            return Err(XsltError::new(
+                codes::XTSE0500,
+                "xsl:template has a priority attribute but no match attribute",
+            )
+            .with_location(loc.clone()));
+        }
         let as_type = match attr_local(nav, "as") {
             Some(text) => Some(self.compile_type(&text, ctx)?),
             None => None,
@@ -677,16 +753,48 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             )
             .with_location(module.location(nav)));
         }
+        // > \[ERR XTSE0550\] It is a static error if the list is empty, if the
+        // > same token is included more than once in the list, if the list
+        // > contains an invalid token, or if the token `#all` appears together
+        // > with any other value.
+        //
+        // "the same token" is compared after expansion, like every other QName
+        // in the stylesheet (§5.1): `mode="p:m q:m"` with both prefixes bound to
+        // one namespace is a repeat, and `#default` repeats `#default`.
         let mut modes = Vec::new();
         let mut all = false;
+        let mut count = 0usize;
         for token in whitespace::tokens(&text) {
+            count += 1;
             match token {
                 "#all" => all = true,
                 "#default" => modes.push(ModeKey::Default),
                 name => modes.push(ModeKey::Named(self.resolve(name, ctx, codes::XTSE0550)?)),
             }
         }
-        if all && modes.len() > 1 {
+        if count == 0 {
+            return Err(XsltError::new(
+                codes::XTSE0550,
+                "the mode attribute of xsl:template must not be an empty list",
+            )
+            .with_location(module.location(nav)));
+        }
+        if let Some(repeat) = modes
+            .iter()
+            .enumerate()
+            .find(|(i, mode)| modes[..*i].contains(mode))
+            .map(|(_, mode)| mode.clone())
+        {
+            return Err(XsltError::new(
+                codes::XTSE0550,
+                match &repeat {
+                    ModeKey::Default => "the mode list repeats #default".to_string(),
+                    ModeKey::Named(name) => format!("the mode list repeats the mode {name}"),
+                },
+            )
+            .with_location(module.location(nav)));
+        }
+        if all && !modes.is_empty() {
             return Err(XsltError::new(
                 codes::XTSE0550,
                 "mode=\"#all\" cannot be combined with other mode names",
@@ -729,10 +837,15 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     }
                 }
                 // Whitespace before the first instruction is stripped;
-                // significant text opens the sequence constructor.
+                // significant text opens the sequence constructor. §4.2's last
+                // bullet removes whitespace before an `xsl:param` "regardless of
+                // any xml:space attributes", which is why the whole of §4.2 has
+                // to be consulted here and not only its `xml:space` clause —
+                // otherwise an `xml:space="preserve"` template's own parameters
+                // look like content that precedes them.
                 kind if kind.is_text_like()
                     && first_non_param.is_none()
-                    && !is_stripped_stylesheet_text(&child) =>
+                    && super::checks::is_significant_text(nav, &child) =>
                 {
                     first_non_param = Some(child.clone());
                 }
