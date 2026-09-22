@@ -403,3 +403,158 @@ fn a_type_test_that_needs_a_schema_is_still_not_implemented() {
         );
     }
 }
+
+// ═══ X1 item 1 — a NOTIMPL names the sub-milestone that owns the feature ═══
+
+/// Every `XSLT2-NOTIMPL` names the one ROADMAP §4 sub-milestone that owns the
+/// feature, and only that — `… is not implemented (M2d)`, never a coarse `M2`
+/// or `M3`, and never "in M1", which stopped being true when M2a landed. One
+/// row per producer: the instruction and declaration tables, the output layer,
+/// the function evaluator, the pattern parser and `[xsl:]default-collation`.
+#[test]
+fn every_notimpl_names_its_sub_milestone() {
+    let template =
+        |content: &str| format!(r#"<xsl:template match="/"><out>{content}</out></xsl:template>"#);
+    let cases: Vec<(String, &str, &str)> = vec![
+        // compile/instructions.rs: the instruction table.
+        (
+            template(r#"<xsl:for-each select="*"><xsl:sort/></xsl:for-each>"#),
+            "xsl:sort",
+            "M2d",
+        ),
+        (
+            template(r#"<xsl:perform-sort select="1"><xsl:sort/></xsl:perform-sort>"#),
+            "xsl:perform-sort",
+            "M2d",
+        ),
+        (
+            template(r#"<xsl:for-each-group select="*" group-by="."/>"#),
+            "xsl:for-each-group",
+            "M2g",
+        ),
+        (
+            template(r#"<xsl:analyze-string select="'a'" regex="a"/>"#),
+            "xsl:analyze-string",
+            "M2h",
+        ),
+        (template(r#"<xsl:number/>"#), "xsl:number", "M3c"),
+        (
+            template(r#"<xsl:result-document href="x.xml"/>"#),
+            "xsl:result-document",
+            "M3b",
+        ),
+        // compile/declarations.rs: the declaration table.
+        (
+            format!(r#"<xsl:key name="k" match="*" use="."/>{}"#, template("")),
+            "xsl:key",
+            "M2f",
+        ),
+        (
+            format!(
+                r#"<xsl:function name="my:f"><xsl:sequence select="1"/></xsl:function>{}"#,
+                template("")
+            ),
+            "xsl:function",
+            "M2e",
+        ),
+        (
+            format!(r#"<xsl:decimal-format name="d"/>{}"#, template("")),
+            "xsl:decimal-format",
+            "M3d",
+        ),
+        (
+            format!(r#"<xsl:character-map name="c"/>{}"#, template("")),
+            "xsl:character-map",
+            "M3a",
+        ),
+        // output.rs: methods, doctype, encodings.
+        (
+            format!(r#"<xsl:output method="html"/>{}"#, template("")),
+            "the html output method",
+            "M3a",
+        ),
+        (
+            format!(r#"<xsl:output doctype-system="x.dtd"/>{}"#, template("")),
+            "xsl:output/@doctype-*",
+            "M3a",
+        ),
+        (
+            format!(r#"<xsl:output encoding="EBCDIC-X"/>{}"#, template("")),
+            "the output encoding",
+            "M3a",
+        ),
+        // runtime/functions.rs: the §16 evaluator.
+        (
+            template(r#"<xsl:value-of select="key('k', 'v')"/>"#),
+            "key()",
+            "M2f",
+        ),
+        (
+            template(r#"<xsl:value-of select="current-group()"/>"#),
+            "current-group()",
+            "M2g",
+        ),
+        (
+            template(r#"<xsl:value-of select="current-grouping-key()"/>"#),
+            "current-grouping-key()",
+            "M2g",
+        ),
+        (
+            template(r#"<xsl:value-of select="regex-group(1)"/>"#),
+            "regex-group()",
+            "M2h",
+        ),
+        (
+            template(r#"<xsl:copy-of select="document('in.xml#frag')"/>"#),
+            "a fragment identifier in document()",
+            "M2i",
+        ),
+        // pattern.rs: the key()/id() pattern.
+        (
+            format!(
+                r#"<xsl:template match="key('k', 'v')">HIT</xsl:template>{}"#,
+                template("")
+            ),
+            "the id()/key() pattern",
+            "M2f",
+        ),
+        // stylesheet.rs: a standard collation other than codepoint (§9.5).
+        (
+            r#"<xsl:template match="/" default-collation="http://www.w3.org/2005/xpath-functions/collation/html-ascii-case-insensitive"><out/></xsl:template>"#
+                .to_string(),
+            "the collation",
+            "M2d",
+        ),
+    ];
+    for (body, feature, owner) in cases {
+        let error = transform(&body, "<r/>").expect_err(&format!("{feature}: unexpectedly ran"));
+        assert!(
+            error.is_not_implemented(),
+            "{feature}: expected XSLT2-NOTIMPL, got {error}"
+        );
+        assert!(
+            error.message.contains(feature),
+            "{feature}: the message does not name the feature: {error}"
+        );
+        assert!(
+            error
+                .message
+                .ends_with(&format!(" is not implemented ({owner})")),
+            "{feature}: expected the owner {owner} and nothing else, got {:?}",
+            error.message
+        );
+    }
+}
+
+/// §18.2.3's extension instruction with no `xsl:fallback` is M3e's.
+#[test]
+fn an_extension_instruction_without_fallback_names_m3e() {
+    let body = r#"<xsl:template match="/"><out><my:inst xsl:extension-element-prefixes="my"/></out></xsl:template>"#;
+    let error = transform(body, "<r/>").expect_err("the extension instruction ran");
+    assert!(error.is_not_implemented(), "{error}");
+    assert!(
+        error.message.ends_with(" is not implemented (M3e)"),
+        "{:?}",
+        error.message
+    );
+}

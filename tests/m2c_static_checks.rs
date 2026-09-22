@@ -1232,9 +1232,10 @@ fn an_xslt_specific_function_is_not_in_scope_in_use_when() {
         .expect_err("an XSLT-specific function does not bind in a use-when expression");
         assert_eq!(e.code, "XPST0017", "{absent}: {e}");
     }
-    // The four §3.12 names it *does* have, plus an F&O core function.
+    // The four §3.12 names it *does* have, plus an F&O core function. (`xs` is
+    // bound here: an unbound prefix is XTDE1428, which is X1 item 2's test.)
     accepted(&sheet(
-        r#"<xsl:template match="doc"
+        r#"<xsl:template match="doc" xmlns:xs="http://www.w3.org/2001/XMLSchema"
              use-when="system-property('xsl:vendor') != '' and element-available('xsl:if')
                        and function-available('system-property') and type-available('xs:integer')
                        and string-length(concat('a','b')) = 2"><out/></xsl:template>"#,
@@ -1391,7 +1392,7 @@ fn an_unimplemented_element_in_a_legal_position_is_never_a_static_error() {
 /// as a `use-when` guard that decides whether the template exists at all, and
 /// dynamically, as the test of an `xsl:if` inside it. `"yes"` is true, `""` is
 /// false (the built-in rules then produce the source's text, which is empty).
-fn available_probes(decls: &str, call: &str) -> (String, String) {
+fn available_sheets(decls: &str, call: &str) -> (String, String) {
     let statically = format!(
         "<xsl:stylesheet version=\"2.0\" xmlns:xsl=\"{NS}\" {decls}>\
            <xsl:template match=\"/\" use-when=\"{call}\"><xsl:text>yes</xsl:text></xsl:template>\
@@ -1404,6 +1405,11 @@ fn available_probes(decls: &str, call: &str) -> (String, String) {
            </xsl:template>\
          </xsl:stylesheet>"
     );
+    (statically, dynamically)
+}
+
+fn available_probes(decls: &str, call: &str) -> (String, String) {
+    let (statically, dynamically) = available_sheets(decls, call);
     (
         run(&statically).unwrap_or_else(|e| panic!("use-when {call:?} with {decls:?}: {e}")),
         run(&dynamically).unwrap_or_else(|e| panic!("run-time {call:?} with {decls:?}: {e}")),
@@ -1458,8 +1464,13 @@ fn type_available_in_use_when_honours_xpath_default_namespace() {
         "type-available('xsl:string')",
         "",
     );
-    // An unbound prefix answers false; it excludes nothing else.
-    both_paths_agree(&xpath_default, "type-available('nope:string')", "");
+    // An unbound prefix is XTDE1428 on both paths (X1 item 2, below); the
+    // default type namespace does not rescue it.
+    both_paths_raise(
+        &xpath_default,
+        "type-available('nope:string')",
+        codes::XTDE1428,
+    );
 }
 
 /// §5.1 lists `element-available` as one of only **three** places where "the
@@ -1552,4 +1563,128 @@ fn an_empty_argument_looks_up_no_document() {
     ))
     .expect_err("the zero-length URI is still a URI");
     assert_eq!(e.code, "FODC0002", "{e}");
+}
+
+// ═══ X1 item 2 — an argument that cannot be expanded is an error ══════════
+//
+// Each of the four name-answering functions makes the same demand of its
+// argument and gives it its own code:
+//
+// > \[§16.6.5\] \[ERR XTDE1390\] It is a non-recoverable dynamic error if the value
+// > is not a valid QName, or if there is no namespace declaration in scope for
+// > the prefix of the QName.
+// >
+// > \[§18.1.1\] \[ERR XTDE1400\] It is a non-recoverable dynamic error if the
+// > argument does not evaluate to a string that is a valid QName, or if there is
+// > no namespace declaration in scope for the prefix of the QName.
+// >
+// > \[§18.1.4\] \[ERR XTDE1428\] (the same sentence, for `type-available`)
+// >
+// > \[§18.2.2\] \[ERR XTDE1440\] (the same sentence, for `element-available`)
+//
+// Each code covers **both** failures — not a lexical QName, and an unbound
+// prefix. §3.12 does not exempt a `use-when` expression: it excludes an element
+// with "no static or dynamic errors … other than errors in the use-when
+// attribute itself", and gives no code of its own for such an error, so the
+// function's own code is reported, at compile time (each definition also lets
+// the processor "optionally signal this as a static error" when it can detect
+// it statically). The three `*-available` functions used to answer `false` for
+// both failures on both paths, and `system-property` did so in `use-when`.
+
+/// Both paths fail with `code`: the `use-when` guard when the stylesheet is
+/// compiled, the `xsl:if` when it runs.
+#[track_caller]
+fn both_paths_raise(decls: &str, call: &str, code: &str) {
+    let (statically, dynamically) = available_sheets(decls, call);
+    match compile(&statically) {
+        Ok(()) => panic!("use-when {call:?} with {decls:?}: expected {code}, but it compiled"),
+        Err(e) => assert_eq!(e.code, code, "use-when {call:?} with {decls:?}: {e}"),
+    }
+    compile(&dynamically)
+        .unwrap_or_else(|e| panic!("run-time {call:?} with {decls:?} must compile: {e}"));
+    match run(&dynamically) {
+        Ok(out) => panic!("run-time {call:?} with {decls:?}: expected {code}, got {out:?}"),
+        Err(e) => assert_eq!(e.code, code, "run-time {call:?} with {decls:?}: {e}"),
+    }
+}
+
+/// The four functions and their codes.
+const NAME_FUNCTIONS: [(&str, &str); 4] = [
+    ("system-property", codes::XTDE1390),
+    ("function-available", codes::XTDE1400),
+    ("type-available", codes::XTDE1428),
+    ("element-available", codes::XTDE1440),
+];
+
+#[test]
+fn an_unbound_prefix_is_an_error_on_both_paths() {
+    for (function, code) in NAME_FUNCTIONS {
+        both_paths_raise("", &format!("{function}('nope:x')"), code);
+        // A prefix bound on *another* element is still unbound here (§5.4.1:
+        // the in-scope namespaces are those "for the containing element").
+        both_paths_raise("", &format!("{function}(concat('no', 'pe', ':x'))"), code);
+    }
+}
+
+#[test]
+fn an_argument_that_is_not_a_lexical_qname_is_an_error_on_both_paths() {
+    // `1234` and `c#` are the suite's own examples (`error-1400a`,
+    // `error-1440a`); `:x` is an empty prefix (`error-1390c` builds it with
+    // `concat('', ':prop')`); the rest break `NCName (":" NCName)?` in the
+    // remaining ways.
+    for argument in ["1234", "c#", ":x", "x:", "a:b:c", "", "xsl:1x", "a b"] {
+        for (function, code) in NAME_FUNCTIONS {
+            both_paths_raise("", &format!("{function}('{argument}')"), code);
+        }
+    }
+}
+
+/// The negative controls: every name that *can* be expanded still answers, on
+/// both paths, and XML whitespace around it is still tolerated as before.
+#[test]
+fn an_expandable_name_still_answers() {
+    both_paths_agree("", "system-property('xsl:version') = '2.0'", "yes");
+    both_paths_agree("", "system-property('nope') = ''", "yes");
+    both_paths_agree("xmlns:p=\"urn:p\"", "system-property('p:x') = ''", "yes");
+    both_paths_agree("", "function-available('concat')", "yes");
+    both_paths_agree("xmlns:p=\"urn:p\"", "function-available('p:f')", "");
+    both_paths_agree(
+        "xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"",
+        "type-available('xs:string')",
+        "yes",
+    );
+    both_paths_agree("xmlns:p=\"urn:p\"", "type-available('p:t')", "");
+    both_paths_agree("", "element-available('xsl:if')", "yes");
+    both_paths_agree("xmlns:p=\"urn:p\"", "element-available('p:e')", "");
+    both_paths_agree("", "element-available(' xsl:if ')", "yes");
+}
+
+/// §3.12: an element that is excluded takes its descendants with it, and "no
+/// static or dynamic errors will be reported in respect of the element and its
+/// contents, other than errors in the use-when attribute itself" — so a bad
+/// argument in an excluded element's own descendants is never evaluated. And at
+/// run time a dynamic error is "signaled only if the XPath expression is
+/// actually evaluated" (§2.9).
+#[test]
+fn a_bad_argument_that_is_never_evaluated_is_not_an_error() {
+    assert_eq!(
+        run(&sheet(
+            r#"<xsl:template match="/"><out>
+                 <in xsl:use-when="false()">
+                   <deeper xsl:use-when="function-available('nope:x')"/>
+                 </in>
+               </out></xsl:template>"#
+        ))
+        .unwrap(),
+        "<out/>"
+    );
+    assert_eq!(
+        run(&sheet(
+            r#"<xsl:template match="/"><out>
+                 <xsl:if test="false()"><xsl:value-of select="type-available('1234')"/></xsl:if>
+               </out></xsl:template>"#
+        ))
+        .unwrap(),
+        "<out/>"
+    );
 }

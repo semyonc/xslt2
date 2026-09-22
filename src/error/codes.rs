@@ -1,7 +1,12 @@
 //! XSLT 2.0 error codes (Appendix E of the specification, `xslt20.html`).
 //!
 //! Generated from the spec text; one constant per code, with the spec's own wording as
-//! documentation. `ErrorCode::describe` looks a code up at run time.
+//! documentation. [`describe`] looks a code up at run time.
+//!
+//! The generator is not in the repository. The rustdoc escapes in the doc comments
+//! (`\[xsl:…\]` for the spec's optional-prefix attribute names, `<…>` around a URL, a
+//! code span around a URL the one-line summary cuts off) were added by hand; the
+//! wording is the spec's.
 
 /// (code, first sentence(s) of the spec description).
 pub static CODES: &[(&str, &str)] = &[
@@ -206,7 +211,7 @@ pub const XTDE0700: &str = "XTDE0700";
 pub const XTDE0820: &str = "XTDE0820";
 /// In the case of an xsl:element instruction with no namespace attribute, it is a non-recoverable dynamic error if the effective value of the name attribute is a QName whose prefix is not declared in an in-scope namespace d…
 pub const XTDE0830: &str = "XTDE0830";
-/// It is a non-recoverable dynamic error if the effective value of the namespace attribute [of the xsl:element instruction] is not in the lexical space of the xs:anyURI data type or if it is the string http://www.w3.org/200…
+/// It is a non-recoverable dynamic error if the effective value of the namespace attribute [of the xsl:element instruction] is not in the lexical space of the xs:anyURI data type or if it is the string `http://www.w3.org/200…`
 pub const XTDE0835: &str = "XTDE0835";
 /// It is a non-recoverable dynamic error if the effective value of the name attribute [of an xsl:attribute instruction] is not a lexical QName .
 pub const XTDE0850: &str = "XTDE0850";
@@ -214,15 +219,15 @@ pub const XTDE0850: &str = "XTDE0850";
 pub const XTDE0855: &str = "XTDE0855";
 /// In the case of an xsl:attribute instruction with no namespace attribute, it is a non-recoverable dynamic error if the effective value of the name attribute is a lexical QName whose prefix is not declared in an in-scope n…
 pub const XTDE0860: &str = "XTDE0860";
-/// It is a non-recoverable dynamic error if the effective value of the namespace attribute [of the xsl:attribute instruction] is not in the lexical space of the xs:anyURI data type or if it is the string http://www.w3.org/2…
+/// It is a non-recoverable dynamic error if the effective value of the namespace attribute [of the xsl:attribute instruction] is not in the lexical space of the xs:anyURI data type or if it is the string `http://www.w3.org/2…`
 pub const XTDE0865: &str = "XTDE0865";
 /// It is a non-recoverable dynamic error if the effective value of the name attribute [of the xsl:processing-instruction instruction] is not both an NCName Names and a PITarget XML .
 pub const XTDE0890: &str = "XTDE0890";
-/// It is a non-recoverable dynamic error if the string value of the new namespace node is not valid in the lexical space of the data type xs:anyURI , or if it is the string http://www.w3.org/2000/xmlns/ .
+/// It is a non-recoverable dynamic error if the string value of the new namespace node is not valid in the lexical space of the data type xs:anyURI , or if it is the string <http://www.w3.org/2000/xmlns/> .
 pub const XTDE0905: &str = "XTDE0905";
 /// It is a non-recoverable dynamic error if the effective value of the name attribute [of the xsl:namespace instruction] is neither a zero-length string nor an NCName Names , or if it is xmlns .
 pub const XTDE0920: &str = "XTDE0920";
-/// It is a non-recoverable dynamic error if the xsl:namespace instruction generates a namespace node whose name is xml and whose string value is not http://www.w3.org/XML/1998/namespace , or a namespace node whose string va…
+/// It is a non-recoverable dynamic error if the xsl:namespace instruction generates a namespace node whose name is xml and whose string value is not <http://www.w3.org/XML/1998/namespace> , or a namespace node whose string va…
 pub const XTDE0925: &str = "XTDE0925";
 /// It is a non-recoverable dynamic error if evaluating the select attribute or the contained sequence constructor of an xsl:namespace instruction results in a zero-length string.
 pub const XTDE0930: &str = "XTDE0930";
@@ -316,7 +321,7 @@ pub const XTSE0090: &str = "XTSE0090";
 pub const XTSE0110: &str = "XTSE0110";
 /// An xsl:stylesheet element must not have any text node children.
 pub const XTSE0120: &str = "XTSE0120";
-/// It is a static error if the value of an [xsl:]default-collation attribute, after resolving against the base URI, contains no URI that the implementation recognizes as a collation URI.
+/// It is a static error if the value of an \[xsl:\]default-collation attribute, after resolving against the base URI, contains no URI that the implementation recognizes as a collation URI.
 pub const XTSE0125: &str = "XTSE0125";
 /// It is a static error if the xsl:stylesheet element has a child element whose name has a null namespace URI.
 pub const XTSE0130: &str = "XTSE0130";
@@ -384,9 +389,9 @@ pub const XTSE0760: &str = "XTSE0760";
 pub const XTSE0770: &str = "XTSE0770";
 /// It is a static error if an attribute on a literal result element is in the XSLT namespace , unless it is one of the attributes explicitly defined in this specification.
 pub const XTSE0805: &str = "XTSE0805";
-/// It is a static error if a namespace prefix is used within the [xsl:]exclude-result-prefixes attribute and there is no namespace binding in scope for that prefix.
+/// It is a static error if a namespace prefix is used within the \[xsl:\]exclude-result-prefixes attribute and there is no namespace binding in scope for that prefix.
 pub const XTSE0808: &str = "XTSE0808";
-/// It is a static error if the value #default is used within the [xsl:]exclude-result-prefixes attribute and the parent element of the [xsl:]exclude-result-prefixes attribute has no default namespace.
+/// It is a static error if the value #default is used within the \[xsl:\]exclude-result-prefixes attribute and the parent element of the \[xsl:\]exclude-result-prefixes attribute has no default namespace.
 pub const XTSE0809: &str = "XTSE0809";
 /// It is a static error if there is more than one such declaration [more than one xsl:namespace-alias declaration] with the same literal namespace URI and the same import precedence and different values for the target names…
 pub const XTSE0810: &str = "XTSE0810";
@@ -432,9 +437,9 @@ pub const XTSE1290: &str = "XTSE1290";
 pub const XTSE1295: &str = "XTSE1295";
 /// It is a static error if, for any named or unnamed decimal format, the variables representing characters used in a picture string do not each have distinct values
 pub const XTSE1300: &str = "XTSE1300";
-/// It is a static error if there is no namespace bound to the prefix on the element bearing the [xsl:]extension-element-prefixes attribute or, when #default is specified, if there is no default namespace.
+/// It is a static error if there is no namespace bound to the prefix on the element bearing the \[xsl:\]extension-element-prefixes attribute or, when #default is specified, if there is no default namespace.
 pub const XTSE1430: &str = "XTSE1430";
-/// It is a static error if both the [xsl:]type and [xsl:]validation attributes are present on the xsl:element , xsl:attribute , xsl:copy , xsl:copy-of , xsl:document , or xsl:result-document instructions, or on a literal re…
+/// It is a static error if both the \[xsl:\]type and \[xsl:\]validation attributes are present on the xsl:element , xsl:attribute , xsl:copy , xsl:copy-of , xsl:document , or xsl:result-document instructions, or on a literal re…
 pub const XTSE1505: &str = "XTSE1505";
 /// It is a static error if the value of the type attribute of an xsl:element , xsl:attribute , xsl:copy , xsl:copy-of , xsl:document , or xsl:result-document instruction, or the xsl:type attribute of a literal result elemen…
 pub const XTSE1520: &str = "XTSE1520";
@@ -452,7 +457,7 @@ pub const XTSE1590: &str = "XTSE1590";
 pub const XTSE1600: &str = "XTSE1600";
 /// A basic XSLT processor must signal a static error if the stylesheet includes an xsl:import-schema declaration.
 pub const XTSE1650: &str = "XTSE1650";
-/// A basic XSLT processor must signal a static error if the stylesheet includes an [xsl:]type attribute, or an [xsl:]validation or default-validation attribute with a value other than strip
+/// A basic XSLT processor must signal a static error if the stylesheet includes an \[xsl:\]type attribute, or an \[xsl:\]validation or default-validation attribute with a value other than strip
 pub const XTSE1660: &str = "XTSE1660";
 /// It is a type error if the result of evaluating the sequence constructor cannot be converted to the required type.
 pub const XTTE0505: &str = "XTTE0505";
@@ -488,7 +493,7 @@ pub const XTTE1510: &str = "XTTE1510";
 pub const XTTE1512: &str = "XTTE1512";
 /// If the validation attribute of an xsl:element , xsl:attribute , xsl:copy , xsl:copy-of , or xsl:result-document instruction, or the xsl:validation attribute of a literal result element, has the effective value lax , and …
 pub const XTTE1515: &str = "XTTE1515";
-/// It is a type error if an [xsl:]type attribute is defined for a constructed element or attribute, and the outcome of schema validity assessment against that type is that the validity property of that element or attribute …
+/// It is a type error if an \[xsl:\]type attribute is defined for a constructed element or attribute, and the outcome of schema validity assessment against that type is that the validity property of that element or attribute …
 pub const XTTE1540: &str = "XTTE1540";
 /// A type error occurs if a type or validation attribute is defined (explicitly or implicitly) for an instruction that constructs a new attribute node, if the effect of this is to cause the attribute value to be validated a…
 pub const XTTE1545: &str = "XTTE1545";

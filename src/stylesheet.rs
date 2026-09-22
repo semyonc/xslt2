@@ -252,8 +252,8 @@ impl<'t> Module<'t> {
     /// §3.12 puts `use-when` on elements only.
     ///
     /// The one traversal that cannot use this is the §3.12 pass that *computes*
-    /// the exclusion set ([`use_when_exclusions`]) together with the §3.11
-    /// fragment lookup that runs beside it in [`Loader::parse`]: both run before
+    /// the exclusion set (`use_when_exclusions`) together with the §3.11
+    /// fragment lookup that runs beside it in `Loader::parse`: both run before
     /// the set exists. They are in this module, next to the set itself.
     pub fn children(&self, nav: &Nav<'t>) -> Children<'_, 't> {
         let mut first = nav.clone();
@@ -881,12 +881,21 @@ fn evaluate_use_when(
         sc.namespaces.clone(),
         sc.xpath_default_namespace.clone(),
     );
-    let value = expr
+    let outcome = expr
         .evaluator(&ctx)
         .run_with_node_and_setup::<Nav<'_>, _>(None, |ev| {
             ev.context().set_function_evaluator(Some(&evaluator));
-        })
-        .map_err(fail)?;
+        });
+    // An error one of the name-answering functions raised keeps its own code
+    // (XTDE1390, XTDE1400, XTDE1428, XTDE1440): §3.12 excludes an element with
+    // "no static or dynamic errors … other than errors in the use-when attribute
+    // itself", and names no code of its own for those, so the error is reported
+    // as it is, while the stylesheet is compiled.
+    let parked = evaluator.take_error();
+    let value = outcome.map_err(|e| match parked {
+        Some(error) => error.or_location(&module.location(nav)),
+        None => fail(e),
+    })?;
     effective_boolean_value(&value).map_err(fail)
 }
 
@@ -1164,12 +1173,13 @@ pub fn static_context_of(nav: &Nav<'_>, module: &Module<'_>) -> Result<StaticCon
             {
                 Some(uri) => uri.clone(),
                 // A standard collation this processor has not built is a
-                // missing feature, not a broken stylesheet (§9.5, M2e).
+                // missing feature, not a broken stylesheet (§9.5; the
+                // collation registry is M2d's).
                 None => match candidates.iter().find(|uri| is_standard_collation(uri)) {
                     Some(uri) => {
                         return Err(XsltError::not_implemented(
                             format!("the collation {uri}"),
-                            "M2e",
+                            "M2d",
                         ))
                     }
                     None => {

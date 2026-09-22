@@ -14,11 +14,10 @@ use xsd_schema::xpath::{DynamicContext, XPathError, XmlItem};
 use super::context::XsltContext;
 use super::Transformation;
 use crate::error::{codes, XsltError};
-use crate::functions::{expand_available_name, NameScope, Unprefixed, XsltFn};
-use crate::names::{is_ncname, split_qname, XSLT_NS};
+use crate::functions::{expand_name_argument, NameScope, XsltFn};
+use crate::names::XSLT_NS;
 use crate::receiver::Nav;
 use crate::resolver;
-use crate::whitespace;
 
 /// Runs the XSLT function library over the running transformation.
 pub struct XsltEvaluator<'r, 'a, 't> {
@@ -135,7 +134,7 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                     if uri.contains('#') {
                         return Err(XsltError::not_implemented(
                             "a fragment identifier in document()",
-                            "M2",
+                            "M2i",
                         ));
                     }
                     let base = explicit_base
@@ -194,15 +193,15 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
             }
             XsltFn::ElementAvailable => {
                 let name = single_string(args.first()).unwrap_or_default();
-                Ok(XPathValue::boolean(self.element_available(&name)))
+                Ok(XPathValue::boolean(self.element_available(&name)?))
             }
             XsltFn::FunctionAvailable => {
                 let name = single_string(args.first()).unwrap_or_default();
-                Ok(XPathValue::boolean(self.function_available(&name)))
+                Ok(XPathValue::boolean(self.function_available(&name)?))
             }
             XsltFn::TypeAvailable => {
                 let name = single_string(args.first()).unwrap_or_default();
-                Ok(XPathValue::boolean(self.type_available(&name)))
+                Ok(XPathValue::boolean(self.type_available(&name)?))
             }
             // §16.2: "If the URI is a relative URI, then it is resolved
             // relative to the base URI from the static context."
@@ -232,11 +231,12 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                 self.require_document_context(ctx, codes::XTDE1380)?;
                 Ok(XPathValue::string(String::new()))
             }
-            XsltFn::Key => Err(XsltError::not_implemented("key()", "M2")),
-            XsltFn::CurrentGroup | XsltFn::CurrentGroupingKey => {
-                Err(XsltError::not_implemented(which.name(), "M2"))
-            }
-            XsltFn::RegexGroup => Err(XsltError::not_implemented("regex-group()", "M2")),
+            XsltFn::Key => Err(XsltError::not_implemented("key()", "M2f")),
+            XsltFn::CurrentGroup | XsltFn::CurrentGroupingKey => Err(XsltError::not_implemented(
+                format!("{}()", which.name()),
+                "M2g",
+            )),
+            XsltFn::RegexGroup => Err(XsltError::not_implemented("regex-group()", "M2h")),
             // §16.4, §16.5. These are in the catalog as stubs only, so that a
             // call to one is reported as a missing feature rather than as an
             // unknown function (XPST0017) at compile time.
@@ -291,11 +291,12 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
     /// §5.4.1: the in-scope namespaces of a static context are "the namespaces
     /// in scope for the containing element in the stylesheet", and nothing else.
     /// A prefix bound somewhere else in the stylesheet is not bound here, and
-    /// each caller turns that into XTDE1390/XTDE1400/XTDE1428/XTDE1440 as its
-    /// own definition requires.
+    /// [`expand_name_argument`] turns that — or an argument that is not a
+    /// lexical QName — into XTDE1390/XTDE1400/XTDE1428/XTDE1440 as the called
+    /// function's own definition requires.
     ///
     /// The **same** type the `use-when` evaluator builds, and the expansion goes
-    /// through the **same** [`expand_available_name`], so a name cannot answer
+    /// through the **same** [`expand_name_argument`], so a name cannot answer
     /// one way in `use-when` and another way here.
     fn name_scope(&self) -> NameScope<'_> {
         NameScope {
@@ -308,20 +309,7 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
     /// case: "The default namespace of the defining element … is not used for
     /// unprefixed names."
     fn system_property_of(&self, name: &str) -> Result<String, XsltError> {
-        let (prefix, local) = split_qname(whitespace::trim(name));
-        if !is_ncname(local) || (!prefix.is_empty() && !is_ncname(prefix)) {
-            return Err(XsltError::new(
-                codes::XTDE1390,
-                format!("{name:?} is not a QName"),
-            ));
-        }
-        let (uri, local) = expand_available_name(&self.name_scope(), name, Unprefixed::NoNamespace)
-            .ok_or_else(|| {
-                XsltError::new(
-                    codes::XTDE1390,
-                    format!("the prefix {prefix:?} of {name:?} is not bound"),
-                )
-            })?;
+        let (uri, local) = expand_name_argument(&self.name_scope(), XsltFn::SystemProperty, name)?;
         if uri != XSLT_NS {
             return Ok(String::new());
         }
@@ -333,26 +321,22 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
     /// expanding an unprefixed QName", and §18.2.2 says the same: "If there is
     /// a default namespace in scope, then it is used to expand an unprefixed
     /// QName." That is the `xmlns=` default, not `xpath-default-namespace`.
-    fn element_available(&self, name: &str) -> bool {
-        match expand_available_name(
-            &self.name_scope(),
-            name,
-            Unprefixed::DefaultElementNamespace,
-        ) {
-            Some((uri, local)) => crate::functions::element_available(&uri, local),
-            None => false,
-        }
+    fn element_available(&self, name: &str) -> Result<bool, XsltError> {
+        let (uri, local) =
+            expand_name_argument(&self.name_scope(), XsltFn::ElementAvailable, name)?;
+        Ok(crate::functions::element_available(&uri, local))
     }
 
     /// §18.1.1 function-available: an unprefixed name takes the standard
     /// function namespace.
-    fn function_available(&self, name: &str) -> bool {
-        match expand_available_name(&self.name_scope(), name, Unprefixed::FunctionNamespace) {
-            Some((uri, local)) => {
-                crate::functions::function_available(self.run.sheet.functions(), &uri, local)
-            }
-            None => false,
-        }
+    fn function_available(&self, name: &str) -> Result<bool, XsltError> {
+        let (uri, local) =
+            expand_name_argument(&self.name_scope(), XsltFn::FunctionAvailable, name)?;
+        Ok(crate::functions::function_available(
+            self.run.sheet.functions(),
+            &uri,
+            local,
+        ))
     }
 
     /// §18.1.4 type-available.
@@ -367,11 +351,9 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
     /// the one §5.2 gives unprefixed element and type names in expressions —
     /// which is normally absent, so an unprefixed name is then in no namespace
     /// and no built-in type matches it.
-    fn type_available(&self, name: &str) -> bool {
-        match expand_available_name(&self.name_scope(), name, Unprefixed::TypeNamespace) {
-            Some((uri, local)) => crate::functions::type_available(&uri, local),
-            None => false,
-        }
+    fn type_available(&self, name: &str) -> Result<bool, XsltError> {
+        let (uri, local) = expand_name_argument(&self.name_scope(), XsltFn::TypeAvailable, name)?;
+        Ok(crate::functions::type_available(&uri, local))
     }
 }
 /// An `xs:anyURI` atomic value.

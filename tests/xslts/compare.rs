@@ -1429,6 +1429,24 @@ pub mod self_test {
         ));
     }
 
+    /// The per-owner `notImplemented` table reads the owner off the engine's own
+    /// message, so the two formats must agree; a message without an owner is
+    /// not guessed at.
+    fn notimpl_messages_name_their_owner() {
+        use crate::report::notimpl_owner;
+        let engine = xslt2::XsltError::not_implemented("xsl:sort", "M2d");
+        assert_eq!(notimpl_owner(&engine.message), Some("M2d"));
+        let engine = xslt2::XsltError::not_implemented("the output method \"x (y)\"", "M3a");
+        assert_eq!(notimpl_owner(&engine.message), Some("M3a"));
+        assert_eq!(
+            notimpl_owner("xsl:sort is not implemented (M4)"),
+            Some("M4")
+        );
+        assert_eq!(notimpl_owner("engine not implemented"), None);
+        assert_eq!(notimpl_owner("xsl:sort is not implemented (soon)"), None);
+        assert_eq!(notimpl_owner("xsl:sort is not implemented ()"), None);
+    }
+
     /// Run every self-test; panics on the first failure. Returns the number of checks run.
     pub fn run() -> usize {
         assert_xpath_over_result();
@@ -1447,6 +1465,7 @@ pub mod self_test {
         unverifiable_assertions_are_harness_errors();
         error_codes_compare_by_local_part();
         raised_error_codes_compare_the_namespace_too();
-        16
+        notimpl_messages_name_their_owner();
+        17
     }
 }

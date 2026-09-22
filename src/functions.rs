@@ -480,7 +480,7 @@ impl XsltFunctions {
     /// Whether a name and arity in the standard function namespace resolves —
     /// what `function-available()` answers (§18.1.2).
     ///
-    /// A function registered by [`Self::add_stub`] is in the catalog but is not
+    /// A function registered by `add_stub` is in the catalog but is not
     /// *available*: it exists only so that a call to it is classified as a
     /// missing feature rather than as an unknown function.
     pub fn is_available(&self, namespace: &str, local: &str, arity: usize) -> bool {
@@ -537,6 +537,12 @@ pub struct StaticEvaluator<'f> {
     /// namespace". Without it an unprefixed **type** name in a `use-when`
     /// expression would expand differently here than it does at run time.
     xpath_default_namespace: String,
+    /// An error one of these functions raised, with its own code.
+    /// `XPathError` has no host-error variant, so the engine carries an
+    /// `XPathError::internal` with the same message and the caller collects
+    /// the real error here with [`Self::take_error`] — the run-time evaluator's
+    /// `parked_error`, for the `use-when` evaluator.
+    parked: std::cell::RefCell<Option<crate::error::XsltError>>,
 }
 
 impl<'f> StaticEvaluator<'f> {
@@ -549,7 +555,21 @@ impl<'f> StaticEvaluator<'f> {
             functions,
             namespaces,
             xpath_default_namespace,
+            parked: std::cell::RefCell::new(None),
         }
+    }
+
+    /// The error a function raised during the last evaluation, if any —
+    /// consulted when the evaluation failed, since the engine's own error only
+    /// carries its message.
+    pub fn take_error(&self) -> Option<crate::error::XsltError> {
+        self.parked.borrow_mut().take()
+    }
+
+    fn park(&self, e: crate::error::XsltError) -> XPathError {
+        let carried = XPathError::internal(e.to_string());
+        *self.parked.borrow_mut() = Some(e);
+        carried
     }
 
     /// The static context these four functions expand their argument against —
@@ -586,14 +606,13 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
             })
             .unwrap_or_default();
         let scope = self.scope();
-        // An unbound prefix leaves the name unexpandable; §3.12 gives no error of
-        // its own for that, so it answers negatively as it always has here.
-        let expand = |unprefixed| {
-            expand_available_name(&scope, &name, unprefixed).unwrap_or_else(|| (String::new(), ""))
-        };
+        // §3.12 does not exempt a `use-when` expression from these functions'
+        // errors: a name that cannot be expanded is XTDE1390 / XTDE1400 /
+        // XTDE1428 / XTDE1440 here exactly as at run time.
+        let expand = || expand_name_argument(&scope, which, &name).map_err(|e| self.park(e));
         match which {
             XsltFn::SystemProperty => {
-                let (uri, local) = expand(Unprefixed::NoNamespace);
+                let (uri, local) = expand()?;
                 Ok(XPathValue::string(if uri == crate::names::XSLT_NS {
                     system_property(local)
                 } else {
@@ -601,11 +620,11 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
                 }))
             }
             XsltFn::ElementAvailable => {
-                let (uri, local) = expand(Unprefixed::DefaultElementNamespace);
+                let (uri, local) = expand()?;
                 Ok(XPathValue::boolean(element_available(&uri, local)))
             }
             XsltFn::FunctionAvailable => {
-                let (uri, local) = expand(Unprefixed::FunctionNamespace);
+                let (uri, local) = expand()?;
                 // §3.12: the answer is about the functions that can be called
                 // *from here*, which is the use-when set, not the stylesheet's.
                 Ok(XPathValue::boolean((0..=MAX_ARITY).any(|arity| {
@@ -613,7 +632,7 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
                 })))
             }
             XsltFn::TypeAvailable => {
-                let (uri, local) = expand(Unprefixed::TypeNamespace);
+                let (uri, local) = expand()?;
                 Ok(XPathValue::boolean(type_available(&uri, local)))
             }
             // \[Functions and Operators\] §15.5.4 `fn:doc`: if the argument is
@@ -728,22 +747,33 @@ pub enum Unprefixed {
     TypeNamespace,
 }
 
+/// Why the argument of one of these functions cannot be expanded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameError {
+    /// The argument is not a lexical QName, `NCName (":" NCName)?`.
+    NotAQName,
+    /// The argument has a prefix with no namespace declaration in scope.
+    UnboundPrefix,
+}
+
 /// Expand the lexical QName `name` the way the function `unprefixed` belongs to
 /// expands it, and return `(namespace URI, local name)`.
 ///
-/// `None` means the name carries a prefix that is not bound in scope; each
-/// caller turns that into the error or the `false` its own section prescribes
-/// (XTDE1390, XTDE1400, XTDE1428, XTDE1440).
+/// XML whitespace around the name is ignored. The error says which of the two
+/// failures §16.6.5 and §18 name it was; [`expand_name_argument`] turns it
+/// into the code of the function that was called.
 pub fn expand_available_name<'n>(
     scope: &NameScope<'_>,
     name: &'n str,
     unprefixed: Unprefixed,
-) -> Option<(String, &'n str)> {
-    let (prefix, local) = crate::names::split_qname(crate::whitespace::trim(name));
+) -> Result<(String, &'n str), NameError> {
+    let (prefix, local) =
+        crate::names::lexical_qname(crate::whitespace::trim(name)).ok_or(NameError::NotAQName)?;
     if !prefix.is_empty() {
         return scope
             .resolve_prefix(prefix)
-            .map(|uri| (uri.to_string(), local));
+            .map(|uri| (uri.to_string(), local))
+            .ok_or(NameError::UnboundPrefix);
     }
     let uri = match unprefixed {
         Unprefixed::NoNamespace => String::new(),
@@ -753,7 +783,60 @@ pub fn expand_available_name<'n>(
         Unprefixed::FunctionNamespace => crate::names::FN_NS.to_string(),
         Unprefixed::TypeNamespace => scope.xpath_default_namespace.to_string(),
     };
-    Some((uri, local))
+    Ok((uri, local))
+}
+
+/// Expand the argument of `which` — `system-property`, `function-available`,
+/// `type-available` or `element-available` — by that function's rule for an
+/// unprefixed name, raising that function's error when it cannot be expanded.
+///
+/// Each of the four gives the same two failures one code of its own:
+///
+/// > \[§16.6.5\] \[ERR XTDE1390\] It is a non-recoverable dynamic error if the
+/// > value is not a valid QName, or if there is no namespace declaration in
+/// > scope for the prefix of the QName.
+/// >
+/// > \[§18.1.1\] \[ERR XTDE1400\] It is a non-recoverable dynamic error if the
+/// > argument does not evaluate to a string that is a valid QName, or if there is
+/// > no namespace declaration in scope for the prefix of the QName.
+///
+/// §18.1.4's XTDE1428 and §18.2.2's XTDE1440 are the same sentence as
+/// XTDE1400. The `use-when` evaluator and the run-time evaluator both call this,
+/// so a name cannot be an error on one path and `false` on the other; §3.12 does
+/// not exempt a `use-when` expression from the error.
+pub fn expand_name_argument<'n>(
+    scope: &NameScope<'_>,
+    which: XsltFn,
+    name: &'n str,
+) -> Result<(String, &'n str), crate::error::XsltError> {
+    use crate::error::{codes, XsltError};
+    let (unprefixed, code) = match which {
+        XsltFn::SystemProperty => (Unprefixed::NoNamespace, codes::XTDE1390),
+        XsltFn::FunctionAvailable => (Unprefixed::FunctionNamespace, codes::XTDE1400),
+        XsltFn::TypeAvailable => (Unprefixed::TypeNamespace, codes::XTDE1428),
+        XsltFn::ElementAvailable => (Unprefixed::DefaultElementNamespace, codes::XTDE1440),
+        other => {
+            return Err(XsltError::internal(format!(
+                "{}() does not take a name argument",
+                other.name()
+            )))
+        }
+    };
+    expand_available_name(scope, name, unprefixed).map_err(|e| {
+        let function = which.name();
+        XsltError::new(
+            code,
+            match e {
+                NameError::NotAQName => {
+                    format!("the argument of {function}(), {name:?}, is not a lexical QName")
+                }
+                NameError::UnboundPrefix => format!(
+                    "the argument of {function}(), {name:?}, has a prefix with no namespace \
+                     declaration in scope"
+                ),
+            },
+        )
+    })
 }
 
 // ── The three functions that are answerable without a running transformation

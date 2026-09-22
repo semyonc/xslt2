@@ -81,7 +81,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             }
         }
 
-        // A declaration M1 does not implement is reported before any template
+        // A declaration not implemented yet is reported before any template
         // body is compiled: otherwise a template calling a function that
         // `xsl:function` would have declared fails first, and the case is
         // classified as a wrong answer rather than a missing feature.
@@ -948,12 +948,14 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     }
 }
 
-/// The stylesheet declarations M1 parses but does not implement, and the
-/// milestone that owns each.
+/// The stylesheet declarations this processor parses but does not implement
+/// yet, and the roadmap sub-milestone (§4) that owns each.
 fn unimplemented_declaration(local: &str) -> Option<&'static str> {
     Some(match local {
-        "key" | "function" => "M2",
-        "decimal-format" | "character-map" => "M3",
+        "function" => "M2e",
+        "key" => "M2f",
+        "character-map" => "M3a",
+        "decimal-format" => "M3d",
         "import-schema" => "M4",
         _ => return None,
     })

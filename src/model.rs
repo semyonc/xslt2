@@ -19,11 +19,11 @@ use crate::output::OutputDefinition;
 use crate::pattern::Pattern;
 use crate::stylesheet::{CompatMode, ModuleId, StaticContextId, StaticContexts};
 
-/// Index into [`CompiledStylesheet::exprs`].
+/// Index into the expression table of a [`CompiledStylesheet`] (`exprs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ExprId(pub u32);
 
-/// Index into [`CompiledStylesheet::patterns`].
+/// Index into the pattern table of a [`CompiledStylesheet`] (`patterns`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PatternId(pub u32);
 
@@ -59,7 +59,7 @@ impl RuleId {
     }
 }
 
-/// Index into [`CompiledStylesheet::attribute_sets`].
+/// Index into the attribute-set table of a [`CompiledStylesheet`] (`attribute_sets`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AttrSetId(pub u32);
 
@@ -350,7 +350,9 @@ pub enum InstructionKind {
     /// `xsl:fallback` outside an unknown extension instruction: ignored
     /// (§18.2.3 "the xsl:fallback instruction … is ignored").
     Fallback,
-    /// A construct the compiler recognises but M1 does not run.
+    /// A construct the compiler recognises but this processor does not run yet;
+    /// `milestone` is the roadmap sub-milestone that owns it (see
+    /// `XsltError::not_implemented`).
     NotImplemented {
         feature: String,
         milestone: &'static str,

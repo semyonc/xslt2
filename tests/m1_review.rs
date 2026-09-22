@@ -859,3 +859,109 @@ fn p2_14_a_pattern_predicate_uses_its_own_static_context() {
     .unwrap();
     assert_eq!(out, "<out>RIGHT</out>");
 }
+
+// ── M1-review leftover: a character the output encoding cannot represent ──
+//
+// XSLT 2.0 and XQuery 1.0 Serialization (Second Edition), §5.1.2 "XML Output
+// Method: the encoding Parameter" (not local; read at w3.org):
+//
+// > … if the character occurs in a context where XML recognizes character
+// > references (that is, in the value of an attribute node or text node), then
+// > the character MUST be output as a character reference. A serialization
+// > error [err:SERE0008] occurs if such a character appears in a context where
+// > character references are not allowed (for example, if the character occurs
+// > in the name of an element). The serializer MUST signal the error.
+// >
+// > For example, if a text node contains the character LATIN SMALL LETTER E
+// > WITH ACUTE (#xE9), and the value of the encoding parameter is US-ASCII, the
+// > character MUST be serialized as a character reference. If a comment node
+// > contains the same character, a serialization error [err:SERE0008] results.
+//
+// §8.1.2 (the text method): "If the instance of the data model contains a
+// character that cannot be represented in the encoding that the serializer is
+// using for output, the serializer MUST signal a serialization error
+// [err:SERE0008]." The escaping pass used to track only "inside a tag / inside
+// quotes", so a comment or PI took the character raw — or as a reference once
+// a quote or `>` had gone by — a name took it raw, and the text method got
+// references.
+
+const ASCII_OUTPUT: &str = r#"<xsl:output encoding="us-ascii" omit-xml-declaration="yes"/>"#;
+
+fn ascii(template_body: &str) -> Result<String, XsltError> {
+    transform(
+        &format!(r#"{ASCII_OUTPUT}<xsl:template match="/">{template_body}</xsl:template>"#),
+        "<r/>",
+    )
+}
+
+#[track_caller]
+fn sere0008(template_body: &str) {
+    match ascii(template_body) {
+        Ok(out) => panic!("expected SERE0008, got {out:?} for {template_body}"),
+        Err(e) => assert_eq!(e.code, "SERE0008", "{template_body}: {e}"),
+    }
+}
+
+/// Text and attribute values: a character reference, whatever came before.
+#[test]
+fn unrepresentable_text_and_attribute_values_become_character_references() {
+    assert_eq!(ascii("<out>a\u{E9}b</out>").unwrap(), "<out>a&#233;b</out>");
+    assert_eq!(
+        ascii(r#"<out x="a&#xE9;b" y="it's &#xE9;"/>"#).unwrap(),
+        r#"<out x="a&#233;b" y="it's &#233;"/>"#
+    );
+    // Markup-looking characters in data never move the scanner out of step:
+    // after a comment and a PI whose data hold a quote and a `>`, text and
+    // attribute values are still escaped, and a representable name is kept.
+    assert_eq!(
+        ascii(
+            r#"<out><xsl:comment>it's &gt; "x"</xsl:comment><xsl:processing-instruction name="p">a &gt; 'b</xsl:processing-instruction>t&#xE9;<y a="&#xE9;"/></out>"#
+        )
+        .unwrap(),
+        r#"<out><!--it's > "x"--><?p a > 'b?>t&#233;<y a="&#233;"/></out>"#
+    );
+}
+
+/// Comments, processing instructions and names do not recognize character
+/// references, so the character is SERE0008 there — including after a quote or
+/// a `>` in the same comment, which used to turn it into a reference.
+#[test]
+fn unrepresentable_characters_where_references_are_not_allowed_are_sere0008() {
+    sere0008("<out><xsl:comment>c\u{E9}</xsl:comment></out>");
+    sere0008("<out><xsl:comment>it's \u{E9}</xsl:comment></out>");
+    sere0008("<out><xsl:comment>a &gt; \u{E9}</xsl:comment></out>");
+    sere0008(
+        r#"<out><xsl:processing-instruction name="p">d&#xE9;</xsl:processing-instruction></out>"#,
+    );
+    sere0008(
+        r#"<out><xsl:processing-instruction name="p">it's &gt; &#xE9;</xsl:processing-instruction></out>"#,
+    );
+    sere0008(r#"<xsl:element name="e&#xE9;"/>"#);
+    sere0008(r#"<out><xsl:attribute name="a&#xE9;">v</xsl:attribute></out>"#);
+    sere0008(
+        r#"<out><xsl:processing-instruction name="p&#xE9;">d</xsl:processing-instruction></out>"#,
+    );
+    // A comment is not a tag: an unbalanced quote in one used to leave the
+    // scanner "inside an attribute value" for the rest of the document, so a
+    // later element name was turned into a character reference.
+    sere0008(r#"<out><xsl:comment>it's</xsl:comment><xsl:element name="e&#xE9;"/></out>"#);
+}
+
+/// §8.1.2: the text method has no character references at all.
+#[test]
+fn the_text_method_reports_an_unrepresentable_character() {
+    let text = |content: &str| {
+        transform(
+            &format!(
+                r#"<xsl:output method="text" encoding="us-ascii"/>
+                   <xsl:template match="/"><out>{content}</out></xsl:template>"#
+            ),
+            "<r/>",
+        )
+    };
+    let e = text("a\u{E9}b").expect_err("the text method has no character references");
+    assert_eq!(e.code, "SERE0008", "{e}");
+    // The negative control: representable text, `<` and quotes included, is
+    // written as it stands.
+    assert_eq!(text("a &lt; it's").unwrap(), "a < it's");
+}

@@ -1309,9 +1309,13 @@ enum GroupKind {
 impl<'s, 't> SequenceCollector<'s, 't> {
     /// A collector whose hidden documents live in `store`.
     ///
-    /// The store is borrowed for `'s` while the nodes it yields live for `'t`;
-    /// see [`ProtoFunctions::evaluator`](crate::store::ProtoFunctions::evaluator)
-    /// for why the two cannot be the same lifetime.
+    /// The store is borrowed for `'s` while the nodes it yields live for `'t`,
+    /// and the two cannot be the same lifetime: `&'t RefCell<DocumentStore<'t>>`
+    /// does not borrow-check, because the borrow would have to outlive the value
+    /// that carries `'t` in its own type. The navigators the store hands out are
+    /// `'t` however long the store itself is borrowed, which is what makes the
+    /// shorter borrow enough. (The M0b prototype's `ProtoFunctions::evaluator`
+    /// carried this note; it was replaced in M1.)
     pub fn new(store: &'s RefCell<DocumentStore<'t>>) -> Self {
         Self {
             store,

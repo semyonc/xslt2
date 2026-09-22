@@ -400,7 +400,7 @@ mod tests {
 
             for e in [
                 XsltError::internal("a broken invariant inside a pattern"),
-                XsltError::not_implemented("key()", "M2"),
+                XsltError::not_implemented("key()", "M2f"),
             ] {
                 assert_eq!(
                     run.guard_recoverable(Err(e.clone())),
@@ -437,7 +437,7 @@ mod tests {
             .expect("the stylesheet compiles");
         let arena = Bump::new();
         let run = sheet.transformation(&arena, TransformOptions::default());
-        *run.parked_error.borrow_mut() = Some(XsltError::not_implemented("key()", "M2"));
+        *run.parked_error.borrow_mut() = Some(XsltError::not_implemented("key()", "M2f"));
         assert_eq!(
             run.guard_recoverable(Err(XsltError::new("FORG0001", "x"))),
             Ok(false)

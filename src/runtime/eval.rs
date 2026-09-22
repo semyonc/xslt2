@@ -11,7 +11,7 @@ use super::dispatch::children_of;
 use super::{Frame, Message, Transformation};
 use crate::error::{codes, XsltError};
 use crate::model::*;
-use crate::names::{is_ncname, QName, XML_NS};
+use crate::names::{is_ncname, lexical_qname, QName, XML_NS};
 use crate::receiver::{namespace_nodes_of, CopyNamespaces, Name, Nav, Receiver};
 use crate::whitespace;
 
@@ -556,26 +556,6 @@ impl<'a, 't> Transformation<'a, 't> {
         }
         sc.resolve_prefix(prefix)
     }
-}
-
-/// `name` split into prefix and local part if it is a **lexical QName**, and
-/// `None` if it is not.
-///
-/// `split_qname` alone is not a check: it reads `":foo"` as an unprefixed
-/// `foo`, so `<xsl:element name="{$prefix}:foo"/>` with an empty `$prefix`
-/// built an element instead of raising XTDE0820 / XTDE0850 (`namespace-3203`).
-/// A lexical QName is `NCName (":" NCName)?` — at most one colon, and neither
-/// part may be empty.
-fn lexical_qname(name: &str) -> Option<(&str, &str)> {
-    let (prefix, local) = match name.split_once(':') {
-        Some((prefix, local)) if prefix.is_empty() || local.contains(':') => return None,
-        Some((prefix, local)) => (prefix, local),
-        None => ("", name),
-    };
-    if !is_ncname(local) || (!prefix.is_empty() && !is_ncname(prefix)) {
-        return None;
-    }
-    Some((prefix, local))
 }
 
 /// The namespace URI a node-construction instruction was handed, checked

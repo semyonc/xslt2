@@ -123,7 +123,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             None => Ok(self.wrap(
                 InstructionKind::NotImplemented {
                     feature: format!("the extension instruction {}", nav.name()),
-                    milestone: "M3",
+                    milestone: "M3e",
                 },
                 ctx,
                 module_id,
@@ -381,9 +381,16 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             "number" | "for-each-group" | "analyze-string" | "perform-sort" | "result-document"
             | "sort" | "function" | "key" => Ok(InstructionKind::NotImplemented {
                 feature: format!("xsl:{local}"),
+                // The owner of each, per the roadmap's §4.
                 milestone: match local.as_str() {
-                    "number" | "result-document" => "M3",
-                    _ => "M2",
+                    "sort" | "perform-sort" => "M2d",
+                    "function" => "M2e",
+                    "key" => "M2f",
+                    "for-each-group" => "M2g",
+                    "analyze-string" => "M2h",
+                    "result-document" => "M3b",
+                    "number" => "M3c",
+                    _ => unreachable!("the arm above lists exactly these elements"),
                 },
             }),
             other => {
@@ -517,7 +524,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 && child.namespace_uri() == XSLT_NS
                 && child.local_name() == "sort"
             {
-                return Err(XsltError::not_implemented("xsl:sort", "M2")
+                return Err(XsltError::not_implemented("xsl:sort", "M2d")
                     .with_location(self.modules.module(module_id).location(&child)));
             }
         }

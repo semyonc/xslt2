@@ -163,7 +163,7 @@ impl OutputDefinition {
             Some(limit) => Ok(limit),
             None => Err(XsltError::not_implemented(
                 format!("the output encoding {encoding:?}"),
-                "M3",
+                "M3a",
             )),
         }
     }
@@ -182,7 +182,7 @@ impl OutputDefinition {
             method => {
                 return Err(XsltError::not_implemented(
                     format!("the {} output method", method_name(method)),
-                    "M3",
+                    "M3a",
                 ))
             }
         }
@@ -190,7 +190,7 @@ impl OutputDefinition {
         // is applied by the caller, after serialization.
         self.character_escaping()?;
         if self.doctype_public.is_set() || self.doctype_system.is_set() {
-            return Err(XsltError::not_implemented("xsl:output/@doctype-*", "M3"));
+            return Err(XsltError::not_implemented("xsl:output/@doctype-*", "M3a"));
         }
         Ok(SerializeOptions {
             xml_declaration: !self.omit_xml_declaration.get_or(true),
@@ -245,7 +245,7 @@ pub fn parse_method(value: &str) -> Result<OutputMethod, XsltError> {
         // implementation-defined method. We implement none.
         other => Err(XsltError::not_implemented(
             format!("the output method {other:?}"),
-            "M3",
+            "M3a",
         )),
     }
 }

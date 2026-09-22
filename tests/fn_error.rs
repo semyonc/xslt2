@@ -270,9 +270,9 @@ fn the_processors_own_not_implemented_still_propagates() {
     }
 
     // The two constructors keep their meaning.
-    assert!(XsltError::not_implemented("key()", "M2").is_not_implemented());
+    assert!(XsltError::not_implemented("key()", "M2f").is_not_implemented());
     assert!(XsltError::internal("broken invariant").is_internal());
-    assert!(!XsltError::not_implemented("key()", "M2").is_raised());
+    assert!(!XsltError::not_implemented("key()", "M2f").is_raised());
 }
 
 /// `xsl:message terminate="yes"` does not go through `fn:error` — the

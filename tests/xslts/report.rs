@@ -175,6 +175,22 @@ impl Report {
         (pass, runnable)
     }
 
+    /// The `notImplemented` cases grouped by the roadmap sub-milestone their
+    /// message names — the unlock ceiling of each (ROADMAP §2). The engine's
+    /// `XSLT2-NOTIMPL` message always ends in `is not implemented (<owner>)`;
+    /// anything else is grouped under `unattributed`, which should stay empty.
+    pub fn not_implemented_by_owner(&self) -> BTreeMap<String, usize> {
+        let mut owners: BTreeMap<String, usize> = BTreeMap::new();
+        for r in &self.records {
+            if r.status == Status::NotImplemented {
+                let message = r.message.as_deref().unwrap_or_default();
+                let owner = notimpl_owner(message).unwrap_or("unattributed");
+                *owners.entry(owner.to_string()).or_default() += 1;
+            }
+        }
+        owners
+    }
+
     pub fn print_summary(&self) {
         let hdr = format!(
             "{:<34} {:>8} {:>6} {:>6} {:>8} {:>10} {:>8} {:>7} {:>7}",
@@ -205,6 +221,13 @@ impl Report {
             reasons.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
             for (reason, n) in reasons {
                 println!("  {n:6}  {reason}");
+            }
+        }
+        let owners = self.not_implemented_by_owner();
+        if !owners.is_empty() {
+            println!("\n== notImplemented by owning milestone ==");
+            for (owner, cases) in &owners {
+                println!("  {cases:6}  {owner}");
             }
         }
         let t = &self.totals;
@@ -329,6 +352,19 @@ impl Report {
         writeln!(f, "</test-suite-result>")?;
         Ok(())
     }
+}
+
+/// The owner in a `… is not implemented (<owner>)` message: a roadmap
+/// milestone, `M` followed by alphanumerics.
+pub fn notimpl_owner(message: &str) -> Option<&str> {
+    let inner = message
+        .strip_suffix(')')?
+        .rsplit_once(" is not implemented (")?
+        .1;
+    let valid = inner.starts_with('M')
+        && inner.len() > 1
+        && inner[1..].chars().all(|c| c.is_ascii_alphanumeric());
+    valid.then_some(inner)
 }
 
 fn print_row(name: &str, c: &Counts) {

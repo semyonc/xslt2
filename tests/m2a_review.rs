@@ -176,7 +176,7 @@ fn an_undefined_operator_is_a_type_error_not_an_internal_failure() {
 /// The classification rule itself, which is what every site shares.
 #[test]
 fn the_recoverability_rule_is_one_predicate() {
-    let notimpl = XsltError::not_implemented("key()", "M2");
+    let notimpl = XsltError::not_implemented("key()", "M2f");
     let internal = XsltError::internal("a broken invariant");
     for e in [&notimpl, &internal] {
         assert!(e.is_processor_failure());

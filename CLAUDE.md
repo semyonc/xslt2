@@ -45,7 +45,13 @@ cargo clippy --all-targets         # 0 warnings expected
 cargo test                         # unit + m0b_invariants + m1_context + m1_smoke + m1_review + m2a_groundwork + m2a_review
                                    # + fn_error + m2b_namespaces + m2c_static_checks
                                    # (the W3C harness skips itself in a debug build)
+RUSTDOCFLAGS='-D warnings' cargo doc --no-deps   # must exit 0; the local regexml fork's own
+                                                 # rustc warning is a dependency's and does not fail it
 ```
+
+`src/error/codes.rs` was generated from the spec, but the generator is not in the repository: keep its
+rustdoc escapes (`\[xsl:…\]`, `<URL>`) when editing it by hand. Public docs must not link to private items
+(`rustdoc::private_intra_doc_links`) — name them in a code span instead.
 
 ## W3C conformance harness (`tests/xslts`)
 
@@ -60,7 +66,7 @@ cargo test --test xslts --release                       # whole applicable suite
 cargo test --test xslts --release -- -g value-of -f     # one test-set, failures only
 cargo test --test xslts --release -- -t lre-027 -v      # one case, by name
 cargo test --test xslts --release -- --stub             # the M0 stub engine
-cargo test --test xslts --release -- --self-test        # the harness's own checks (16)
+cargo test --test xslts --release -- --self-test        # the harness's own checks (17)
 cargo test --test xslts --release -- --lenient-xml      # triage: ignore prefixes/namespaces in assert-xml
 cargo test --test xslts --release -- --report /tmp/x.xml
 cargo test --test xslts --release -- -l                 # list test-sets with counts

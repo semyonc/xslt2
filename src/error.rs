@@ -21,10 +21,12 @@ use std::fmt;
 pub mod codes_internal {
     /// A construct the processor recognizes but has not implemented yet.
     ///
-    /// The message always names the feature and the milestone that owns it,
-    /// e.g. `xsl:sort is not implemented in M1 (M2)`. The conformance harness
-    /// reports a case ending in this code as `not implemented` rather than as a
-    /// plain failure.
+    /// The message always names the feature and the one sub-milestone of the
+    /// roadmap (`xslt_doc/XSLT2_ROADMAP.md` §4) that owns it, e.g.
+    /// `xsl:sort is not implemented (M2d)`. The conformance harness reports a
+    /// case ending in this code as `not implemented` rather than as a plain
+    /// failure, and totals those cases per owning sub-milestone from the
+    /// trailing `(…)`.
     pub const NOT_IMPLEMENTED: &str = "XSLT2-NOTIMPL";
 
     /// An internal failure: a broken invariant, or an error from a lower layer
@@ -198,14 +200,16 @@ impl XsltError {
         Some((self.error_namespace()?, self.code.as_str()))
     }
 
-    /// A feature this milestone does not implement (`XSLT2-NOTIMPL`).
+    /// A feature this processor does not implement yet (`XSLT2-NOTIMPL`).
     ///
-    /// `feature` names the construct, `milestone` the roadmap entry that owns
-    /// it, so a harness failure reads as a plan item rather than as a bug.
+    /// `feature` names the construct, `milestone` the roadmap sub-milestone that
+    /// owns it — `M2d`, `M3a`, `M4`, …, never a coarse `M2` or `M3` — so a
+    /// harness failure reads as a plan item rather than as a bug. The message is
+    /// `{feature} is not implemented ({milestone})`.
     pub fn not_implemented(feature: impl fmt::Display, milestone: &str) -> Self {
         Self::new(
             codes_internal::NOT_IMPLEMENTED,
-            format!("{feature} is not implemented in M1 ({milestone})"),
+            format!("{feature} is not implemented ({milestone})"),
         )
     }
 
@@ -416,11 +420,11 @@ mod tests {
 
     #[test]
     fn internal_codes_are_not_spec_codes() {
-        let e = XsltError::not_implemented("xsl:sort", "M2");
+        let e = XsltError::not_implemented("xsl:sort", "M2d");
         assert_eq!(e.code, codes_internal::NOT_IMPLEMENTED);
         assert_eq!(e.kind(), ErrorKind::Other);
         assert!(e.is_not_implemented());
-        assert!(e.message.contains("xsl:sort") && e.message.contains("M2"));
+        assert_eq!(e.message, "xsl:sort is not implemented (M2d)");
         assert!(codes::describe(codes_internal::NOT_IMPLEMENTED).is_none());
         assert!(codes::describe(codes_internal::INTERNAL).is_none());
         assert!(!XsltError::internal("boom").is_not_implemented());
@@ -537,10 +541,10 @@ mod tests {
         }
 
         // The processor's own two codes keep their meaning.
-        assert!(XsltError::not_implemented("key()", "M2").is_not_implemented());
+        assert!(XsltError::not_implemented("key()", "M2f").is_not_implemented());
         assert!(XsltError::internal("broken").is_internal());
         assert!(XsltError::new(codes::XTMM9000, "stop").is_termination());
-        assert!(!XsltError::not_implemented("key()", "M2").is_recoverable_in_pattern());
+        assert!(!XsltError::not_implemented("key()", "M2f").is_recoverable_in_pattern());
     }
 
     /// `Display` shows a stylesheet's own error QName whole, and leaves the

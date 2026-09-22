@@ -82,6 +82,27 @@ pub fn split_qname(name: &str) -> (&str, &str) {
     }
 }
 
+/// `name` split into prefix and local part if it is a **lexical QName**, and
+/// `None` if it is not.
+///
+/// `split_qname` alone is not a check: it reads `":foo"` as an unprefixed
+/// `foo`, so `<xsl:element name="{$prefix}:foo"/>` with an empty `$prefix`
+/// built an element instead of raising XTDE0820 / XTDE0850 (`namespace-3203`).
+/// A lexical QName is `NCName (":" NCName)?` — at most one colon, and neither
+/// part may be empty. (Moved here from `runtime/eval.rs` so that the
+/// name-answering functions of §16.6.5 and §18 apply the same check.)
+pub fn lexical_qname(name: &str) -> Option<(&str, &str)> {
+    let (prefix, local) = match name.split_once(':') {
+        Some((prefix, local)) if prefix.is_empty() || local.contains(':') => return None,
+        Some((prefix, local)) => (prefix, local),
+        None => ("", name),
+    };
+    if !is_ncname(local) || (!prefix.is_empty() && !is_ncname(prefix)) {
+        return None;
+    }
+    Some((prefix, local))
+}
+
 /// Whether `name` is a syntactically valid NCName.
 ///
 /// The check is the practical one: a name character set wide enough for every

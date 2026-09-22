@@ -317,7 +317,7 @@ fn parse_alternative(
     if alt.starts_with("id(") || alt.starts_with("key(") {
         return Err(XsltError::not_implemented(
             format!("the id()/key() pattern {alt:?}"),
-            "M2",
+            "M2f",
         ));
     }
 
