@@ -1,9 +1,10 @@
 //! Schema-aware XSLT 2.0 processor built on [`xsd_schema`].
 //!
 //! Specification: *XSL Transformations (XSLT) Version 2.0 (Second Edition)*,
-//! kept locally at `xslt20.html` in the workspace root. The design sketch
-//! `XSLT2_DESIGN_SKETCH.md` (workspace root) records the architecture, the
-//! roadmap and the open questions; `XSLT2_FEASIBILITY.md` is the original memo.
+//! kept locally at `xslt20.html` in the workspace root. The design lives in
+//! `xslt_doc/` (workspace root): `XSLT2_DESIGN.md` (the architecture),
+//! `XSLT2_ROADMAP.md` (status, milestones, working method, open questions) and
+//! `XSLT2_LOG.md` (history); `XSLT2_FEASIBILITY.md` is the original memo.
 //!
 //! Status: M1 — stylesheet loading and compilation ([`compile`],
 //! [`stylesheet`], [`pattern`]), the instruction tree ([`model`]) and the

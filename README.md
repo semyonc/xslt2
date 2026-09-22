@@ -105,7 +105,9 @@ engine adapter is `tests/xslts/engine.rs`, and it uses only the public API.
 
 ## Design and reference material (workspace root, outside this repository)
 
-- `XSLT2_DESIGN_SKETCH.md` — architecture, roadmap M0–M5, open questions (start here)
+- `xslt_doc/XSLT2_DESIGN.md` — the architecture (start here)
+- `xslt_doc/XSLT2_ROADMAP.md` — current status, milestones M0–M5, working method, open questions Q1–Q43
+- `xslt_doc/XSLT2_LOG.md` — review history; `XSLT2_DESIGN_SKETCH.md` is the frozen original these three replaced
 - `XSLT2_M1_REPORT.md` — what M1 built, the classified failures, the upstream changes
 - `XSLT2_FEASIBILITY.md` — the original feasibility memo
 - `xslt20.html` — W3C XSLT 2.0 (Second Edition), the source of truth; cite sections as §N.N

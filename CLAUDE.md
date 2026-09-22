@@ -6,7 +6,10 @@ PSVI, `BufferDocument`). Separate git repository.
 ## Source of truth
 
 - `../../xslt20.html` — W3C XSLT 2.0 (Second Edition). Cite sections as §N.N and quote the text.
-- `../../XSLT2_DESIGN_SKETCH.md` — architecture, roadmap (M0–M5), open questions Q1–Q43.
+- `../../xslt_doc/XSLT2_DESIGN.md` — the architecture (section numbers are those of the old sketch).
+- `../../xslt_doc/XSLT2_ROADMAP.md` — §1 Status is the one place for current numbers and commits; milestones
+  M0–M5, §5 working method (agent-brief rules, verification battery), open questions Q1–Q43.
+- `../../xslt_doc/XSLT2_LOG.md` — append-only review history. `../../XSLT2_DESIGN_SKETCH.md` is frozen; do not edit it.
 - `../../XSLT2_M1_REPORT.md` — what M1 built, the per-set numbers and the classified failures.
 - `../../XSLT2_M1_REVIEW_FIXES.md`, `../../XSLT2_M1_HARNESS_FIX_REPORT.md` — the 16 defects an
   independent review found in M0–M1, their root causes and fixes; regression tests in `tests/m1_review.rs`.
@@ -69,6 +72,18 @@ Save verbose output to a file and grep it:
 cargo test --test xslts --release -- -v > /tmp/xslts.txt 2>&1
 grep -E "^  (FAIL|WRONG-ERROR|HARNESS-ERROR|NOT-IMPL)" /tmp/xslts.txt
 ```
+
+**Per-case diff against a baseline** — the zero pass→non-pass gate. Baseline reports and the XSD FAIL-name
+lists live outside the repositories in `../../baselines/` (see its `README.md`); never overwrite one, add a new
+file named after the commits it was taken at:
+
+```bash
+cargo test --test xslts --release -- --skip unicode-90 --report /tmp/new.xml
+python3 tools/suite_diff.py ../../baselines/xslts-4301-at-A10-A11-uncommitted.xml /tmp/new.xml
+```
+
+`tools/suite_diff.py` compares status **and** failure comment per case; a comment-only change is listed
+separately. Always pass `--skip unicode-90` (the set runs for hours).
 
 `NOT-IMPL` is this processor's own `XSLT2-NOTIMPL` code: the case is runnable and fails, but it
 fails because a feature belongs to a later milestone, not because the answer is wrong. Dependency
