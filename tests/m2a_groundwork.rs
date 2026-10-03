@@ -386,9 +386,24 @@ fn the_supertypes_and_the_nillable_spelling_are_decided_too() {
 /// Any other type name needs a schema and stays not implemented (M4).
 #[test]
 fn a_type_test_that_needs_a_schema_is_still_not_implemented() {
+    // A user-defined type name with no schema behind it is not "schema-aware,
+    // later": "TypeName must be present in the in-scope schema types
+    // [err:XPST0008]" (XPath 2.0 §2.5.4.3), for any processor. The XPath
+    // engine reports it when the pattern is compiled. The pattern compiler
+    // still wraps every XPath compile error as XTSE0340, which is meant for a
+    // pattern that does not match the Pattern syntax; passing a name error
+    // through with its own code is an M2i item — until then the XPST0008 is
+    // carried in the message.
+    let body = r#"<xsl:template match="/"><out/></xsl:template>
+               <xsl:template match="element(a, my:t)">HIT</xsl:template>"#;
+    let error = transform(body, "<r><a/></r>").expect_err("element(a, my:t) unexpectedly compiled");
+    assert!(!error.is_not_implemented(), "{error}");
+    assert!(error.to_string().contains("XPST0008"), "{error}");
+
+    // A built-in type in a typed node test is fine statically; matching it
+    // needs typed nodes, which arrive with the schema-aware milestone.
     for pattern in [
         "element(*, xs:integer)",
-        "element(a, my:t)",
         "attribute::attribute(*, xs:string)",
     ] {
         let body = format!(
