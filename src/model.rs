@@ -577,6 +577,43 @@ pub struct FunctionParam {
     pub loc: Location,
 }
 
+/// Index into the key table of a [`CompiledStylesheet`] (`keys`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct KeyId(pub u32);
+
+/// A *key* (§16.3.1): every `xsl:key` declaration of one name.
+///
+/// > \[Definition: A key is defined as a set of `xsl:key` declarations in the
+/// > stylesheet that share the same name.\]
+///
+/// > An `xsl:key` declaration with higher import precedence does not override
+/// > another of lower import precedence; all the `xsl:key` declarations in the
+/// > stylesheet are effective regardless of their import precedence.
+pub struct Key {
+    pub name: QName,
+    /// Every declaration of the name, in declaration order.
+    pub definitions: Vec<KeyDefinition>,
+    /// The effective collation, absolute; the same for every declaration
+    /// (XTSE1220).
+    pub collation: String,
+    /// §16.3.2: "A key … is processed in backwards compatible mode if any of
+    /// the `xsl:key` elements in the definition of the key enables backwards
+    /// compatible behavior" — then every value is compared as a string
+    /// (DESIGN §9.10 row 10).
+    pub compat: bool,
+}
+
+/// One `xsl:key` declaration (§16.3.1).
+pub struct KeyDefinition {
+    /// The `match` pattern, compiled with only the global variables in scope.
+    pub pattern: PatternId,
+    /// The *key specifier*: the `use` attribute or the sequence constructor.
+    pub specifier: ValueSource,
+    /// Slots the sequence constructor's local variables need.
+    pub frame_size: usize,
+    pub loc: Location,
+}
+
 /// A global `xsl:variable` or `xsl:param` (§9.5).
 pub struct GlobalVar {
     pub name: QName,
@@ -724,6 +761,9 @@ pub struct CompiledStylesheet<'a> {
     pub(crate) global_index: HashMap<QName, usize>,
     pub(crate) modes: ModeTable,
     pub(crate) attribute_sets: HashMap<QName, AttributeSet>,
+    /// The keys (§16.3.1), indexed by [`KeyId`].
+    pub(crate) keys: Vec<Key>,
+    pub(crate) key_index: HashMap<QName, KeyId>,
     pub(crate) output: OutputDefinition,
     pub(crate) named_outputs: HashMap<QName, OutputDefinition>,
     pub(crate) space_rules: Vec<SpaceRule>,
@@ -841,6 +881,20 @@ impl<'a> CompiledStylesheet<'a> {
 
     pub fn attribute_set(&self, name: &QName) -> Option<&AttributeSet> {
         self.attribute_sets.get(name)
+    }
+
+    /// Every key the stylesheet declares (§16.3.1).
+    pub fn keys(&self) -> &[Key] {
+        &self.keys
+    }
+
+    pub fn key(&self, id: KeyId) -> &Key {
+        &self.keys[id.0 as usize]
+    }
+
+    /// The key whose declarations carry the expanded name `name`.
+    pub fn key_named(&self, name: &QName) -> Option<KeyId> {
+        self.key_index.get(name).copied()
     }
 
     pub fn space_rules(&self) -> &[SpaceRule] {

@@ -1,6 +1,9 @@
 //! Matching a node against a pattern (§5.5.3), walking the pattern right to
 //! left from the candidate node.
 
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+
 use xsd_schema::navigator::{DomNavigator, DomNodeType};
 use xsd_schema::xpath::functions::{effective_boolean_value, XPathValue};
 use xsd_schema::xpath::{XPathError, XmlItem};
@@ -8,9 +11,56 @@ use xsd_schema::xpath::{XPathError, XmlItem};
 use super::context::XsltContext;
 use super::{Frame, Transformation};
 use crate::error::XsltError;
+use crate::model::{ExprId, VarLocation};
 use crate::names::QName;
-use crate::pattern::{Anchor, Connector, NodeTest, PathPattern, Pattern, PatternAxis, PatternStep};
+use crate::pattern::{
+    Anchor, Connector, IdKeyAnchor, NodeTest, PathPattern, Pattern, PatternAxis, PatternStep,
+};
 use crate::receiver::Nav;
+
+/// The nodes the `id(…)` / `key(…)` call of an IdKeyPattern selects, by the
+/// call and the serial number of the document it was evaluated in — filled
+/// the first time a candidate of that document is matched against the
+/// pattern, and kept for the run (see [`Transformation::id_key_selection`]).
+pub(super) type IdKeySelections<'t> = HashMap<(ExprId, u64), Rc<SelectedNodes<'t>>>;
+
+/// The nodes an IdKeyPattern's call selected in one document, as a set.
+pub(super) struct SelectedNodes<'t> {
+    /// Every selected node that is not a namespace node, by its index in the
+    /// document's node array (`current_ref`), which identifies such a node
+    /// within its document — it is what `generate-id()` is built from.
+    indexed: HashSet<u32>,
+    /// Selected namespace nodes, which share the index of their element and
+    /// are compared by identity instead. (`id()` selects elements and a key
+    /// never indexes a namespace node, so this stays empty in practice.)
+    namespaces: Vec<Nav<'t>>,
+}
+
+impl<'t> SelectedNodes<'t> {
+    fn new(nodes: impl IntoIterator<Item = Nav<'t>>) -> Self {
+        let mut set = SelectedNodes {
+            indexed: HashSet::new(),
+            namespaces: Vec::new(),
+        };
+        for node in nodes {
+            if node.node_type() == DomNodeType::Namespace {
+                set.namespaces.push(node);
+            } else {
+                set.indexed.insert(node.current_ref());
+            }
+        }
+        set
+    }
+
+    /// Whether `node`, a node of the document the set was made for, is in it.
+    fn contains(&self, node: &Nav<'t>) -> bool {
+        if node.node_type() == DomNodeType::Namespace {
+            self.namespaces.iter().any(|n| n.is_same_position(node))
+        } else {
+            self.indexed.contains(&node.current_ref())
+        }
+    }
+}
 
 impl<'a, 't> Transformation<'a, 't> {
     // ── Patterns (§5.5.3) ────────────────────────────────────────────────
@@ -94,11 +144,91 @@ impl<'a, 't> Transformation<'a, 't> {
         node: &Nav<'t>,
         current: &Nav<'t>,
     ) -> Result<bool, XsltError> {
-        if alternative.steps.is_empty() {
+        if let Anchor::IdKey(anchor) = alternative.anchor {
+            // §5.5.2: "These patterns will never match a node in a tree whose
+            // root is not a document node." §5.5.4 makes that "a non-match,
+            // rather than a dynamic error" — so the call, which would raise
+            // XTDE1270 (`key`) or FODC0001 (`id`) there, is not even made.
+            let mut root = node.clone();
+            root.move_to_root();
+            if root.node_type() != DomNodeType::Root {
+                return Ok(false);
+            }
+            if alternative.steps.is_empty() {
+                // The call alone: the node must be one it selects.
+                return Ok(self.id_key_selection(anchor, node, current)?.contains(node));
+            }
+        } else if alternative.steps.is_empty() {
             // The pattern `/`.
             return Ok(node.node_type() == DomNodeType::Root);
         }
         self.matches_from(alternative, 0, node, current)
+    }
+
+    /// The nodes the `id(…)` / `key(…)` call of an IdKeyPattern selects in the
+    /// tree of `node` (§5.5.2).
+    ///
+    /// §5.5.3 evaluates `root(.)//(EE)` with a singleton focus on the
+    /// candidate: the call runs with a context node in the candidate's tree,
+    /// and the candidate is such a node. The argument is a literal or a
+    /// variable reference, so nothing else of the focus can be observed;
+    /// `current()` is still the node being matched (§16.6.1).
+    ///
+    /// The result is therefore the same for every candidate of one document:
+    /// §5.5.2 allows only "a literal or a reference to a variable or
+    /// parameter" as the value and "a string literal" as the key name, and
+    /// `id()` and two-argument `key()` search "the document containing the
+    /// context node". So it is computed once per (call, document) and kept for
+    /// the run as a set — as long as every variable the call reads is global
+    /// (a global's value is fixed for the run). A call that reads a local
+    /// variable is evaluated per candidate, as before; no pattern site
+    /// compiles one today (template and key patterns see only globals), but a
+    /// pattern of a later instruction might. An error is not kept: it is
+    /// raised for this candidate (and a key whose index build failed
+    /// remembers that itself, `runtime/keys.rs`).
+    fn id_key_selection(
+        &self,
+        anchor: IdKeyAnchor,
+        node: &Nav<'t>,
+        current: &Nav<'t>,
+    ) -> Result<Rc<SelectedNodes<'t>>, XsltError> {
+        let fixed = self.reads_only_globals(anchor.call);
+        let slot = (anchor.call, node.document().serial());
+        if fixed {
+            if let Some(selected) = self.id_key_selections.borrow().get(&slot) {
+                return Ok(Rc::clone(selected));
+            }
+        }
+        let mut cx = XsltContext::empty();
+        cx.item = Some(XmlItem::Node(node.clone()));
+        cx.position = 1;
+        cx.size = 1;
+        cx.current = Some(XmlItem::Node(current.clone()));
+        // The table is not borrowed here: the call may build a key index,
+        // whose patterns may match other IdKeyPatterns.
+        let value = self.eval_expr(anchor.call, &Frame::default(), &cx)?;
+        let selected = Rc::new(SelectedNodes::new(value.into_vec().into_iter().filter_map(
+            |item| match item {
+                XmlItem::Node(nav) => Some(nav),
+                XmlItem::Atomic(_) => None,
+            },
+        )));
+        if fixed {
+            self.id_key_selections
+                .borrow_mut()
+                .insert(slot, Rc::clone(&selected));
+        }
+        Ok(selected)
+    }
+
+    /// Whether every variable the expression `id` reads is a global variable
+    /// or parameter.
+    fn reads_only_globals(&self, id: ExprId) -> bool {
+        let compiled = self.sheet.expr(id);
+        compiled.vars.iter().enumerate().all(|(slot, location)| {
+            matches!(location, VarLocation::Global(_))
+                || !compiled.expr.references_external_var(slot as u32)
+        })
     }
 
     fn matches_from(
@@ -123,6 +253,27 @@ impl<'a, 't> Transformation<'a, 't> {
                     let mut root = node.clone();
                     root.move_to_root();
                     root.node_type() == DomNodeType::Root
+                }
+                // `id(…)/…`: the parent of the leftmost step is selected by the
+                // call; `id(…)//…`: some ancestor is.
+                Anchor::IdKey(anchor) => {
+                    let mut ancestor = node.clone();
+                    if !ancestor.move_to_parent() {
+                        return Ok(false);
+                    }
+                    let selected = self.id_key_selection(anchor, node, current)?;
+                    let selects = |n: &Nav<'t>| selected.contains(n);
+                    match anchor.connector {
+                        Connector::Parent => selects(&ancestor),
+                        Connector::Ancestor => loop {
+                            if selects(&ancestor) {
+                                break true;
+                            }
+                            if !ancestor.move_to_parent() {
+                                break false;
+                            }
+                        },
+                    }
                 }
             });
         }
@@ -411,7 +562,7 @@ mod tests {
 
             for e in [
                 XsltError::internal("a broken invariant inside a pattern"),
-                XsltError::not_implemented("key()", "M2f"),
+                XsltError::not_implemented("format-number()", "M3d"),
             ] {
                 assert_eq!(
                     run.guard_recoverable(Err(e.clone())),
@@ -448,7 +599,7 @@ mod tests {
             .expect("the stylesheet compiles");
         let arena = Bump::new();
         let run = sheet.transformation(&arena, TransformOptions::default());
-        *run.parked_error.borrow_mut() = Some(XsltError::not_implemented("key()", "M2f"));
+        *run.parked_error.borrow_mut() = Some(XsltError::not_implemented("format-number()", "M3d"));
         assert_eq!(
             run.guard_recoverable(Err(XsltError::new("FORG0001", "x"))),
             Ok(false)

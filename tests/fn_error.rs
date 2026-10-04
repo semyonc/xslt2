@@ -259,7 +259,9 @@ fn a_user_error_named_like_an_internal_code_is_still_a_dynamic_error() {
 #[test]
 fn the_processors_own_not_implemented_still_propagates() {
     for strict in [false, true] {
-        let err = match run(&two_rules("key('k', @n) = 1"), ONE_ITEM, strict) {
+        // `format-number()` stands for a feature this processor still lacks
+        // (M3d); until M2f it was `key()`.
+        let err = match run(&two_rules("format-number(1, '0') = '1'"), ONE_ITEM, strict) {
             Err(e) => e,
             Ok(out) => panic!("strict={strict} produced {out}"),
         };
@@ -270,9 +272,9 @@ fn the_processors_own_not_implemented_still_propagates() {
     }
 
     // The two constructors keep their meaning.
-    assert!(XsltError::not_implemented("key()", "M2f").is_not_implemented());
+    assert!(XsltError::not_implemented("format-number()", "M3d").is_not_implemented());
     assert!(XsltError::internal("broken invariant").is_internal());
-    assert!(!XsltError::not_implemented("key()", "M2f").is_raised());
+    assert!(!XsltError::not_implemented("format-number()", "M3d").is_raised());
 }
 
 /// `xsl:message terminate="yes"` does not go through `fn:error` — the

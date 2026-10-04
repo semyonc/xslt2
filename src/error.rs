@@ -283,7 +283,24 @@ impl XsltError {
     /// one of those would not "treat the pattern as not matching" in any
     /// meaningful sense — it would silently select a different template rule
     /// and produce a wrong result with no diagnostic.
+    ///
+    /// One dynamic error is signalled rather than recovered from: a
+    /// circularity (XTDE0640) that the processor detects. §2.9 makes the choice
+    /// the processor's — "When a recoverable error occurs, this specification
+    /// allows the processor either to signal the error … or to take a defined
+    /// recovery action and continue processing. … It is implementation-defined
+    /// whether the error is signaled or the recovery action is taken" — and a
+    /// circularity is not a property of the one node being matched but of the
+    /// definitions involved (§9.8: "A circularity is said to exist if a
+    /// construct such as a global variable, an attribute set, or a key is
+    /// defined in terms of itself"). Recovering would hide the defect: a key
+    /// whose `match` pattern calls the key itself would silently index nothing.
+    /// An error the stylesheet raises itself through `fn:error` keeps the
+    /// general rule, whatever its local name.
     pub fn is_recoverable_in_pattern(&self) -> bool {
+        if self.origin() == ErrorOrigin::Processor && self.code == codes::XTDE0640 {
+            return false;
+        }
         matches!(
             self.kind(),
             ErrorKind::Dynamic | ErrorKind::Type | ErrorKind::Recoverable | ErrorKind::XPath
@@ -527,6 +544,9 @@ mod tests {
             codes_internal::INTERNAL,
             codes::XTMM9000,
             codes::XTSE0010,
+            // Signalled inside a pattern only when the processor detects the
+            // circularity (`is_recoverable_in_pattern`).
+            codes::XTDE0640,
             "nonsense",
         ] {
             for ns in ["urn:e", "", XQT_ERRORS_NAMESPACE] {
@@ -541,10 +561,14 @@ mod tests {
         }
 
         // The processor's own two codes keep their meaning.
-        assert!(XsltError::not_implemented("key()", "M2f").is_not_implemented());
+        assert!(XsltError::not_implemented("format-number()", "M3d").is_not_implemented());
         assert!(XsltError::internal("broken").is_internal());
         assert!(XsltError::new(codes::XTMM9000, "stop").is_termination());
-        assert!(!XsltError::not_implemented("key()", "M2f").is_recoverable_in_pattern());
+        assert!(!XsltError::not_implemented("format-number()", "M3d").is_recoverable_in_pattern());
+        // A circularity the processor detects is signalled even inside a
+        // pattern (§2.9 leaves signal-or-recover to the implementation); one a
+        // stylesheet raises itself with `fn:error` keeps the general rule.
+        assert!(!XsltError::new(codes::XTDE0640, "circular").is_recoverable_in_pattern());
     }
 
     /// `Display` shows a stylesheet's own error QName whole, and leaves the

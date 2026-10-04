@@ -413,12 +413,19 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                  xsl:perform-sort or xsl:for-each-group",
             )
             .with_location(loc)),
-            "number" | "for-each-group" | "analyze-string" | "result-document" | "key" => {
+            // §16.3.1: xsl:key is a declaration ("Category: declaration"); the
+            // element table rejects one anywhere else before compilation
+            // starts, so this arm is a safety net.
+            "key" => Err(XsltError::new(
+                codes::XTSE0010,
+                "xsl:key is a declaration and is only allowed as a top-level element",
+            )
+            .with_location(loc)),
+            "number" | "for-each-group" | "analyze-string" | "result-document" => {
                 Ok(InstructionKind::NotImplemented {
                     feature: format!("xsl:{local}"),
                     // The owner of each, per the roadmap's §4.
                     milestone: match local.as_str() {
-                        "key" => "M2f",
                         "for-each-group" => "M2g",
                         "analyze-string" => "M2h",
                         "result-document" => "M3b",

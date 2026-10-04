@@ -7,7 +7,11 @@
 //! scanner below, which rejects everything outside §5.5.2's grammar and hands
 //! each predicate back to the compiler as its own expression — the predicates
 //! must be separately compiled because §5.5.3 evaluates them against a focus
-//! this crate builds itself.
+//! this crate builds itself. XPath comments are removed before the scanner
+//! sees the text: they may stand wherever XPath allows whitespace, inside a
+//! predicate or anywhere else ([`parse`]).
+
+use std::borrow::Cow;
 
 use crate::error::{codes, XsltError};
 use crate::model::ExprId;
@@ -40,6 +44,30 @@ pub enum Anchor {
     Root,
     /// `//…`: the leftmost step is a descendant of the root of the tree.
     RootDescendant,
+    /// `id(…)` or `key(…, …)`, optionally followed by `/` or `//` and a
+    /// RelativePathPattern (§5.5.2's `IdKeyPattern`).
+    IdKey(IdKeyAnchor),
+}
+
+/// The `IdKeyPattern` a path pattern starts with (§5.5.2):
+///
+/// > `IdKeyPattern ::= 'id' '(' IdValue ')' | 'key' '(' StringLiteral ',' KeyValue ')'`
+/// > `IdValue ::= StringLiteral | VarRef`
+/// > `KeyValue ::= Literal | VarRef`
+///
+/// The call is compiled as the XPath expression it is. §5.5.3 defines the
+/// pattern by evaluating `root(.)//(EE)` with a singleton focus on the
+/// candidate, and every node of `root(.)//…` is in the candidate's tree, so the
+/// call is evaluated with the candidate itself as the context node: `id()` and
+/// `key()` with no node argument search the document containing the context
+/// node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdKeyAnchor {
+    /// The `id(…)` / `key(…)` call.
+    pub call: ExprId,
+    /// How the leftmost step connects to the nodes the call selects; unused
+    /// when the pattern has no steps (it is the call alone).
+    pub connector: Connector,
 }
 
 /// How a step connects to the step on its left.
@@ -226,6 +254,11 @@ impl PathPattern {
     /// > priority is 0. … If the pattern has the form of a QName preceded by a
     /// > PatternAxis … Otherwise, the priority is 0.5.
     fn compute_priority(&self) -> f64 {
+        if let Anchor::IdKey(_) = self.anchor {
+            // An IdKeyPattern, with or without steps, is none of the forms
+            // §6.4 lists: "Otherwise, the priority is 0.5."
+            return 0.5;
+        }
         if self.steps.is_empty() {
             // The pattern `/`.
             return -0.5;
@@ -288,9 +321,19 @@ pub trait PatternSink {
 ///
 /// > \[ERR XTSE0340\] Where an attribute is defined to contain a pattern, it
 /// > is a static error if the pattern does not match the production Pattern.
+///
+/// §5.5.2: "Every pattern is a legal XPath expression", and the constructs
+/// the Pattern grammar borrows "are part of the XPath expression language, and
+/// are defined in \[XPath 2.0\]" — so a pattern is read with XPath's lexical
+/// rules, comments included. XPath 2.0 §2.6: "Comments are lexical constructs
+/// only, and do not affect expression processing. … Comments may be nested. A
+/// comment may be used anywhere ignorable whitespace is allowed". Each comment
+/// is therefore replaced by one space before the structure is read
+/// (`without_comments`).
 pub fn parse(source: &str, sink: &mut dyn PatternSink) -> Result<Pattern, XsltError> {
+    let text = without_comments(source)?;
     let mut alternatives = Vec::new();
-    for alt in split_top_level(source, '|') {
+    for alt in split_top_level(&text, '|') {
         let alt = whitespace::trim(&alt);
         if alt.is_empty() {
             return Err(bad_pattern(source, "an alternative is empty"));
@@ -309,6 +352,73 @@ pub fn parse(source: &str, sink: &mut dyn PatternSink) -> Result<Pattern, XsltEr
     })
 }
 
+/// `source` with every XPath comment replaced by a single space.
+///
+/// XPath 2.0 §2.6: "`Comment ::= "(:" (CommentContents | Comment)* ":)"`" and
+/// A.1.3 (grammar-note: comments): "A comment can contain nested comments, as
+/// long as all "(:" and ":)" patterns are balanced, no matter where they occur
+/// within the outer comment." A space, because A.2.4.1 says "Comments may also
+/// act as "whitespace" to prevent two adjacent terminals from being recognized
+/// as one": `a(: c :)b` is two names, not `ab`. Where whitespace is not
+/// allowed — inside a QName (A.1.2: "comments are not permissible on either
+/// side of the colon"), a wildcard, a numeric literal — the space is just as
+/// much an error as the comment.
+///
+/// A string literal is not scanned for comments: in `[@v = '(: x :)']` the
+/// characters belong to the literal, and a quote inside a comment opens no
+/// literal. A comment that is not closed is a syntax error, and the pattern
+/// does not match the production Pattern (XTSE0340).
+fn without_comments(source: &str) -> Result<Cow<'_, str>, XsltError> {
+    if !source.contains("(:") {
+        return Ok(Cow::Borrowed(source));
+    }
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        match quote {
+            // `StringLiteral`: a doubled delimiter closes and reopens it, which
+            // leaves the same characters in the output.
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+                out.push(c);
+            }
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                out.push(c);
+            }
+            None if c == '(' && chars.peek() == Some(&':') => {
+                chars.next();
+                let mut depth = 1usize;
+                while depth > 0 {
+                    match chars.next() {
+                        Some('(') if chars.peek() == Some(&':') => {
+                            chars.next();
+                            depth += 1;
+                        }
+                        Some(':') if chars.peek() == Some(&')') => {
+                            chars.next();
+                            depth -= 1;
+                        }
+                        Some(_) => {}
+                        None => {
+                            return Err(bad_pattern(
+                                source,
+                                "an XPath comment opened with `(:` is not closed with `:)`",
+                            ))
+                        }
+                    }
+                }
+                out.push(' ');
+            }
+            None => out.push(c),
+        }
+    }
+    Ok(Cow::Owned(out))
+}
+
 fn bad_pattern(source: &str, why: impl std::fmt::Display) -> XsltError {
     XsltError::new(
         codes::XTSE0340,
@@ -321,11 +431,8 @@ fn parse_alternative(
     source: &str,
     sink: &mut dyn PatternSink,
 ) -> Result<PathPattern, XsltError> {
-    if alt.starts_with("id(") || alt.starts_with("key(") {
-        return Err(XsltError::not_implemented(
-            format!("the id()/key() pattern {alt:?}"),
-            "M2f",
-        ));
+    if let Some((call, rest)) = split_id_key_call(alt, source)? {
+        return parse_id_key(call, rest, source, sink);
     }
 
     let (anchor, rest) = if let Some(rest) = alt.strip_prefix("//") {
@@ -378,6 +485,183 @@ fn parse_alternative(
         steps,
         priority: 0.0,
     }))
+}
+
+/// If `alt` starts with an `id(…)` or `key(…)` call, splits it into the call
+/// (up to its closing parenthesis) and what follows.
+///
+/// XPath's own rule decides what a function call is: a name followed,
+/// possibly after whitespace, by `(`. So `id/x` and `key` are path patterns
+/// over elements named `id` and `key`, and `idx(…)` is no IdKeyPattern at all.
+fn split_id_key_call<'s>(
+    alt: &'s str,
+    source: &str,
+) -> Result<Option<(&'s str, &'s str)>, XsltError> {
+    let name_end = alt
+        .find(|c: char| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')))
+        .unwrap_or(alt.len());
+    if !matches!(&alt[..name_end], "id" | "key") {
+        return Ok(None);
+    }
+    let after_name = whitespace::trim_start(&alt[name_end..]);
+    if !after_name.starts_with('(') {
+        return Ok(None);
+    }
+    let open = alt.len() - after_name.len();
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    for (i, ch) in alt[open..].char_indices() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"') | (None, '\'') => quote = Some(ch),
+            (None, '(') => depth += 1,
+            (None, ')') => {
+                depth -= 1;
+                if depth == 0 {
+                    let end = open + i + 1;
+                    return Ok(Some((&alt[..end], &alt[end..])));
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(bad_pattern(source, "unbalanced parentheses"))
+}
+
+/// Parses an alternative that starts with an `IdKeyPattern` (§5.5.2):
+///
+/// > `PathPattern ::= … | IdKeyPattern (('/' | '//') RelativePathPattern)?`
+///
+/// The arguments are restricted: "provided that the value to be matched is
+/// supplied as either a literal or a reference to a variable or parameter, and
+/// the key name (in the case of the key function) is supplied as a string
+/// literal."
+fn parse_id_key(
+    call: &str,
+    rest: &str,
+    source: &str,
+    sink: &mut dyn PatternSink,
+) -> Result<PathPattern, XsltError> {
+    let open = call.find('(').expect("split_id_key_call found one");
+    let function = whitespace::trim(&call[..open]);
+    let args: Vec<String> = split_top_level(&call[open + 1..call.len() - 1], ',')
+        .iter()
+        .map(|arg| whitespace::trim(arg).to_string())
+        .collect();
+    let valid = match (function, args.as_slice()) {
+        // `IdValue ::= StringLiteral | VarRef`
+        ("id", [value]) => is_string_literal(value) || is_var_ref(value),
+        // `'key' '(' StringLiteral ',' KeyValue ')'`, `KeyValue ::= Literal | VarRef`
+        ("key", [name, value]) => {
+            is_string_literal(name)
+                && (is_string_literal(value) || is_numeric_literal(value) || is_var_ref(value))
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(bad_pattern(
+            source,
+            format!(
+                "{call:?} is not an IdKeyPattern: id() takes one string literal or variable \
+                 reference, key() a string literal and a literal or variable reference"
+            ),
+        ));
+    }
+    let call = sink.compile_predicate(call)?;
+
+    let rest = whitespace::trim_start(rest);
+    if rest.is_empty() {
+        return Ok(finish(PathPattern {
+            anchor: Anchor::IdKey(IdKeyAnchor {
+                call,
+                connector: Connector::Parent,
+            }),
+            steps: Vec::new(),
+            priority: 0.0,
+        }));
+    }
+    let (connector, relative) = if let Some(relative) = rest.strip_prefix("//") {
+        (Connector::Ancestor, relative)
+    } else if let Some(relative) = rest.strip_prefix('/') {
+        (Connector::Parent, relative)
+    } else {
+        return Err(bad_pattern(
+            source,
+            "an IdKeyPattern can only be followed by `/` or `//` and a relative path pattern",
+        ));
+    };
+    let relative = whitespace::trim_start(relative);
+    if relative.is_empty() {
+        return Err(bad_pattern(source, "a path pattern must not end with `/`"));
+    }
+    let pieces = split_steps(relative, source)?;
+    let mut steps: Vec<PatternStep> = Vec::with_capacity(pieces.len());
+    for (index, (step_connector, text)) in pieces.iter().enumerate() {
+        let step_connector = if index == 0 {
+            Connector::Parent
+        } else {
+            *step_connector
+        };
+        // The leftmost step follows `/` or `//`, so it is not the first step of
+        // a RelativePathPattern standing alone and §5.5.3 adjusts nothing.
+        steps.push(parse_step(text, step_connector, false, source, sink)?);
+    }
+    steps.reverse();
+    Ok(finish(PathPattern {
+        anchor: Anchor::IdKey(IdKeyAnchor { call, connector }),
+        steps,
+        priority: 0.0,
+    }))
+}
+
+/// XPath's `StringLiteral`: `'…'` or `"…"`, the delimiter doubled inside.
+fn is_string_literal(text: &str) -> bool {
+    let Some(quote) = text.chars().next().filter(|c| matches!(c, '"' | '\'')) else {
+        return false;
+    };
+    if text.len() < 2 || !text.ends_with(quote) {
+        return false;
+    }
+    // Inside, every delimiter must come as a doubled pair.
+    let inner = &text[1..text.len() - 1];
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == quote && chars.next() != Some(quote) {
+            return false;
+        }
+    }
+    true
+}
+
+/// XPath's `NumericLiteral`: `IntegerLiteral | DecimalLiteral | DoubleLiteral`.
+fn is_numeric_literal(text: &str) -> bool {
+    let (mantissa, exponent) = match text.find(['e', 'E']) {
+        Some(at) => (&text[..at], Some(&text[at + 1..])),
+        None => (text, None),
+    };
+    let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    let mantissa_ok = (!int.is_empty() || !frac.is_empty())
+        && digits(int)
+        && digits(frac)
+        && (mantissa.contains('.') || !int.is_empty());
+    let exponent_ok = exponent.is_none_or(|e| {
+        let e = e.strip_prefix(['+', '-']).unwrap_or(e);
+        !e.is_empty() && digits(e)
+    });
+    mantissa_ok && exponent_ok
+}
+
+/// XPath's `VarRef`: `$` followed by a QName (whitespace is allowed after the
+/// `$`).
+fn is_var_ref(text: &str) -> bool {
+    let Some(name) = text.strip_prefix('$') else {
+        return false;
+    };
+    let name = whitespace::trim_start(name);
+    let (prefix, local) = split_qname(name);
+    is_ncname(local) && (prefix.is_empty() || is_ncname(prefix))
 }
 
 fn finish(mut p: PathPattern) -> PathPattern {
@@ -442,10 +726,10 @@ fn parse_step(
     sink: &mut dyn PatternSink,
 ) -> Result<PatternStep, XsltError> {
     // PatternAxis, if one is written.
-    let (explicit_axis, rest) = if let Some(rest) = text.strip_prefix("child::") {
-        (Some(PatternAxis::Child), whitespace::trim_start(rest))
-    } else if let Some(rest) = text.strip_prefix("attribute::") {
-        (Some(PatternAxis::Attribute), whitespace::trim_start(rest))
+    let (explicit_axis, rest) = if let Some(rest) = strip_axis(text, "child") {
+        (Some(PatternAxis::Child), rest)
+    } else if let Some(rest) = strip_axis(text, "attribute") {
+        (Some(PatternAxis::Attribute), rest)
     } else if let Some(rest) = text.strip_prefix('@') {
         (Some(PatternAxis::Attribute), whitespace::trim_start(rest))
     } else {
@@ -490,6 +774,19 @@ fn parse_step(
         predicates,
         connector,
     })
+}
+
+/// What follows `axis::` at the start of `text`, if the step starts with that
+/// axis.
+///
+/// `PatternAxis ::= ('child' '::' | 'attribute' '::' | '@')`: the axis name
+/// and `::` are two terminals, and XPath 2.0 A.2.4.1 says "Whitespace is
+/// allowed between any two terminals" — so `child :: a` is `child::a`, and so
+/// is `child (: c :) :: a` once its comment is a space. `child`, `child/x` and
+/// `childish::x` do not start with the axis.
+fn strip_axis<'s>(text: &'s str, axis: &str) -> Option<&'s str> {
+    let rest = whitespace::trim_start(text.strip_prefix(axis)?);
+    Some(whitespace::trim_start(rest.strip_prefix("::")?))
 }
 
 /// Whether a node test is an `AttributeTest` or a `SchemaAttributeTest` —
@@ -904,14 +1201,158 @@ mod tests {
         }
     }
 
+    /// §5.5.2: `IdKeyPattern (('/' | '//') RelativePathPattern)?`, with the
+    /// call handed to the compiler as an expression and a priority of 0.5
+    /// (§6.4 "Otherwise").
     #[test]
-    fn id_and_key_anchors_are_not_implemented_yet() {
+    fn id_and_key_anchors() {
+        let (p, exprs) = parse_ok("id('x')");
+        let alt = &p.alternatives[0];
+        assert!(matches!(alt.anchor, Anchor::IdKey(_)));
+        assert!(alt.steps.is_empty());
+        assert_eq!(alt.priority, 0.5);
+        assert_eq!(exprs, vec!["id('x')".to_string()]);
+
+        let (p, exprs) = parse_ok("key('k', $v)//a/b[1] | id ( \"y\" )/@c");
+        assert_eq!(exprs[0], "key('k', $v)");
+        let alt = &p.alternatives[0];
+        let Anchor::IdKey(anchor) = alt.anchor else {
+            panic!("an IdKey anchor")
+        };
+        assert_eq!(anchor.connector, Connector::Ancestor);
+        assert_eq!(alt.steps.len(), 2);
+        assert_eq!(alt.steps[1].axis, PatternAxis::Child);
+        let Anchor::IdKey(anchor) = p.alternatives[1].anchor else {
+            panic!("an IdKey anchor")
+        };
+        assert_eq!(anchor.connector, Connector::Parent);
+        assert_eq!(p.alternatives[1].steps[0].axis, PatternAxis::Attribute);
+
+        // Elements named `id` and `key` are ordinary name tests.
+        let (p, _) = parse_ok("id/key");
+        assert_eq!(p.alternatives[0].anchor, Anchor::None);
+
         let mut sink = Sink(Vec::new());
-        assert!(parse("id('x')", &mut sink)
-            .unwrap_err()
-            .is_not_implemented());
-        assert!(parse("key('k', 'v')", &mut sink)
-            .unwrap_err()
-            .is_not_implemented());
+        for bad in [
+            "id('a', $x)",
+            "id(1)",
+            "id(@a)",
+            "key('k', 1+1)",
+            "key($k, 'v')",
+            "key('k')",
+            "key('k', 'v')[1]",
+            "key('k', 'v')x",
+            "key('k', 'v')/",
+        ] {
+            let e = parse(bad, &mut sink).unwrap_err();
+            assert_eq!(e.code, codes::XTSE0340, "{bad:?} should be XTSE0340");
+        }
+        for good in [
+            "key('k', 5)",
+            "key('k', 1.5e3)",
+            "key('k', .5)",
+            "key('k', \"it''s\")",
+        ] {
+            assert!(parse(good, &mut sink).is_ok(), "{good:?}");
+        }
+    }
+
+    /// XPath 2.0 §2.6: "A comment may be used anywhere ignorable whitespace is
+    /// allowed" and "Comments may be nested"; A.1.3: "A comment can contain
+    /// nested comments, as long as all "(:" and ":)" patterns are balanced, no
+    /// matter where they occur within the outer comment." A pattern is read with
+    /// XPath's lexical rules (§5.5.2 "Every pattern is a legal XPath
+    /// expression").
+    #[test]
+    fn xpath_comments_are_whitespace() {
+        let shape = |source: &str| {
+            let (p, exprs) = parse_ok(source);
+            let alternatives: Vec<String> = p
+                .alternatives
+                .iter()
+                .map(|a| format!("{:?}/{}/{}", a.anchor, a.steps.len(), a.priority))
+                .collect();
+            (alternatives, exprs)
+        };
+        for (with_comments, plain) in [
+            ("key('k', 'v') (: c :)", "key('k', 'v')"),
+            ("key( (: c :) 'k', 'v')", "key('k', 'v')"),
+            ("key('k' (: c :), (: d :) $v (: e :))", "key('k', $v)"),
+            ("key (: c :) ('k', 'v')", "key('k', 'v')"),
+            ("key('k', $(: c :)v)", "key('k', $v)"),
+            ("id('a') (: c :) / b", "id('a')/b"),
+            ("id('a')(: c :)//(: d :)b", "id('a')//b"),
+            ("(: c :) a", "a"),
+            ("a (: c :)", "a"),
+            ("a(: c :)", "a"),
+            ("a (: c :) [1] (: d :)", "a[1]"),
+            ("a (: x (: nested :) y :) / b", "a/b"),
+            ("a (: | :) | b", "a | b"),
+            ("a (: it's [ :) / b", "a/b"),
+            ("a/(: c :)@(: d :)b", "a/@b"),
+            ("child (: c :) :: a / attribute (: d :) :: b", "a/@b"),
+            ("node (: c :) ( (: d :) )", "node()"),
+            (
+                "processing-instruction( (: c :) 'x' )",
+                "processing-instruction('x')",
+            ),
+            (
+                "document-node( element( a ) (: c :) )",
+                "document-node(element(a))",
+            ),
+            ("/ (: c :)", "/"),
+            ("(: c :) / (: d :) a", "/a"),
+            ("(: c :) // (: d :) a", "//a"),
+        ] {
+            let (a, a_exprs) = shape(with_comments);
+            let (b, b_exprs) = shape(plain);
+            assert_eq!(a, b, "{with_comments:?} reads as {plain:?}");
+            assert_eq!(a_exprs.len(), b_exprs.len(), "{with_comments:?}");
+        }
+        // A predicate's comment reaches the predicate's compiler as a space.
+        let (_, exprs) = parse_ok("a[(: c :)1 (: d :)]");
+        assert_eq!(exprs, vec![" 1  ".to_string()]);
+        // Inside a string literal `(:` and `:)` are characters of the literal.
+        let (_, exprs) = parse_ok("a[@v = '(: x :)'][. = \"it''s (:\"]");
+        assert_eq!(
+            exprs,
+            vec!["@v = '(: x :)'".to_string(), ". = \"it''s (:\"".to_string()]
+        );
+        let (_, exprs) = parse_ok("key('k', '(: v :)')");
+        assert_eq!(exprs, vec!["key('k', '(: v :)')".to_string()]);
+        // Whitespace between an axis name and `::` (A.2.4.1 "Whitespace is
+        // allowed between any two terminals"); a name that merely starts with
+        // an axis name is a name.
+        let (p, _) = parse_ok("child :: a/attribute ::b");
+        assert_eq!(p.alternatives[0].steps[0].axis, PatternAxis::Attribute);
+        assert_eq!(p.alternatives[0].steps[1].axis, PatternAxis::Child);
+        let (p, _) = parse_ok("children/attributes");
+        assert_eq!(
+            p.alternatives[0].steps[1].test,
+            NodeTest::Name(QName::local("children"))
+        );
+
+        let mut sink = Sink(Vec::new());
+        for bad in [
+            // Not closed.
+            "a (: c",
+            "a (: x (: nested :) y",
+            "a (:)",
+            // A.1.3: "(: "this is just a string :)" :) will cause a syntax
+            // error" — the comment ends inside what looks like a literal.
+            "a (: \"x :)\" :)",
+            // Nothing but a comment.
+            "(: c :)",
+            "a | (: c :)",
+            // A.1.2: "comments are not permissible on either side of the
+            // colon" of a QName; nor inside a wildcard or a name.
+            "p:(: c :)a",
+            "p(: c :):a",
+            "*:(: c :)a",
+            "a(: c :)b",
+        ] {
+            let e = parse(bad, &mut sink).unwrap_err();
+            assert_eq!(e.code, codes::XTSE0340, "{bad:?} should be XTSE0340: {e}");
+        }
     }
 }

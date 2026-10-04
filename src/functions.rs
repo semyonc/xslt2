@@ -197,6 +197,22 @@ impl XsltFunctions {
     /// transitive — because `xsl:sort` hands it to the standard library's sort,
     /// which may panic on a comparison function that is not one.
     ///
+    /// # Implement `sort_key` — keys and `=` need it to be fast
+    ///
+    /// [`Collation::sort_key`] is optional, but without it every lookup that
+    /// hashes strings under the collation degrades to comparing pairs:
+    ///
+    /// * an `xsl:key` whose (effective) collation is this one keeps all its
+    ///   string values in **one bucket**, so each `key()` call compares the
+    ///   sought value with every string value of the index — N lookups over an
+    ///   N-node key cost O(N²) comparisons (the results stay correct);
+    /// * a general comparison `$a = $b` over large sequences under this
+    ///   collation is evaluated pair by pair instead of through a hash index.
+    ///
+    /// A sort key is any byte string whose equality and order agree with
+    /// `compare` (`sort_key(a).cmp(&sort_key(b)) == compare(a, b)`); the
+    /// example below has one.
+    ///
     /// ```
     /// use std::cmp::Ordering;
     /// use std::rc::Rc;
@@ -209,6 +225,20 @@ impl XsltFunctions {
     ///     fn compare(&self, a: &str, b: &str) -> Ordering {
     ///         a.chars().count().cmp(&b.chars().count()).then_with(|| a.cmp(b))
     ///     }
+    ///
+    ///     /// The length as a fixed-width big-endian number, then the UTF-8
+    ///     /// bytes (whose order is codepoint order): byte order is `compare`'s
+    ///     /// order, and equal keys are equal strings.
+    ///     fn sort_key(&self, s: &str) -> Option<Vec<u8>> {
+    ///         let mut key = (s.chars().count() as u64).to_be_bytes().to_vec();
+    ///         key.extend_from_slice(s.as_bytes());
+    ///         Some(key)
+    ///     }
+    /// }
+    ///
+    /// let by_length = ByLength;
+    /// for (a, b) in [("b", "aa"), ("ab", "aa"), ("ab", "ab")] {
+    ///     assert_eq!(by_length.sort_key(a).cmp(&by_length.sort_key(b)), by_length.compare(a, b));
     /// }
     ///
     /// let mut functions = XsltFunctions::new();
@@ -1147,7 +1177,8 @@ pub fn expand_available_name<'n>(
 }
 
 /// Expand the argument of `which` — `system-property`, `function-available`,
-/// `type-available` or `element-available` — by that function's rule for an
+/// `type-available`, `element-available` or the first argument of `key` — by
+/// that function's rule for an
 /// unprefixed name, raising that function's error when it cannot be expanded.
 ///
 /// Each of the four gives the same two failures one code of its own:
@@ -1175,6 +1206,13 @@ pub fn expand_name_argument<'n>(
         XsltFn::FunctionAvailable => (Unprefixed::FunctionNamespace, codes::XTDE1400),
         XsltFn::TypeAvailable => (Unprefixed::TypeNamespace, codes::XTDE1428),
         XsltFn::ElementAvailable => (Unprefixed::DefaultElementNamespace, codes::XTDE1440),
+        // §16.3.2: "The value of the argument must be a lexical QName, which is
+        // expanded as described in 5.1 Qualified Names" — §5.1's general rule,
+        // no namespace for an unprefixed name — and "[ERR XTDE1260] It is a
+        // non-recoverable dynamic error if the value is not a valid QName, or if
+        // there is no namespace declaration in scope for the prefix of the
+        // QName".
+        XsltFn::Key => (Unprefixed::NoNamespace, codes::XTDE1260),
         other => {
             return Err(XsltError::internal(format!(
                 "{}() does not take a name argument",

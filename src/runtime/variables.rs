@@ -216,6 +216,12 @@ impl<'a, 't> Transformation<'a, 't> {
             }
             GlobalSlot::Unevaluated => {}
         }
+        // Q33: a global's value may read another global — or call `key()`,
+        // whose build may read a third — with no template invocation or
+        // function call in between, so a long enough chain would overflow the
+        // stack. After the circularity test, so that XTDE0640 stays XTDE0640;
+        // before the marker, which the depth error must not leave behind.
+        self.check_stack()?;
         self.globals.borrow_mut()[index] = GlobalSlot::Evaluating;
         let global = &self.sheet.globals()[index];
         let result = self.eval_global(global);

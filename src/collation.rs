@@ -15,6 +15,9 @@
 //!   ([`HTML_ASCII_CASE_INSENSITIVE_URI`], [`HtmlAsciiCaseInsensitive`]);
 //! * every collation a host registers with
 //!   [`XsltFunctions::register_collation`](crate::XsltFunctions::register_collation).
+//!   A host collation should implement [`Collation::sort_key`]: an `xsl:key`
+//!   under a collation without one keeps all its strings in a single bucket,
+//!   so each `key()` lookup compares pairs (see `register_collation`).
 //!
 //! [`CollationRegistry`] holds them and implements the engine's
 //! [`CollationResolver`]; the compiler hands it, together with the

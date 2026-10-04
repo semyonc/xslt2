@@ -105,10 +105,11 @@ fn a_not_implemented_function_in_a_pattern_is_never_recovered_from() {
 
 /// The hole is older and wider than the `format-*` stubs: **any** missing
 /// feature reached inside a pattern predicate was swallowed the same way.
-/// `key()` has been an `XSLT2-NOTIMPL` stub since M1.
+/// (`key()` was an `XSLT2-NOTIMPL` stub from M1 until M2f implemented it, and
+/// was the third case here.)
 #[test]
 fn any_missing_feature_in_a_pattern_predicate_propagates() {
-    for predicate in ["key('k', @n) = 1", "current-group() = 1", "regex-group(1)"] {
+    for predicate in ["current-group() = 1", "regex-group(1)"] {
         for strict in [false, true] {
             let error = match run(&two_rules(predicate), ONE_ITEM, strict) {
                 Err(e) => e,
@@ -176,7 +177,7 @@ fn an_undefined_operator_is_a_type_error_not_an_internal_failure() {
 /// The classification rule itself, which is what every site shares.
 #[test]
 fn the_recoverability_rule_is_one_predicate() {
-    let notimpl = XsltError::not_implemented("key()", "M2f");
+    let notimpl = XsltError::not_implemented("format-number()", "M3d");
     let internal = XsltError::internal("a broken invariant");
     for e in [&notimpl, &internal] {
         assert!(e.is_processor_failure());

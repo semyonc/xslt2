@@ -19,6 +19,7 @@ use crate::functions::{expand_name_argument, NameScope, XsltFn};
 use crate::names::XSLT_NS;
 use crate::receiver::Nav;
 use crate::resolver;
+use crate::stylesheet::CompatMode;
 
 /// Runs the XSLT function library over the running transformation.
 pub struct XsltEvaluator<'r, 'a, 't> {
@@ -297,7 +298,7 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                 self.require_document_context(ctx, codes::XTDE1380)?;
                 Ok(XPathValue::string(String::new()))
             }
-            XsltFn::Key => Err(XsltError::not_implemented("key()", "M2f")),
+            XsltFn::Key => self.key(ctx, args),
             XsltFn::CurrentGroup | XsltFn::CurrentGroupingKey => Err(XsltError::not_implemented(
                 format!("{}()", which.name()),
                 "M2g",
@@ -383,6 +384,158 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                 ", and the recovery action (ignoring it) failed too: {e}"
             ))),
         }
+    }
+
+    /// `key($key-name, $key-value)` and `key($key-name, $key-value, $top)`
+    /// (§16.3.2).
+    ///
+    /// > \[ERR XTDE1270\] It is a non-recoverable dynamic error to call the
+    /// > key function with two arguments if there is no context node, or if the
+    /// > root of the tree containing the context node is not a document node;
+    /// > or to call the function with three arguments if the root of the tree
+    /// > containing the node supplied in the third argument is not a document
+    /// > node.
+    ///
+    /// "There is no context node" includes a call where the focus is absent —
+    /// the body of a stylesheet function (§10.3) — and one whose context item is
+    /// an atomic value; both are XTDE1270, the code §16.3.2 gives the
+    /// condition, rather than the generic XPDY0002 / XPTY0004.
+    ///
+    /// The arguments are checked against §16.3.2's signatures, `key($key-name
+    /// as xs:string, $key-value as xs:anyAtomicType*) as node()*` and
+    /// `key($key-name as xs:string, $key-value as xs:anyAtomicType*, $top as
+    /// node()) as node()*`, here: the engine hands this library its arguments
+    /// as evaluated, without applying the declared types.
+    fn key(
+        &self,
+        ctx: &DynamicContext<'_, Nav<'t>>,
+        args: Vec<XPathValue<Nav<'t>>>,
+    ) -> Result<XPathValue<Nav<'t>>, XsltError> {
+        let mut args = args.into_iter();
+        let name = self.key_name_argument(args.next().unwrap_or_else(XPathValue::empty))?;
+        // > [ERR XTDE1260] It is a non-recoverable dynamic error if the value
+        // > is not a valid QName, or if there is no namespace declaration in
+        // > scope for the prefix of the QName, or if the name obtained by
+        // > expanding the QName is not the same as the expanded name of any
+        // > xsl:key declaration in the stylesheet.
+        let (uri, local) = expand_name_argument(&self.name_scope(), XsltFn::Key, &name)?;
+        let qname = crate::names::QName::new(uri.as_str(), local);
+        let key = self.run.sheet.key_named(&qname).ok_or_else(|| {
+            XsltError::new(
+                codes::XTDE1260,
+                format!("key(): the stylesheet declares no key named {qname}"),
+            )
+        })?;
+        let value = args.next().unwrap_or_else(XPathValue::empty);
+        // "The third argument is used to identify the selected subtree. … If
+        // the argument is omitted, the selected subtree is the document
+        // containing the context node."
+        let (top, which) = match args.next() {
+            Some(top) => (
+                Some(self.key_top_argument(top)?),
+                "the node supplied as the third argument",
+            ),
+            None => (None, "the context node"),
+        };
+        let start = match &top {
+            Some(nav) => nav.clone(),
+            None => match self.context_item(ctx) {
+                Some(XmlItem::Node(nav)) => nav,
+                _ => {
+                    return Err(XsltError::new(
+                        codes::XTDE1270,
+                        "key() with two arguments was called where there is no context node",
+                    ))
+                }
+            },
+        };
+        let mut root = start;
+        root.move_to_root();
+        if root.node_type() != DomNodeType::Root {
+            return Err(XsltError::new(
+                codes::XTDE1270,
+                format!("key(): the root of the tree containing {which} is not a document node"),
+            ));
+        }
+        // "The set of requested key values is formed by atomizing the supplied
+        // value of the argument".
+        let sought = xsd_schema::xpath::functions::atomize_sequence(value)
+            .map_err(|e| self.run.xpath_error(e))?;
+        let nodes = self.run.key_lookup(key, sought, &root, top.as_ref())?;
+        Ok(XPathValue::from_sequence(
+            nodes.into_iter().map(XmlItem::Node).collect(),
+        ))
+    }
+
+    /// Whether the expression being evaluated has backwards-compatible
+    /// behaviour, i.e. XPath 1.0 compatibility mode (§3.8).
+    fn xpath1_compatible(&self) -> bool {
+        self.sc.compat == CompatMode::BackwardsCompatible
+    }
+
+    /// `$key-name as xs:string`, after XPath 2.0 §3.1.5's function conversion
+    /// rules: atomization; "Each item in the atomic sequence that is of type
+    /// xs:untypedAtomic is cast to the expected atomic type"; "For each item of
+    /// type xs:anyURI in the atomic sequence that can be promoted to the
+    /// expected atomic type using URI promotion … the promotion is done"; then
+    /// "If, after the above conversions, the resulting value does not match
+    /// the expected type according to the rules for SequenceType Matching, a
+    /// type error is raised \[err:XPTY0004\]" — so exactly one value, of
+    /// `xs:string` or a type derived from it.
+    ///
+    /// With XPath 1.0 compatibility mode, §3.1.5 first applies: "If the
+    /// expected type calls for a single item or optional single item …, then
+    /// the value V is effectively replaced by `V[1]`", and "If the expected type
+    /// is xs:string or xs:string?, then the value V is effectively replaced by
+    /// fn:string(V)."
+    fn key_name_argument(&self, value: XPathValue<Nav<'t>>) -> Result<String, XsltError> {
+        if self.xpath1_compatible() {
+            return Ok(match value.first() {
+                None => String::new(),
+                Some(XmlItem::Atomic(v)) => v.to_string_value(),
+                Some(XmlItem::Node(n)) => n.value(),
+            });
+        }
+        // The usual call, a string literal: nothing to atomize.
+        if let XPathValue::Item(XmlItem::Atomic(atom)) = &value {
+            if converts_to_string(atom) {
+                return Ok(atom.to_string_value());
+            }
+        }
+        let atoms = xsd_schema::xpath::functions::atomize_sequence(value)
+            .map_err(|e| self.run.xpath_error(e))?;
+        match atoms.as_slice() {
+            [atom] if converts_to_string(atom) => Ok(atom.to_string_value()),
+            _ => Err(XsltError::new(
+                "XPTY0004",
+                format!(
+                    "the first argument of key() ($key-name as xs:string) must be one string, \
+                     not {}",
+                    describe_atoms(&atoms)
+                ),
+            )),
+        }
+    }
+
+    /// `$top as node()`: exactly one node — otherwise XPTY0004 (XPath 2.0
+    /// §3.1.5). With XPath 1.0 compatibility mode the value is first replaced
+    /// by its first item ("V is effectively replaced by `V[1]`").
+    fn key_top_argument(&self, value: XPathValue<Nav<'t>>) -> Result<Nav<'t>, XsltError> {
+        let items = if self.xpath1_compatible() {
+            value.first().cloned().into_iter().collect()
+        } else {
+            value.into_vec()
+        };
+        let found = match items.as_slice() {
+            [XmlItem::Node(nav)] => return Ok(nav.clone()),
+            [] => "an empty sequence".to_string(),
+            [XmlItem::Atomic(v)] => format!("a value of type xs:{}", type_name(v)),
+            several => format!("a sequence of {} items", several.len()),
+        };
+        Err(XsltError::new(
+            "XPTY0004",
+            format!("the third argument of key() ($top as node()) must be one node, not {found}"),
+        ))
     }
 
     /// The precondition `unparsed-entity-uri` and `unparsed-entity-public-id`
@@ -505,6 +658,36 @@ fn single_string<N: DomNavigator>(value: Option<&XPathValue<N>>) -> Option<Strin
     match value?.first()? {
         XmlItem::Atomic(v) => Some(v.to_string_value()),
         XmlItem::Node(n) => Some(n.value()),
+    }
+}
+
+/// Whether an atomized argument value matches `xs:string` after the
+/// conversions of XPath 2.0 §3.1.5: a string (or a type derived from it), an
+/// `xs:untypedAtomic` (cast to `xs:string`), or an `xs:anyURI` (promoted to
+/// `xs:string`, §B.1).
+fn converts_to_string(value: &XmlValue) -> bool {
+    let value = match &value.value {
+        XmlValueKind::Union(inner) => inner,
+        _ => value,
+    };
+    value.type_code.is_string_derived()
+        || matches!(
+            value.type_code,
+            XmlTypeCode::UntypedAtomic | XmlTypeCode::AnyUri
+        )
+}
+
+/// The `xs:` local name of a value's type, for a message.
+fn type_name(value: &XmlValue) -> &'static str {
+    value.type_code.local_name().unwrap_or("anyAtomicType")
+}
+
+/// An atomized argument, described for a message.
+fn describe_atoms(atoms: &[XmlValue]) -> String {
+    match atoms {
+        [] => "an empty sequence".to_string(),
+        [atom] => format!("a value of type xs:{}", type_name(atom)),
+        several => format!("a sequence of {} values", several.len()),
     }
 }
 

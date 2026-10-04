@@ -323,6 +323,12 @@ impl<'a, 't> Transformation<'a, 't> {
     /// The stack guard (Q33): fails with the depth error once the run has used
     /// more stack, measured from where it started, than its limit allows.
     ///
+    /// Checked by [`Self::enter`] and wherever else the run nests on the host
+    /// stack with no template invocation or function call in between: the
+    /// built-in template rules, a key index build (`runtime/keys.rs`), the
+    /// evaluation of a global variable, the expansion of an attribute set
+    /// that uses another.
+    ///
     /// A count of nested calls cannot stand in for this, because the stack one
     /// call uses depends on its body — an `xsl:variable` holding nested literal
     /// result elements, nested `xsl:if` / `xsl:for-each`, nested XPath `if` and
@@ -336,7 +342,7 @@ impl<'a, 't> Transformation<'a, 't> {
         let used = guard.base.abs_diff(super::stack_position());
         if used > guard.limit {
             return Err(XsltError::internal(format!(
-                "template invocation nested so deep that the run used {used} bytes of stack, \
+                "evaluation nested so deep that the run used {used} bytes of stack, \
                  more than the {} it may use; the stylesheet is probably recursing without \
                  end (TransformOptions::stack_limit, TransformOptions::max_recursion_depth)",
                 guard.limit

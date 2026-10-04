@@ -307,6 +307,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 self.space_declaration(nav, ctx, precedence, module)
             }
             "attribute-set" => self.attribute_set(nav, module_id, ctx, precedence),
+            "key" => self.key_declaration(nav, module_id, ctx),
             // Collected by `collect_aliases` before this pass; only the
             // attribute check above still applies here.
             "namespace-alias" => Ok(()),
@@ -968,7 +969,6 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
 /// yet, and the roadmap sub-milestone (§4) that owns each.
 fn unimplemented_declaration(local: &str) -> Option<&'static str> {
     Some(match local {
-        "key" => "M2f",
         "character-map" => "M3a",
         "decimal-format" => "M3d",
         "import-schema" => "M4",

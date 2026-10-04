@@ -19,6 +19,7 @@ mod documents;
 mod eval;
 mod expressions;
 mod functions;
+mod keys;
 mod patterns;
 mod serialize;
 mod sort;
@@ -77,7 +78,10 @@ pub struct TransformOptions {
     ///
     /// A count cannot bound the stack a call uses, which depends on its body;
     /// [`Self::stack_limit`] does, and the run stops at whichever limit is
-    /// reached first.
+    /// reached first. Key index builds, global variables and attribute sets,
+    /// which can also nest, are not counted — each is entered at most once per
+    /// declaration (a key once per document) on any one chain — and only
+    /// [`Self::stack_limit`] bounds them.
     pub max_recursion_depth: usize,
     /// How many bytes of host stack the run may use, measured from the point
     /// where it starts, before it is abandoned with the same error as
@@ -85,9 +89,13 @@ pub struct TransformOptions {
     ///
     /// Checked on entry to every template invocation (built-in template rules
     /// included) and every stylesheet-function call, so a deep recursion ends
-    /// in that error however much stack each of its calls uses. What one body
-    /// uses *between* two such entries is not checked; the room left above the
-    /// limit is for that.
+    /// in that error however much stack each of its calls uses — and also
+    /// where evaluation nests without such an entry: before every key index
+    /// build (a key's pattern or key specifier may call `key()` for another
+    /// key, or for the same key over another document), every evaluation of
+    /// a global variable, and every attribute set that another one uses. What
+    /// one body uses *between* two such entries is not checked; the room left
+    /// above the limit is for that.
     ///
     /// `None` (the default) derives the limit from the thread the run is on:
     ///
@@ -267,6 +275,12 @@ pub struct Transformation<'a, 't> {
     sheet: &'a CompiledStylesheet<'a>,
     store: RefCell<DocumentStore<'t>>,
     globals: RefCell<Vec<GlobalSlot<'t>>>,
+    /// The key indexes (§16.3, DESIGN §9.7), one per key and document, built
+    /// on first use.
+    keys: RefCell<keys::KeyIndexes<'t>>,
+    /// What the call of each `id()` / `key()` pattern selects, per document
+    /// (§5.5.2), computed on first use.
+    id_key_selections: RefCell<patterns::IdKeySelections<'t>>,
     messages: RefCell<Vec<Message>>,
     /// Where an XSLT error raised inside the XPath engine is parked: an
     /// `XPathError` has no "host error with a code" variant, so the evaluator
@@ -308,6 +322,8 @@ impl<'a> CompiledStylesheet<'a> {
             sheet: self,
             store: RefCell::new(DocumentStore::new(arena, self.names())),
             globals: RefCell::new(globals),
+            keys: RefCell::new(HashMap::new()),
+            id_key_selections: RefCell::new(HashMap::new()),
             messages: RefCell::new(Vec::new()),
             parked_error: RefCell::new(None),
             params: RefCell::new(HashMap::new()),

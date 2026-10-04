@@ -1355,10 +1355,11 @@ pub(super) fn check_call_template_params(builder: &Builder<'_, '_, '_>) -> Resul
 impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     /// Every sequence constructor of the compiled stylesheet: template bodies,
     /// the `xsl:attribute` instructions of every attribute set, the content of
-    /// every global variable or parameter, and the body of every stylesheet
+    /// every global variable or parameter, the body of every stylesheet
     /// function — the winners and, since §2.9 says "A static error must be
     /// signaled even if it occurs in a part of the stylesheet that is never
-    /// evaluated", the declarations that lost to a higher import precedence.
+    /// evaluated", the declarations that lost to a higher import precedence —
+    /// and the content of every `xsl:key` declaration, for the same reason.
     fn every_body(&self) -> Vec<&Body> {
         let mut out: Vec<&Body> = Vec::new();
         for rule in &self.templates {
@@ -1382,6 +1383,18 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         // §10.3: a stylesheet function's body may call a template too.
         out.extend(self.functions_table.iter().flatten().map(|f| &f.body));
         out.extend(self.losing_function_bodies.iter());
+        // §16.3.1: the sequence constructor of every `xsl:key` declaration,
+        // of every module — whether or not `key()` ever asks for that key, and
+        // whether or not any node ever matches that declaration.
+        out.extend(
+            self.keys
+                .iter()
+                .flat_map(|key| &key.definitions)
+                .filter_map(|definition| match &definition.specifier {
+                    ValueSource::Content(body) => Some(body),
+                    ValueSource::Select(_) => None,
+                }),
+        );
         out
     }
 }

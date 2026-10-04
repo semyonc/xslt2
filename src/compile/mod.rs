@@ -13,6 +13,7 @@ mod declarations;
 mod expressions;
 mod functions;
 mod instructions;
+mod keys;
 mod literal;
 mod modes;
 mod patterns;
@@ -158,6 +159,9 @@ struct Builder<'a, 'm, 't> {
     globals: Vec<GlobalVar>,
     global_index: HashMap<QName, usize>,
     attribute_sets: HashMap<QName, AttributeSet>,
+    /// The keys (§16.3.1) and their names.
+    keys: Vec<Key>,
+    key_index: HashMap<QName, KeyId>,
     space_rules: Vec<SpaceRule>,
     output: OutputDefinition,
     named_outputs: HashMap<QName, OutputDefinition>,
@@ -222,6 +226,8 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             globals: Vec::new(),
             global_index: HashMap::new(),
             attribute_sets: HashMap::new(),
+            keys: Vec::new(),
+            key_index: HashMap::new(),
             space_rules: Vec::new(),
             output: OutputDefinition::default(),
             named_outputs: HashMap::new(),
@@ -278,6 +284,8 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             global_index: std::mem::take(&mut self.global_index),
             modes,
             attribute_sets: std::mem::take(&mut self.attribute_sets),
+            keys: std::mem::take(&mut self.keys),
+            key_index: std::mem::take(&mut self.key_index),
             output: std::mem::take(&mut self.output),
             named_outputs: std::mem::take(&mut self.named_outputs),
             space_rules: std::mem::take(&mut self.space_rules),

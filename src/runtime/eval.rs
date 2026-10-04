@@ -571,6 +571,10 @@ impl<'a, 't> Transformation<'a, 't> {
                     format!("there is no attribute set named {name}"),
                 ));
             };
+            // Q33: a set that uses another recurses here with no template
+            // invocation to check the stack, so only the stack guard stops a
+            // long enough chain of them from overflowing it.
+            self.check_stack()?;
             seen.push(name.clone());
             // §10.2: each declaration in turn, its own use-attribute-sets
             // before its own attributes.

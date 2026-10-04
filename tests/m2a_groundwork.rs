@@ -450,11 +450,7 @@ fn every_notimpl_names_its_sub_milestone() {
             "M3b",
         ),
         // compile/declarations.rs: the declaration table.
-        (
-            format!(r#"<xsl:key name="k" match="*" use="."/>{}"#, template("")),
-            "xsl:key",
-            "M2f",
-        ),
+        // (xsl:key was NOT-IMPL until M2f — `tests/m2f_keys.rs`.)
         // (xsl:function was NOT-IMPL until M2e — `tests/m2e_functions.rs`.)
         (
             format!(r#"<xsl:decimal-format name="d"/>{}"#, template("")),
@@ -483,11 +479,7 @@ fn every_notimpl_names_its_sub_milestone() {
             "M3a",
         ),
         // runtime/functions.rs: the §16 evaluator.
-        (
-            template(r#"<xsl:value-of select="key('k', 'v')"/>"#),
-            "key()",
-            "M2f",
-        ),
+        // (key() was NOT-IMPL until M2f — `tests/m2f_keys.rs`.)
         (
             template(r#"<xsl:value-of select="current-group()"/>"#),
             "current-group()",
@@ -505,15 +497,8 @@ fn every_notimpl_names_its_sub_milestone() {
         ),
         // (A fragment identifier in document() was NOT-IMPL until M2i, which
         // made it XTRE1160 — `tests/m2i_core_defects.rs`.)
-        // pattern.rs: the key()/id() pattern.
-        (
-            format!(
-                r#"<xsl:template match="key('k', 'v')">HIT</xsl:template>{}"#,
-                template("")
-            ),
-            "the id()/key() pattern",
-            "M2f",
-        ),
+        // (pattern.rs: the key()/id() pattern was NOT-IMPL until M2f —
+        // `tests/m2f_keys.rs`.)
         // stylesheet.rs: a UCA collation (§9.5) — M2k's (ICU/UCA collations
         // behind a cargo feature), since M2d built the registry and html-ascii.
         (
