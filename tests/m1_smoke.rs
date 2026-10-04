@@ -508,7 +508,7 @@ fn a_document_element_that_is_not_a_stylesheet_is_xtse0150() {
 fn a_not_implemented_construct_carries_the_internal_code_not_a_panic() {
     let s = sheet(
         r#"<xsl:template match="/"><xsl:for-each select="doc">
-             <xsl:sort select="."/>
+             <xsl:number/>
            </xsl:for-each></xsl:template>"#,
     );
     let e = transform(&s, "<doc/>").unwrap_err();
@@ -521,7 +521,7 @@ fn errors_carry_the_line_and_column_of_the_instruction() {
     let s = "<xsl:stylesheet version=\"2.0\" \
              xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\">\n\
              <xsl:template match=\"/\">\n\
-             <xsl:for-each select=\"doc\"><xsl:sort select=\".\"/></xsl:for-each>\n\
+             <xsl:for-each select=\"doc\"><xsl:number/></xsl:for-each>\n\
              </xsl:template>\n\
              </xsl:stylesheet>";
     let e = transform(s, "<doc/>").unwrap_err();

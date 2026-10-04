@@ -54,9 +54,9 @@ fn transform(body: &str, source: &str) -> Result<String, XsltError> {
 
 // ═══ Phase 2 — §3.12 exclusion by construction ═══════════════════════════
 
-/// `Builder::reject_sort` is the traversal with the least coverage: it looks
-/// for one element kind and, finding it, raises `XSLT2-NOTIMPL` for M2d. It
-/// used to carry its own `!self.excluded(..)`; it now goes through
+/// `Builder::sort_keys` (until M2d `Builder::reject_sort`) is the traversal
+/// with the least coverage: it looks for one element kind among the children.
+/// It used to carry its own `!self.excluded(..)`; it now goes through
 /// `Builder::children`, and an excluded `xsl:sort` must still be invisible.
 ///
 /// §3.12: "the stylesheet module has the same effect as if the node were not
@@ -77,11 +77,12 @@ fn use_when_hides_a_sort_from_the_traversal_that_rejects_it() {
     assert_eq!(out, "<out>ba</out>");
 }
 
-/// The negative control: without `use-when` the very same stylesheet stops
-/// compiling, which is what makes the test above meaningful.
+/// The negative control: without `use-when` the very same stylesheet sorts
+/// (since M2d; before it, it stopped compiling with `XSLT2-NOTIMPL`), which is
+/// what makes the test above meaningful.
 #[test]
-fn a_sort_that_is_not_excluded_is_still_rejected() {
-    let error = transform(
+fn a_sort_that_is_not_excluded_still_sorts() {
+    let out = transform(
         r#"<xsl:template match="/">
              <out><xsl:for-each select="r/i">
                <xsl:sort select="."/>
@@ -90,9 +91,8 @@ fn a_sort_that_is_not_excluded_is_still_rejected() {
            </xsl:template>"#,
         "<r><i>b</i><i>a</i></r>",
     )
-    .unwrap_err();
-    assert!(error.is_not_implemented(), "{error}");
-    assert!(error.to_string().contains("xsl:sort"), "{error}");
+    .unwrap();
+    assert_eq!(out, "<out>ab</out>");
 }
 
 /// `Builder::has_content` decides the `select`-xor-content rule of §9.2
@@ -431,17 +431,8 @@ fn every_notimpl_names_its_sub_milestone() {
     let template =
         |content: &str| format!(r#"<xsl:template match="/"><out>{content}</out></xsl:template>"#);
     let cases: Vec<(String, &str, &str)> = vec![
-        // compile/instructions.rs: the instruction table.
-        (
-            template(r#"<xsl:for-each select="*"><xsl:sort/></xsl:for-each>"#),
-            "xsl:sort",
-            "M2d",
-        ),
-        (
-            template(r#"<xsl:perform-sort select="1"><xsl:sort/></xsl:perform-sort>"#),
-            "xsl:perform-sort",
-            "M2d",
-        ),
+        // compile/instructions.rs: the instruction table. (`xsl:sort` and
+        // `xsl:perform-sort` were M2d's rows until M2d implemented them.)
         (
             template(r#"<xsl:for-each-group select="*" group-by="."/>"#),
             "xsl:for-each-group",
@@ -530,12 +521,21 @@ fn every_notimpl_names_its_sub_milestone() {
             "the id()/key() pattern",
             "M2f",
         ),
-        // stylesheet.rs: a standard collation other than codepoint (§9.5).
+        // stylesheet.rs: a UCA collation (§9.5) — M2k's (ICU/UCA collations
+        // behind a cargo feature), since M2d built the registry and html-ascii.
         (
-            r#"<xsl:template match="/" default-collation="http://www.w3.org/2005/xpath-functions/collation/html-ascii-case-insensitive"><out/></xsl:template>"#
+            r#"<xsl:template match="/" default-collation="http://www.w3.org/2013/collation/UCA?strength=secondary"><out/></xsl:template>"#
                 .to_string(),
             "the collation",
-            "M2d",
+            "M2k",
+        ),
+        // runtime/sort.rs: the same collation named by xsl:sort.
+        (
+            template(
+                r#"<xsl:for-each select="(1, 2)"><xsl:sort collation="http://www.w3.org/2013/collation/UCA?lang=en"/></xsl:for-each>"#,
+            ),
+            "the collation",
+            "M2k",
         ),
     ];
     for (body, feature, owner) in cases {

@@ -23,7 +23,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         nav: &Nav<'t>,
         module: &Module<'t>,
     ) -> Result<StaticContextId, XsltError> {
-        let sc = static_context_of(nav, module)?;
+        let sc = static_context_of(nav, module, self.functions.collations())?;
         let before = self.static_contexts.len();
         let id = self.static_contexts.intern(sc);
         if self.static_contexts.len() > before {
@@ -44,7 +44,14 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 .with_function_catalog(catalog)
                 // §9.10 row 1: a `version < 2.0` region keeps XPath 2.0 syntax
                 // and takes XPath 1.0 compatibility-mode semantics.
-                .with_xpath10_compatibility(sc.compat.is_backwards());
+                .with_xpath10_compatibility(sc.compat.is_backwards())
+                // DESIGN §9.5: every expression sees the collation registry and
+                // the `[xsl:]default-collation` in force (§3.6.1: "the default
+                // collation used by all XPath expressions appearing in the
+                // attributes of this element, or attributes of descendant
+                // elements").
+                .with_collation_resolver(self.functions.collations())
+                .with_default_collation(sc.default_collation.clone());
             if !sc.xpath_default_namespace.is_empty() {
                 ctx = ctx.with_default_element_ns(self.names.add(&sc.xpath_default_namespace));
             }

@@ -12,7 +12,7 @@ use super::{Frame, Message, Transformation};
 use crate::error::{codes, XsltError};
 use crate::model::*;
 use crate::names::{is_ncname, lexical_qname, QName, XML_NS};
-use crate::receiver::{namespace_nodes_of, CopyNamespaces, Name, Nav, Receiver};
+use crate::receiver::{namespace_nodes_of, CopyNamespaces, Name, Nav, Receiver, SequenceCollector};
 use crate::stylesheet::attr_ns;
 use crate::whitespace;
 
@@ -104,8 +104,12 @@ impl<'a, 't> Transformation<'a, 't> {
                 }
             }
 
-            InstructionKind::ForEach { select, body } => {
+            InstructionKind::ForEach { select, sort, body } => {
                 let items = self.eval_expr(*select, frame, cx)?.into_vec();
+                // §13.3: "the sequence of items selected by that instruction is
+                // to be processed in sorted order"; the focus of the body is
+                // then the position in the *sorted* sequence.
+                let items = self.sort_sequence(items, sort, frame, cx)?;
                 let size = items.len();
                 for (index, item) in items.into_iter().enumerate() {
                     // §5.4: the focus is replaced and the frame is the same,
@@ -116,6 +120,24 @@ impl<'a, 't> Transformation<'a, 't> {
                     let mut inner = cx.with_focus(item, index + 1, size);
                     inner.current_rule = None;
                     self.eval_body(body, frame, &inner, out)?;
+                }
+                Ok(())
+            }
+
+            // §13.2: "The result of the xsl:perform-sort instruction is the
+            // result of sorting its initial sequence using its contained sort
+            // key specification."
+            InstructionKind::PerformSort { select, sort, body } => {
+                let items = match select {
+                    Some(id) => self.eval_expr(*id, frame, cx)?.into_vec(),
+                    None => {
+                        let mut collector = SequenceCollector::new(&self.store);
+                        self.eval_body(body, frame, cx, &mut collector)?;
+                        collector.into_items()
+                    }
+                };
+                for item in self.sort_sequence(items, sort, frame, cx)? {
+                    out.append_item(&item)?;
                 }
                 Ok(())
             }
@@ -135,11 +157,13 @@ impl<'a, 't> Transformation<'a, 't> {
                 select,
                 mode,
                 params,
+                sort,
             } => {
                 let items = match select {
                     Some(id) => self.eval_expr(*id, frame, cx)?.into_vec(),
                     None => self.children_of_focus(cx)?,
                 };
+                let items = self.sort_sequence(items, sort, frame, cx)?;
                 let mode = match mode {
                     ModeRef::Default => ModeKey::Default,
                     ModeRef::Current => cx.mode.clone(),

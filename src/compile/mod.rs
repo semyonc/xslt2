@@ -193,7 +193,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         // §3.4: the element table first, over every module, so that a misplaced
         // element or a content model the spec does not allow is reported even
         // when it stands in a subtree nothing would compile (M2c).
-        checks::check(self.modules)?;
+        checks::check(self.modules, self.functions.collations())?;
         self.build_declarations()?;
         // §10.1.1's XTSE0680 needs the declaration tables, so it runs over the
         // compiled tree rather than over the stylesheet tree.
@@ -204,7 +204,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         let principal_compat = {
             let mut nav = principal.doc.create_navigator();
             if crate::stylesheet::move_to_document_element(&mut nav) {
-                static_context_of(&nav, principal)?.compat
+                static_context_of(&nav, principal, self.functions.collations())?.compat
             } else {
                 CompatMode::Xslt20
             }

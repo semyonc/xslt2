@@ -52,8 +52,9 @@ use xsd_schema::navigator::{DomNavigator, DomNodeType};
 
 use super::attributes::STANDARD_ATTRS;
 use super::Builder;
+use crate::collation::CollationRegistry;
 use crate::error::{codes, XsltError};
-use crate::model::{Body, Instruction, InstructionKind, ValueSource, VarValue};
+use crate::model::{Body, Instruction, InstructionKind, SortKey, ValueSource, VarValue};
 use crate::names::{resolve_qname, QName, XML_NS, XSLT_NS};
 use crate::receiver::Nav;
 use crate::stylesheet::{
@@ -709,7 +710,10 @@ pub(crate) fn is_xs_decimal(text: &str) -> bool {
 /// respected by construction: an excluded element and its whole subtree are
 /// simply never seen (§3.12: "no static or dynamic errors will be reported in
 /// respect of the element and its contents").
-pub(super) fn check(modules: &ModuleSet<'_>) -> Result<(), XsltError> {
+pub(super) fn check(
+    modules: &ModuleSet<'_>,
+    collations: &CollationRegistry,
+) -> Result<(), XsltError> {
     for module in &modules.modules {
         let root = match module.root {
             Some(node) => module.doc.create_navigator_at(node),
@@ -724,13 +728,15 @@ pub(super) fn check(modules: &ModuleSet<'_>) -> Result<(), XsltError> {
         if module.is_excluded(&root) {
             continue;
         }
-        Checker { module }.element(&root)?;
+        Checker { module, collations }.element(&root)?;
     }
     Ok(())
 }
 
 struct Checker<'m, 't> {
     module: &'m Module<'t>,
+    /// What `[xsl:]default-collation` may name (§3.6.1's XTSE0125).
+    collations: &'m CollationRegistry,
 }
 
 impl<'t> Checker<'_, 't> {
@@ -741,7 +747,7 @@ impl<'t> Checker<'_, 't> {
     /// Checks one element that is already known to be allowed where it stands:
     /// its attributes, then its content.
     fn element(&self, nav: &Nav<'t>) -> Result<(), XsltError> {
-        let sc = static_context_of(nav, self.module)?;
+        let sc = static_context_of(nav, self.module, self.collations)?;
         if nav.namespace_uri() != XSLT_NS {
             // A literal result element or an extension instruction. Its own
             // attributes belong to §11.1, which the literal-result-element
@@ -1034,7 +1040,7 @@ impl<'t> Checker<'_, 't> {
                 // `xsl:fallback` children, if it has any; "if the element has no
                 // xsl:fallback children, then a static error is reported in the
                 // same way as if forwards-compatible behavior were not enabled."
-                let sc = static_context_of(child, self.module)?;
+                let sc = static_context_of(child, self.module, self.collations)?;
                 if sc.compat.is_forwards() && self.has_fallback(child) {
                     return self.fallback_children(child);
                 }
@@ -1387,8 +1393,12 @@ fn visit(body: &Body, f: &mut impl FnMut(&Instruction)) {
     for instruction in &body.0 {
         f(instruction);
         match &instruction.kind {
-            InstructionKind::ForEach { body, .. }
-            | InstructionKind::If { then: body, .. }
+            InstructionKind::ForEach { body, sort, .. }
+            | InstructionKind::PerformSort { body, sort, .. } => {
+                visit_sort_keys(sort, f);
+                visit(body, f);
+            }
+            InstructionKind::If { then: body, .. }
             | InstructionKind::LiteralElement { body, .. }
             | InstructionKind::Element { body, .. }
             | InstructionKind::Document { body }
@@ -1416,8 +1426,15 @@ fn visit(body: &Body, f: &mut impl FnMut(&Instruction)) {
                     visit(body, f);
                 }
             }
-            InstructionKind::ApplyTemplates { params, .. }
-            | InstructionKind::ApplyImports { params }
+            InstructionKind::ApplyTemplates { params, sort, .. } => {
+                visit_sort_keys(sort, f);
+                for param in params {
+                    if let Some(body) = body_of(&param.value) {
+                        visit(body, f);
+                    }
+                }
+            }
+            InstructionKind::ApplyImports { params }
             | InstructionKind::NextMatch { params }
             | InstructionKind::CallTemplate { params, .. } => {
                 for param in params {
@@ -1431,6 +1448,16 @@ fn visit(body: &Body, f: &mut impl FnMut(&Instruction)) {
             | InstructionKind::CopyOf { .. }
             | InstructionKind::Fallback
             | InstructionKind::NotImplemented { .. } => {}
+        }
+    }
+}
+
+/// Calls `f` on every instruction of the sequence constructors of a sort key
+/// specification (§13.1).
+fn visit_sort_keys(sort: &[SortKey], f: &mut impl FnMut(&Instruction)) {
+    for key in sort {
+        if let ValueSource::Content(body) = &key.value {
+            visit(body, f);
         }
     }
 }

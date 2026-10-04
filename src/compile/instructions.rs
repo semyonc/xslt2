@@ -9,10 +9,7 @@ use crate::error::{codes, Location, XsltError};
 use crate::model::*;
 use crate::names::{parse_yes_no, XSLT_NS};
 use crate::receiver::Nav;
-use crate::stylesheet::{
-    attr_local, is_stripped_stylesheet_text, starts_text_run, text_run_value, ModuleId,
-    StaticContextId,
-};
+use crate::stylesheet::{attr_local, starts_text_run, text_run_value, ModuleId, StaticContextId};
 use crate::whitespace;
 
 impl<'a, 'm, 't> Builder<'a, 'm, 't> {
@@ -48,10 +45,13 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 }
                 // §4.2: comments and PIs are removed, the text nodes that
                 // become adjacent are merged — one instruction per run, made
-                // by its first node — and whitespace-only runs are stripped.
+                // by its first node — and whitespace-only runs are stripped,
+                // including (whatever `xml:space` says) one "whose
+                // following-sibling node is an xsl:param or xsl:sort element"
+                // (`whitespace-015`: `xsl:for-each xml:space="preserve"`).
                 kind if kind.is_text_like()
                     && starts_text_run(&child)
-                    && !is_stripped_stylesheet_text(&child) =>
+                    && checks::is_significant_text(parent, &child) =>
                 {
                     let module = self.modules.module(module_id);
                     let ctx = self.context_of(parent, module)?;
@@ -178,17 +178,18 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         }
         match local.as_str() {
             "apply-templates" => {
-                self.reject_sort(nav, module_id)?;
                 let select = match attr_local(nav, "select") {
                     Some(source) => Some(self.compile_expr(&source, ctx)?),
                     None => None,
                 };
                 let mode = self.mode_ref(nav, ctx)?;
+                let sort = self.sort_keys(nav, module_id)?;
                 let params = self.with_params(nav, module_id)?;
                 Ok(InstructionKind::ApplyTemplates {
                     select,
                     mode,
                     params,
+                    sort,
                 })
             }
             "apply-imports" => Ok(InstructionKind::ApplyImports {
@@ -206,11 +207,12 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 Ok(InstructionKind::CallTemplate { name, params })
             }
             "for-each" => {
-                self.reject_sort(nav, module_id)?;
                 let select = self.required_expr(nav, "select", ctx, &loc)?;
+                let sort = self.sort_keys(nav, module_id)?;
                 let body = self.sequence_constructor_skipping(nav, module_id, "sort")?;
-                Ok(InstructionKind::ForEach { select, body })
+                Ok(InstructionKind::ForEach { select, sort, body })
             }
+            "perform-sort" => self.perform_sort(nav, module_id, ctx, &loc),
             "if" => {
                 let test = self.required_expr(nav, "test", ctx, &loc)?;
                 let then = self.sequence_constructor(nav, module_id)?;
@@ -395,12 +397,22 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 })
             }
             "fallback" => Ok(InstructionKind::Fallback),
-            "number" | "for-each-group" | "analyze-string" | "perform-sort" | "result-document"
-            | "sort" | "function" | "key" => Ok(InstructionKind::NotImplemented {
+            // §13: "A sort key specification may occur immediately within an
+            // xsl:apply-templates, xsl:for-each, xsl:perform-sort, or
+            // xsl:for-each-group element" — each of which compiles its own
+            // xsl:sort children. The element table rejects one anywhere else
+            // before compilation starts, so this arm is a safety net.
+            "sort" => Err(XsltError::new(
+                codes::XTSE0010,
+                "xsl:sort is only allowed at the start of xsl:apply-templates, xsl:for-each, \
+                 xsl:perform-sort or xsl:for-each-group",
+            )
+            .with_location(loc)),
+            "number" | "for-each-group" | "analyze-string" | "result-document" | "function"
+            | "key" => Ok(InstructionKind::NotImplemented {
                 feature: format!("xsl:{local}"),
                 // The owner of each, per the roadmap's §4.
                 milestone: match local.as_str() {
-                    "sort" | "perform-sort" => "M2d",
                     "function" => "M2e",
                     "key" => "M2f",
                     "for-each-group" => "M2g",
@@ -535,17 +547,205 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         Ok(InstructionKind::Choose { whens, otherwise })
     }
 
-    fn reject_sort(&self, nav: &Nav<'t>, module_id: ModuleId) -> Result<(), XsltError> {
-        for child in self.children(nav, module_id) {
-            if child.node_type() == DomNodeType::Element
-                && child.namespace_uri() == XSLT_NS
-                && child.local_name() == "sort"
+    /// `xsl:perform-sort` (§13.2).
+    ///
+    /// > The initial sequence is obtained either by evaluating the `select`
+    /// > attribute or by evaluating the contained sequence constructor (but not
+    /// > both). If there is no `select` attribute and no sequence constructor
+    /// > then the initial sequence (and therefore, the sorted sequence) is an
+    /// > empty sequence.
+    ///
+    /// > \[ERR XTSE1040\] It is a static error if an `xsl:perform-sort`
+    /// > instruction with a `select` attribute has any content other than
+    /// > `xsl:sort` and `xsl:fallback` instructions.
+    fn perform_sort(
+        &mut self,
+        nav: &Nav<'t>,
+        module_id: ModuleId,
+        ctx: StaticContextId,
+        loc: &Location,
+    ) -> Result<InstructionKind, XsltError> {
+        let sort = self.sort_keys(nav, module_id)?;
+        let select = match attr_local(nav, "select") {
+            Some(source) => Some(self.compile_expr(&source, ctx)?),
+            None => None,
+        };
+        if select.is_some() {
+            for child in self.children(nav, module_id) {
+                let allowed = match child.node_type() {
+                    DomNodeType::Element => {
+                        child.namespace_uri() == XSLT_NS
+                            && matches!(child.local_name(), "sort" | "fallback")
+                    }
+                    // §4.2, all three bullets — including "Any whitespace text
+                    // node whose following-sibling node is an xsl:param or
+                    // xsl:sort element is removed from the tree, regardless of
+                    // any xml:space attributes": whitespace before or between
+                    // the xsl:sort elements is not content even when
+                    // `xml:space="preserve"` is in scope.
+                    kind if kind.is_text_like() => !checks::is_significant_text(nav, &child),
+                    _ => true,
+                };
+                if !allowed {
+                    return Err(XsltError::new(
+                        codes::XTSE1040,
+                        "xsl:perform-sort with a select attribute may contain only xsl:sort \
+                         and xsl:fallback",
+                    )
+                    .with_location(loc.clone()));
+                }
+            }
+            // Its xsl:fallback children are ignored (§18.2.3), so there is no
+            // body to evaluate.
+            return Ok(InstructionKind::PerformSort {
+                select,
+                sort,
+                body: Body::default(),
+            });
+        }
+        let body = self.sequence_constructor_skipping(nav, module_id, "sort")?;
+        Ok(InstructionKind::PerformSort { select, sort, body })
+    }
+
+    /// The sort key specification among the children of `parent` (§13.1): its
+    /// `xsl:sort` elements, in order.
+    ///
+    /// > \[ERR XTSE1015\] It is a static error if an `xsl:sort` element with a
+    /// > `select` attribute has non-empty content.
+    ///
+    /// > \[ERR XTSE1017\] It is a static error if an `xsl:sort` element other
+    /// > than the first in a sequence of sibling `xsl:sort` elements has a
+    /// > `stable` attribute.
+    ///
+    /// The element table has already checked that the `xsl:sort` children come
+    /// first (§13: "xsl:sort elements must occur before any other children"),
+    /// so every `xsl:sort` child is part of the one specification.
+    fn sort_keys(
+        &mut self,
+        parent: &Nav<'t>,
+        module_id: ModuleId,
+    ) -> Result<Vec<SortKey>, XsltError> {
+        let mut keys = Vec::new();
+        for child in self.children(parent, module_id) {
+            if child.node_type() != DomNodeType::Element
+                || child.namespace_uri() != XSLT_NS
+                || child.local_name() != "sort"
             {
-                return Err(XsltError::not_implemented("xsl:sort", "M2d")
-                    .with_location(self.modules.module(module_id).location(&child)));
+                continue;
+            }
+            let module = self.modules.module(module_id);
+            let ctx = self.context_of(&child, module)?;
+            let loc = self.modules.module(module_id).location(&child);
+            if !self.static_contexts.get(ctx).compat.is_forwards() {
+                check_attributes(&child, "sort", &loc)?;
+            }
+            if !keys.is_empty() && attr_local(&child, "stable").is_some() {
+                return Err(XsltError::new(
+                    codes::XTSE1017,
+                    "only the first xsl:sort of a sort key specification may have a stable \
+                     attribute",
+                )
+                .with_location(loc));
+            }
+            let select = attr_local(&child, "select");
+            let has_content = self.has_content(&child, module_id);
+            let value = match (select, has_content) {
+                (Some(_), true) => {
+                    return Err(XsltError::new(
+                        codes::XTSE1015,
+                        "xsl:sort has both a select attribute and content",
+                    )
+                    .with_location(loc));
+                }
+                (Some(source), false) => ValueSource::Select(self.compile_expr(&source, ctx)?),
+                (None, true) => ValueSource::Content(self.sequence_constructor(&child, module_id)?),
+                (None, false) => ValueSource::Select(self.compile_expr(".", ctx)?),
+            };
+            let order = self.sort_avt(&child, "order", ctx, &loc, |v| {
+                SortOrder::parse(v).is_some()
+            })?;
+            let data_type = self.sort_avt(&child, "data-type", ctx, &loc, |v| {
+                SortDataType::parse(v).is_some()
+            })?;
+            // §5.1 XTSE0280 for a fixed QName value whose prefix the xsl:sort
+            // element does not bind (a computed one is XTDE0290, at run time).
+            if let Some(prefix) = data_type
+                .as_ref()
+                .and_then(|avt| avt.as_literal())
+                .and_then(SortDataType::qname_prefix)
+            {
+                if self
+                    .static_contexts
+                    .get(ctx)
+                    .resolve_prefix(prefix)
+                    .is_none()
+                {
+                    return Err(XsltError::new(
+                        codes::XTSE0280,
+                        format!(
+                            "the data-type of xsl:sort uses the prefix {prefix:?}, which is not \
+                             declared"
+                        ),
+                    )
+                    .with_location(loc));
+                }
+            }
+            let case_order = self.sort_avt(&child, "case-order", ctx, &loc, |v| {
+                parse_case_order(v).is_some()
+            })?;
+            let lang = self.sort_avt(&child, "lang", ctx, &loc, is_valid_lang)?;
+            let collation = self.sort_avt(&child, "collation", ctx, &loc, |_| true)?;
+            let stable = self.sort_avt(&child, "stable", ctx, &loc, |v| {
+                matches!(whitespace::trim(v), "yes" | "no")
+            })?;
+            keys.push(SortKey {
+                value,
+                order,
+                data_type,
+                case_order,
+                lang,
+                collation,
+                stable,
+                ctx,
+                loc,
+            });
+        }
+        Ok(keys)
+    }
+
+    /// One attribute value template of `xsl:sort`.
+    ///
+    /// > \[ERR XTSE0020\] It is a static error if an attribute (other than an
+    /// > attribute written using curly brackets in a position where an
+    /// > attribute value template is permitted) contains a value that is not
+    /// > one of the permitted values for that attribute.
+    ///
+    /// So a value with no expression in it is checked here, statically; a
+    /// computed one is checked when it is evaluated (XTDE0030).
+    fn sort_avt(
+        &mut self,
+        nav: &Nav<'t>,
+        attr: &str,
+        ctx: StaticContextId,
+        loc: &Location,
+        valid: impl Fn(&str) -> bool,
+    ) -> Result<Option<Avt>, XsltError> {
+        let Some(text) = attr_local(nav, attr) else {
+            return Ok(None);
+        };
+        let avt = self.avt(&text, ctx).map_err(|e| e.or_location(loc))?;
+        if let Some(fixed) = avt.as_literal() {
+            if !valid(fixed) {
+                return Err(XsltError::new(
+                    codes::XTSE0020,
+                    format!(
+                        "{fixed:?} is not a permitted value of the {attr} attribute of xsl:sort"
+                    ),
+                )
+                .with_location(loc.clone()));
             }
         }
-        Ok(())
+        Ok(Some(avt))
     }
 
     fn with_params(

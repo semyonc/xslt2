@@ -24,6 +24,7 @@ use xsd_schema::xpath::functions::{
 use xsd_schema::xpath::XPathError;
 use xsd_schema::RoXmlNavigator;
 
+use crate::collation::{Collation, CollationRegistry};
 use crate::names::FN_NS;
 
 /// Which XSLT function a [`FunctionHandle`] stands for.
@@ -166,6 +167,10 @@ pub struct XsltFunctions {
     /// The handles registered by [`Self::add_stub`]: in the catalog so that a
     /// call compiles and reaches the evaluator, but **not** available (§18.1.2).
     stubs: HashSet<FunctionHandle>,
+    /// The collations every expression of a stylesheet compiled against this
+    /// set can name (§13.1.3, DESIGN §9.5). It lives here because this is the
+    /// caller-owned object every `XPathContext` already borrows.
+    collations: CollationRegistry,
 }
 
 impl Default for XsltFunctions {
@@ -175,6 +180,54 @@ impl Default for XsltFunctions {
 }
 
 impl XsltFunctions {
+    /// Registers a host collation under an absolute collation URI, for every
+    /// stylesheet compiled against this set afterwards: `xsl:sort
+    /// collation="…"`, `[xsl:]default-collation`, and the `$collation`
+    /// argument of `compare()`, `contains()`, `distinct-values()` and the other
+    /// collation-aware functions (§13.1.3, §3.6.1, F&O §7.3).
+    ///
+    /// The codepoint collation and
+    /// [`HTML_ASCII_CASE_INSENSITIVE_URI`](crate::collation::HTML_ASCII_CASE_INSENSITIVE_URI)
+    /// are built in. A host collation may replace the second, never the first:
+    /// registering
+    /// [`CODEPOINT_COLLATION_URI`](crate::collation::CODEPOINT_COLLATION_URI)
+    /// is refused and returns `false` (see [`CollationRegistry::register`]).
+    ///
+    /// `compare` must be a total order — consistent, antisymmetric and
+    /// transitive — because `xsl:sort` hands it to the standard library's sort,
+    /// which may panic on a comparison function that is not one.
+    ///
+    /// ```
+    /// use std::cmp::Ordering;
+    /// use std::rc::Rc;
+    /// use xslt2::collation::Collation;
+    /// use xslt2::XsltFunctions;
+    ///
+    /// /// Orders strings by length, then by codepoints.
+    /// struct ByLength;
+    /// impl Collation for ByLength {
+    ///     fn compare(&self, a: &str, b: &str) -> Ordering {
+    ///         a.chars().count().cmp(&b.chars().count()).then_with(|| a.cmp(b))
+    ///     }
+    /// }
+    ///
+    /// let mut functions = XsltFunctions::new();
+    /// assert!(functions.register_collation("urn:example:by-length", Rc::new(ByLength)));
+    /// assert!(functions.collations().recognizes("urn:example:by-length"));
+    /// ```
+    pub fn register_collation(
+        &mut self,
+        uri: impl Into<String>,
+        collation: std::rc::Rc<dyn Collation>,
+    ) -> bool {
+        self.collations.register(uri, collation)
+    }
+
+    /// The collations stylesheets compiled against this set can name.
+    pub fn collations(&self) -> &CollationRegistry {
+        &self.collations
+    }
+
     /// The XPath built-ins plus the XSLT function library.
     pub fn new() -> Self {
         let mut this = Self {
@@ -186,6 +239,7 @@ impl XsltFunctions {
             by_handle: HashMap::new(),
             names: HashMap::new(),
             stubs: HashSet::new(),
+            collations: CollationRegistry::new(),
         };
         let string = SequenceType::string;
         let string_opt = SequenceType::string_optional;

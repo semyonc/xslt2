@@ -40,11 +40,11 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 | XSLT 2.0-applicable | 6,619 |
 | excluded (documented in `tests/xslts/filter.rs`) | 26 |
 | runnable (dependencies satisfied) | 5,725 |
-| pass | 4,369 |
+| pass | 4,522 |
 | fail / wrongError / harnessError | 59 / 0 / 3 |
-| not implemented (`XSLT2-NOTIMPL`, M2–M4) | 1,294 |
-| pass rate over runnable | 76.31% |
-| headline (basic profile, non-regex families) | 3,228 / 4,215 = **76.6%** |
+| not implemented (`XSLT2-NOTIMPL`, M2–M4) | 1,141 |
+| pass rate over runnable | 78.99% |
+| headline (basic profile, non-regex families) | 3,378 / 4,215 = **80.1%** |
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the
@@ -62,7 +62,8 @@ namespace node) to 4,299. The 0.2.1 release fixes, M2i (core defects in what M1 
 `../../XSLT2_M2I_REPORT.md`) and M2j (harness fixes and documented exclusions, `../../XSLT2_M2J_REPORT.md`)
 took it to 4,369 of 5,725 on 2026-10-04: 26 cases whose expectation is wrong for an XSLT 2.0 processor are
 excluded with the spec text that says so, and 3 are harness errors until the public API can start a
-transformation at a node other than the document.
+transformation at a node other than the document. M2d (sorting: `xsl:sort`, `xsl:perform-sort` and the collation
+registry, `../../XSLT2_M2D_REPORT.md`) took it to 4,522 on 2026-10-04.
 
 The sixteen test-sets M1 targets:
 
@@ -73,16 +74,16 @@ The sixteen test-sets M1 targets:
 | choose | 54 | 53 | 0 | 0 | 0 | 1 | 98.1% |
 | call-template | 35 | 33 | 0 | 0 | 1 | 1 | 94.3% |
 | lre | 26 | 26 | 0 | 0 | 0 | 0 | 100.0% |
-| variable | 101 | 98 | 0 | 0 | 0 | 3 | 97.0% |
+| variable | 101 | 99 | 0 | 0 | 0 | 2 | 98.0% |
 | include | 14 | 13 | 1 | 0 | 0 | 0 | 92.9% |
 | apply-templates | 36 | 36 | 0 | 0 | 0 | 0 | 100.0% |
 | element | 19 | 18 | 1 | 0 | 0 | 0 | 94.7% |
 | version | 33 | 30 | 0 | 0 | 0 | 3 | 90.9% |
 | param | 26 | 23 | 0 | 0 | 0 | 3 | 88.5% |
-| attribute | 21 | 18 | 0 | 0 | 0 | 3 | 85.7% |
-| copy | 72 | 60 | 2 | 0 | 0 | 10 | 83.3% |
-| sequence | 87 | 81 | 0 | 0 | 0 | 6 | 93.1% |
-| message | 26 | 21 | 2 | 0 | 0 | 3 | 80.8% |
+| attribute | 21 | 19 | 0 | 0 | 0 | 2 | 90.5% |
+| copy | 72 | 62 | 2 | 0 | 0 | 8 | 86.1% |
+| sequence | 87 | 82 | 0 | 0 | 0 | 5 | 94.3% |
+| message | 26 | 22 | 2 | 0 | 0 | 2 | 84.6% |
 | output | 137 | 10 | 21 | 0 | 0 | 106 | 7.3% |
 
 `output` is dominated by the `html`, `xhtml`, `doctype-*` and character-map serialization

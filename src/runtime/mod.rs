@@ -20,6 +20,7 @@ mod expressions;
 mod functions;
 mod patterns;
 mod serialize;
+mod sort;
 mod variables;
 
 pub use content::SimpleDefault;

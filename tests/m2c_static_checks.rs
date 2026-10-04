@@ -996,14 +996,21 @@ fn an_unrecognised_default_collation_is_a_static_error() {
              http://www.w3.org/2005/xpath-functions/collation/codepoint\">\
            <xsl:template match=\"doc\"><out/></xsl:template></xsl:stylesheet>"
     ));
-    // A collation [Functions and Operators] defines but this processor has not
-    // built is a **missing feature**, not a broken stylesheet: reporting it as
-    // XTSE0125 would claim conformance the processor does not have. The registry
-    // is M2e's (§9.5).
-    let e = compile(&format!(
+    // Since M2d the registry recognizes the HTML ASCII case-insensitive
+    // collation (§9.5).
+    accepted(&format!(
         "<xsl:stylesheet version=\"2.0\" xmlns:xsl=\"{NS}\" \
            default-collation=\"http://www.w3.org/2005/xpath-functions/collation/\
              html-ascii-case-insensitive\">\
+           <xsl:template match=\"doc\"><out/></xsl:template></xsl:stylesheet>"
+    ));
+    // A collation [Functions and Operators] defines but this processor has not
+    // built is a **missing feature**, not a broken stylesheet: reporting it as
+    // XTSE0125 would claim conformance the processor does not have. The UCA
+    // collations wait for M2k, the ICU/UCA cargo feature (§9.5).
+    let e = compile(&format!(
+        "<xsl:stylesheet version=\"2.0\" xmlns:xsl=\"{NS}\" \
+           default-collation=\"http://www.w3.org/2013/collation/UCA?lang=en\">\
            <xsl:template match=\"doc\"><out/></xsl:template></xsl:stylesheet>"
     ))
     .expect_err("an unimplemented standard collation is not implemented");

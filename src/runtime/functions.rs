@@ -9,6 +9,7 @@ use xsd_schema::types::{XmlAtomicValue, XmlTypeCode, XmlValue, XmlValueKind};
 use xsd_schema::xpath::functions::{
     BuiltinEvaluator, FunctionEvaluator, FunctionHandle, XPathValue,
 };
+use xsd_schema::xpath::node_ops::compare_document_order;
 use xsd_schema::xpath::{DynamicContext, XPathError, XmlItem};
 
 use super::context::XsltContext;
@@ -125,7 +126,7 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                     Some(value) => value.clone().into_vec(),
                     None => Vec::new(),
                 };
-                let mut nodes = Vec::new();
+                let mut ids: Vec<crate::store::DocId> = Vec::new();
                 for item in items {
                     let (uri, item_base) = match &item {
                         XmlItem::Atomic(value) => (value.to_string_value(), None),
@@ -157,9 +158,26 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                             self.document_with_fragment(&base, &uri, document)?
                         }
                     };
-                    nodes.push(XmlItem::Node(self.run.store.borrow().navigator(id)));
+                    // §16.1: "The sequence of nodes returned by the function
+                    // is in document order, with no duplicates." Every node
+                    // here is a document node, and the store returns the same
+                    // document for the same URI, so a duplicate is a repeated
+                    // id.
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
                 }
-                Ok(XPathValue::from_sequence(nodes))
+                let store = self.run.store.borrow();
+                let mut nodes: Vec<Nav<'t>> =
+                    ids.into_iter().map(|id| store.navigator(id)).collect();
+                // "This order has no necessary relationship to the order in
+                // which URIs were supplied in the $uri-sequence argument": the
+                // engine's document order, the one `|` and path expressions
+                // use (between documents, a stable order of the documents).
+                nodes.sort_by(compare_document_order);
+                Ok(XPathValue::from_sequence(
+                    nodes.into_iter().map(XmlItem::Node).collect(),
+                ))
             }
             XsltFn::DocAvailable => {
                 let uris = string_args(args.first())?;

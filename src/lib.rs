@@ -36,6 +36,7 @@
 //! # Ok::<(), xslt2::XsltError>(())
 //! ```
 
+pub mod collation;
 pub mod compile;
 pub mod error;
 pub mod functions;

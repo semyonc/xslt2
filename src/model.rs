@@ -133,6 +133,143 @@ pub enum ValueSource {
     Content(Body),
 }
 
+/// One *sort key component*: an `xsl:sort` element (§13.1).
+///
+/// > \[Definition: A sort key specification is a sequence of one or more
+/// > adjacent `xsl:sort` elements which together define rules for sorting the
+/// > items in an input sequence to form a sorted sequence.\]
+///
+/// The attributes that are attribute value templates are kept as [`Avt`]s:
+/// §13.1 evaluates them "using the same focus as is used to evaluate the
+/// `select` attribute of the containing instruction", once per sort, not once
+/// per item. A fixed value has already been checked by the compiler (XTSE0020);
+/// a computed one is checked when it is evaluated (XTDE0030).
+pub struct SortKey {
+    /// `select`, or the contained sequence constructor; `select="."` when
+    /// there is neither (§13.1: "If neither is present, the default is
+    /// select=\".\"").
+    pub value: ValueSource,
+    pub order: Option<Avt>,
+    pub data_type: Option<Avt>,
+    pub case_order: Option<Avt>,
+    pub lang: Option<Avt>,
+    pub collation: Option<Avt>,
+    /// Only ever present on the first key (XTSE1017).
+    pub stable: Option<Avt>,
+    /// The static context of the `xsl:sort` element: its base URI resolves a
+    /// relative collation URI (§13.1.3) and its compatibility mode decides the
+    /// first-item rule of XTTE1020 (§13.1.2).
+    pub ctx: StaticContextId,
+    /// Where the `xsl:sort` element is, for its errors.
+    pub loc: Location,
+}
+
+/// `order` on `xsl:sort` (§13.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortOrder {
+    Ascending,
+    Descending,
+}
+
+impl SortOrder {
+    /// The effective value of the attribute: `ascending` or `descending`.
+    pub fn parse(value: &str) -> Option<Self> {
+        match crate::whitespace::trim(value) {
+            "ascending" => Some(SortOrder::Ascending),
+            "descending" => Some(SortOrder::Descending),
+            _ => None,
+        }
+    }
+}
+
+/// `data-type` on `xsl:sort` (§13.1.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortDataType {
+    /// No `data-type`: the atomized values are compared by the rules of their
+    /// own type ("Any values of type `xs:untypedAtomic` are cast to
+    /// `xs:string`").
+    Typed,
+    /// `text`: converted with `string()`.
+    Text,
+    /// `number`: converted with `number()`.
+    Number,
+}
+
+impl SortDataType {
+    /// The effective value of the attribute.
+    ///
+    /// > If the `data-type` attribute has any other effective value, then the
+    /// > value must be a lexical QName with a non-empty prefix, and the effect
+    /// > of the attribute is implementation-defined.
+    ///
+    /// This processor defines no such data type: a prefixed QName is accepted
+    /// and the key is compared as if there were no `data-type` attribute.
+    /// Anything else is `None` (XTSE0020 for a fixed value, XTDE0030 for a
+    /// computed one). The prefix must still be declared — see
+    /// [`qname_prefix`](Self::qname_prefix).
+    pub fn parse(value: &str) -> Option<Self> {
+        match crate::whitespace::trim(value) {
+            "text" => Some(SortDataType::Text),
+            "number" => Some(SortDataType::Number),
+            _ if Self::qname_prefix(value).is_some() => Some(SortDataType::Typed),
+            _ => None,
+        }
+    }
+
+    /// The prefix of a `data-type` value that is a prefixed QName, which the
+    /// defining element must bind.
+    ///
+    /// > \[§5.1\] \[ERR XTSE0280\] In the case of a prefixed QName used as the
+    /// > value of an attribute in the stylesheet, or appearing within an XPath
+    /// > expression in the stylesheet, it is a static error if the defining
+    /// > element has no namespace node whose name matches the prefix of the
+    /// > QName.
+    ///
+    /// > \[ERR XTDE0290\] Where the result of evaluating an XPath expression
+    /// > (or an attribute value template) is required to be a lexical QName,
+    /// > then unless otherwise specified it is a non-recoverable dynamic error
+    /// > if the defining element has no namespace node whose name matches the
+    /// > prefix of the lexical QName.
+    pub fn qname_prefix(value: &str) -> Option<&str> {
+        let (prefix, local) = crate::whitespace::trim(value).split_once(':')?;
+        (crate::names::is_ncname(prefix) && crate::names::is_ncname(local)).then_some(prefix)
+    }
+}
+
+/// `case-order` on `xsl:sort` (§13.1.3): `upper-first` or `lower-first`.
+pub fn parse_case_order(value: &str) -> Option<crate::collation::CaseOrder> {
+    match crate::whitespace::trim(value) {
+        "upper-first" => Some(crate::collation::CaseOrder::UpperFirst),
+        "lower-first" => Some(crate::collation::CaseOrder::LowerFirst),
+        _ => None,
+    }
+}
+
+/// Whether `value` is valid for `lang` on `xsl:sort`.
+///
+/// > \[§13.1.3\] The effective value of the attribute must be a value that
+/// > would be valid for the `xml:lang` attribute (see \[XML 1.0\]).
+///
+/// XML 1.0 takes `xml:lang` values from BCP 47 and allows the empty string
+/// ("no language information"); the syntax checked is that of `xs:language`,
+/// `[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*`, or empty.
+pub fn is_valid_lang(value: &str) -> bool {
+    let value = crate::whitespace::trim(value);
+    if value.is_empty() {
+        return true;
+    }
+    value.split('-').enumerate().all(|(index, part)| {
+        (1..=8).contains(&part.len())
+            && part.bytes().all(|b| {
+                if index == 0 {
+                    b.is_ascii_alphabetic()
+                } else {
+                    b.is_ascii_alphanumeric()
+                }
+            })
+    })
+}
+
 /// The value of a variable-binding element (§9.2).
 pub enum VarValue {
     /// `select="…"` — the value is the expression's result.
@@ -243,6 +380,8 @@ pub enum InstructionKind {
         select: Option<ExprId>,
         mode: ModeRef,
         params: Vec<WithParam>,
+        /// The sort key specification (§13); empty when there is none.
+        sort: Vec<SortKey>,
     },
     ApplyImports {
         params: Vec<WithParam>,
@@ -256,6 +395,15 @@ pub enum InstructionKind {
     },
     ForEach {
         select: ExprId,
+        /// The sort key specification (§13); empty when there is none.
+        sort: Vec<SortKey>,
+        body: Body,
+    },
+    /// `xsl:perform-sort` (§13.2): the initial sequence is `select`, or the
+    /// sequence constructor, or empty when there is neither.
+    PerformSort {
+        select: Option<ExprId>,
+        sort: Vec<SortKey>,
         body: Body,
     },
     If {

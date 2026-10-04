@@ -17,9 +17,10 @@ use xsd_schema::navigator::{DomNavigator, DomNodeType, NamespaceAxisScope};
 use xsd_schema::xpath::functions::effective_boolean_value;
 use xsd_schema::xpath::{XPathContext, XPathExpr};
 
+use crate::collation::{CollationRegistry, UCA_COLLATION_PREFIX, UCA_MILESTONE};
 use crate::error::{codes, Location, XsltError};
 use crate::functions::{StaticEvaluator, XsltFunctions};
-use crate::names::{is_standard_collation, CODEPOINT_COLLATION, XML_NS, XSLT_NS};
+use crate::names::{CODEPOINT_COLLATION, XML_NS, XSLT_NS};
 use crate::receiver::Nav;
 use crate::resolver::{self, Resolver};
 use crate::whitespace;
@@ -77,7 +78,13 @@ pub struct StaticContext {
     /// Default namespace for unprefixed element names *in XPath expressions and
     /// patterns* (`[xsl:]xpath-default-namespace`).
     pub xpath_default_namespace: String,
-    /// `[xsl:]default-collation`; stored only — M1 knows one collation.
+    /// The default collation (§3.6.1): the first URI of the nearest
+    /// `[xsl:]default-collation` that the
+    /// [`CollationRegistry`] recognizes,
+    /// absolute; the codepoint collation when no ancestor has the attribute.
+    /// It becomes the default collation of every `XPathContext` built for this
+    /// static context. §3.6.1: it "does not affect the collation used by
+    /// xsl:sort".
     pub default_collation: String,
     /// Base URI after `xml:base`.
     pub base_uri: String,
@@ -852,16 +859,20 @@ fn evaluate_use_when(
     names: &NameTable,
     functions: &XsltFunctions,
 ) -> Result<bool, XsltError> {
-    let sc = static_context_of(nav, module)?;
+    let sc = use_when_static_context(nav, module);
     // §3.12's "In scope functions" row: the F&O core plus `element-available`,
     // `function-available`, `type-available` and `system-property`, and nothing
     // else — so a call to an XSLT-specific function such as `generate-id()` or
     // `key()` does not bind, which is XPST0017.
     let use_when_catalog = functions.use_when_catalog();
+    // "In scope collations: Implementation-defined" — the same registry as
+    // every other expression; "Default collation: The Unicode Codepoint
+    // Collation", which is what an `XPathContext` defaults to.
     let mut ctx = XPathContext::new(names)
         .with_namespaces(sc.snapshot(names))
         .with_base_uri(sc.base_uri.clone())
-        .with_function_catalog(&use_when_catalog);
+        .with_function_catalog(&use_when_catalog)
+        .with_collation_resolver(functions.collations());
     if !sc.xpath_default_namespace.is_empty() {
         ctx = ctx.with_default_element_ns(names.add(&sc.xpath_default_namespace));
     }
@@ -903,6 +914,51 @@ fn evaluate_use_when(
         None => fail(e),
     })?;
     effective_boolean_value(&value).map_err(fail)
+}
+
+/// The parts of an element's static context that its `use-when` expression
+/// sees (§3.12's table): its in-scope namespaces, the nearest
+/// `[xsl:]xpath-default-namespace` and its base URI.
+///
+/// Not [`static_context_of`]: that one also interprets `[xsl:]version`,
+/// `[xsl:]default-collation`, `[xsl:]exclude-result-prefixes` and
+/// `[xsl:]extension-element-prefixes`, and reports their errors — but the
+/// element may be about to be excluded, and §3.12 says "When a node is
+/// effectively excluded from a stylesheet module the stylesheet module has the
+/// same effect as if the node were not there. Among other things this means
+/// that no static or dynamic errors will be reported in respect of the element
+/// and its contents, other than errors in the use-when attribute itself." (Its
+/// Note keeps the errors of "attributes that are necessarily processed before
+/// \[xsl:\]use-when, examples being xml:space and
+/// \[xsl:\]xpath-default-namespace"; neither can raise one here.) The
+/// attributes of an element that is *not* excluded are interpreted, and their
+/// errors reported, when it is checked and compiled.
+fn use_when_static_context(nav: &Nav<'_>, module: &Module<'_>) -> StaticContext {
+    let mut xpath_default_namespace = String::new();
+    let mut cursor = nav.clone();
+    loop {
+        if cursor.node_type() == DomNodeType::Element {
+            if let Some(v) = standard_attr(&cursor, "xpath-default-namespace") {
+                xpath_default_namespace = v;
+                break;
+            }
+        }
+        if !cursor.move_to_parent() {
+            break;
+        }
+    }
+    StaticContext {
+        module: module.id,
+        namespaces: in_scope_namespaces(nav),
+        xpath_default_namespace,
+        // "Default collation: The Unicode Codepoint Collation".
+        default_collation: CODEPOINT_COLLATION.to_string(),
+        base_uri: base_uri_of(nav, &module.uri),
+        // "XPath 1.0 compatibility mode: false".
+        compat: CompatMode::Xslt20,
+        excluded_namespaces: Vec::new(),
+        extension_namespaces: Vec::new(),
+    }
 }
 
 /// §3.6: the `version` attribute must be a number.
@@ -1110,7 +1166,11 @@ pub fn in_scope_namespaces(nav: &Nav<'_>) -> Vec<(String, String)> {
 /// `[xsl:]extension-element-prefixes` are unioned — §11.1.2: "the set of
 /// excluded namespaces for a literal result element … is the union of the sets
 /// of excluded namespaces of its ancestors".
-pub fn static_context_of(nav: &Nav<'_>, module: &Module<'_>) -> Result<StaticContext, XsltError> {
+pub fn static_context_of(
+    nav: &Nav<'_>,
+    module: &Module<'_>,
+    collations: &CollationRegistry,
+) -> Result<StaticContext, XsltError> {
     let mut ancestors: Vec<Nav<'_>> = Vec::new();
     let mut cursor = nav.clone();
     loop {
@@ -1175,18 +1235,21 @@ pub fn static_context_of(nav: &Nav<'_>, module: &Module<'_>) -> Result<StaticCon
             let candidates: Vec<String> = whitespace::tokens(&v)
                 .map(|token| resolver::resolve_uri(&base, token))
                 .collect();
-            ctx.default_collation = match candidates.iter().find(|uri| *uri == CODEPOINT_COLLATION)
-            {
+            ctx.default_collation = match candidates.iter().find(|uri| collations.recognizes(uri)) {
                 Some(uri) => uri.clone(),
-                // A standard collation this processor has not built is a
-                // missing feature, not a broken stylesheet (§9.5; the
-                // collation registry is M2d's).
-                None => match candidates.iter().find(|uri| is_standard_collation(uri)) {
+                // A UCA collation of F&O 3.0 is a missing feature, not a
+                // broken stylesheet: it needs locale data, which the planned
+                // ICU cargo feature brings (M2k, DESIGN §9.5).
+                None => match candidates
+                    .iter()
+                    .find(|uri| uri.starts_with(UCA_COLLATION_PREFIX))
+                {
                     Some(uri) => {
                         return Err(XsltError::not_implemented(
                             format!("the collation {uri}"),
-                            "M2d",
-                        ))
+                            UCA_MILESTONE,
+                        )
+                        .with_location(module.location(a)))
                     }
                     None => {
                         return Err(XsltError::new(
@@ -1195,7 +1258,8 @@ pub fn static_context_of(nav: &Nav<'_>, module: &Module<'_>) -> Result<StaticCon
                                 "no collation URI in default-collation={v:?} is one this processor \
                                  recognizes"
                             ),
-                        ))
+                        )
+                        .with_location(module.location(a)))
                     }
                 },
             };
