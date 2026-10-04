@@ -611,17 +611,22 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             }
         }
         self.scope.truncate(scope_mark);
-        let _ = precedence;
         let entry = self
             .attribute_sets
             .entry(name.clone())
             .or_insert_with(|| AttributeSet {
                 name,
-                use_attribute_sets: Vec::new(),
-                attributes: Vec::new(),
+                declarations: Vec::new(),
             });
-        entry.use_attribute_sets.extend(uses);
-        entry.attributes.extend(attributes);
+        // Declarations arrive in declaration order; a stable sort by import
+        // precedence then gives §10.2's processing order whatever order the
+        // modules are walked in.
+        entry.declarations.push(AttributeSetDecl {
+            precedence,
+            use_attribute_sets: uses,
+            attributes,
+        });
+        entry.declarations.sort_by_key(|decl| decl.precedence);
         Ok(())
     }
 

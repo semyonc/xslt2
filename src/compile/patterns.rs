@@ -17,13 +17,37 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         ctx: StaticContextId,
     ) -> Result<PatternId, XsltError> {
         // Hand the whole pattern to the XPath parser first: a pattern is a
-        // restriction of the path syntax, so anything the parser rejects is
-        // XTSE0340 too.
+        // restriction of the path syntax, so anything the parser rejects as
+        // *syntax* is XTSE0340 too — §5.5.2: "it is a static error if the
+        // pattern does not match the production Pattern".
+        //
+        // A name the expression cannot resolve is a different error, and
+        // keeps the XPath code. §5.3: it is a static error if an expression
+        // "fails to satisfy other static constraints defined in the XPath
+        // specification, for example that all variable references must refer
+        // to variables that are in scope. Error codes are defined in
+        // [XPath 2.0]" — and every pattern is an expression. That reading
+        // needs the string to *be* a pattern, though: `$x` or `foo()` is not
+        // one, whatever else is wrong with it, so it stays XTSE0340.
+        //
+        // An unknown function is XPST0017 here like anywhere else; only with
+        // backwards-compatible behaviour, and only outside the standard
+        // function namespace, does the context's catalog bind the call to
+        // §3.8's fallback error function instead (`context_of`), so that it
+        // compiles and raises XTDE1425 only if it is evaluated.
         let visible = self.visible_vars(ctx);
         let names: Vec<&str> = visible.iter().map(|(n, _)| n.as_str()).collect();
-        XPathExpr::compile_with_vars(source, &self.contexts[ctx.0 as usize], &names).map_err(
-            |e| XsltError::new(codes::XTSE0340, format!("{source:?} is not a pattern: {e}")),
-        )?;
+        if let Err(e) = XPathExpr::compile_with_vars(source, &self.contexts[ctx.0 as usize], &names)
+        {
+            return Err(match e.error_code() {
+                Some(code @ ("XPST0008" | "XPST0017" | "XPST0051" | "XPST0081"))
+                    if has_pattern_shape(source) =>
+                {
+                    XsltError::new(code, format!("cannot compile the pattern {source:?}: {e}"))
+                }
+                _ => XsltError::new(codes::XTSE0340, format!("{source:?} is not a pattern: {e}")),
+            });
+        }
 
         let sc = self.static_contexts.get(ctx).clone();
         let mut sink = Sink {
@@ -34,6 +58,31 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         let pattern = pattern::parse(source, &mut sink)?;
         self.patterns.push(pattern);
         Ok(PatternId(self.patterns.len() as u32 - 1))
+    }
+}
+
+/// Whether `source` matches the production Pattern, judged on its shape alone.
+///
+/// Asked only after the whole string has parsed as an XPath expression and
+/// failed on a *name*, so the expressions inside its predicates are known to be
+/// syntactically sound; what is left to decide is whether the outer structure
+/// is a Pattern (§5.5.2). No prefix is resolved and no predicate is compiled.
+/// A construct of the Pattern grammar that this processor does not implement
+/// yet (an `id()`/`key()` pattern, a schema-aware node test) is still a
+/// Pattern.
+fn has_pattern_shape(source: &str) -> bool {
+    struct ShapeOnly;
+    impl PatternSink for ShapeOnly {
+        fn resolve_prefix(&self, _prefix: &str) -> Option<String> {
+            Some(String::new())
+        }
+        fn compile_predicate(&mut self, _source: &str) -> Result<ExprId, XsltError> {
+            Ok(ExprId(0))
+        }
+    }
+    match pattern::parse(source, &mut ShapeOnly) {
+        Ok(_) => true,
+        Err(e) => e.is_not_implemented(),
     }
 }
 

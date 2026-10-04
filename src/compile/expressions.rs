@@ -2,12 +2,13 @@
 //! compiled against (§5.1) and the QName attributes of a declaration (§2.4).
 
 use xsd_schema::navigator::DomNavigator;
+use xsd_schema::types::XmlTypeCode;
 use xsd_schema::xpath::{XPathContext, XPathExpr};
 
 use super::Builder;
 use crate::error::{codes, Location, XsltError};
 use crate::model::*;
-use crate::names::{resolve_qname, QName, XSLT_NS};
+use crate::names::{resolve_qname, split_qname, QName, XSD_NS, XSLT_NS};
 use crate::receiver::Nav;
 use crate::stylesheet::{attr_local, static_context_of, Module, StaticContextId};
 use crate::whitespace;
@@ -27,10 +28,20 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         let id = self.static_contexts.intern(sc);
         if self.static_contexts.len() > before {
             let sc = self.static_contexts.get(id);
+            // §3.8 / §9.10 row 3: with backwards-compatible behaviour a call to
+            // a function with no implementation (outside the standard function
+            // namespace) binds to the fallback error function; everywhere else
+            // — forwards-compatible behaviour included (§3.9 Note) — it is
+            // XPath's static XPST0017.
+            let catalog = if sc.compat.is_backwards() {
+                self.functions.backwards_compatible_catalog()
+            } else {
+                self.functions.catalog()
+            };
             let mut ctx = XPathContext::new(self.names)
                 .with_namespaces(sc.snapshot(self.names))
                 .with_base_uri(sc.base_uri.clone())
-                .with_function_catalog(self.functions.catalog())
+                .with_function_catalog(catalog)
                 // §9.10 row 1: a `version < 2.0` region keeps XPath 2.0 syntax
                 // and takes XPath 1.0 compatibility-mode semantics.
                 .with_xpath10_compatibility(sc.compat.is_backwards());
@@ -97,31 +108,18 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         let visible = self.visible_vars(ctx);
         let names: Vec<&str> = visible.iter().map(|(n, _)| n.as_str()).collect();
         let vars: Vec<VarLocation> = visible.iter().map(|(_, l)| *l).collect();
-        let compiled = XPathExpr::compile_with_vars(source, &self.contexts[ctx.0 as usize], &names);
-        let (expr, unavailable) = match compiled {
-            Ok(expr) => (expr, None),
-            // §3.9 / §9.10 row 3: a call to a function the processor does not
-            // have is an error only when the expression is evaluated, as long
-            // as compatibility is in force here. The expression is replaced by
-            // a stub that raises XTDE1425 if it is ever reached.
-            Err(e) if e.error_code() == Some("XPST0017") && self.tolerates_unknown(ctx) => {
-                let stub = XPathExpr::compile("()", &self.contexts[ctx.0 as usize])
-                    .map_err(|e| XsltError::internal(e.to_string()))?;
-                (stub, Some(format!("{e}")))
-            }
-            Err(e) => {
-                return Err(XsltError::new(
+        // A call to a function with no implementation needs no special case
+        // here: with backwards-compatible behaviour the context's catalog
+        // binds *the call* to §3.8's fallback error function (see
+        // `context_of`), and anywhere else it is the static XPST0017.
+        let expr = XPathExpr::compile_with_vars(source, &self.contexts[ctx.0 as usize], &names)
+            .map_err(|e| {
+                XsltError::new(
                     e.error_code().unwrap_or(codes::XTSE0010),
                     format!("cannot compile the expression {source:?}: {e}"),
-                ))
-            }
-        };
-        self.exprs.push(CompiledExpr {
-            expr,
-            ctx,
-            vars,
-            unavailable,
-        });
+                )
+            })?;
+        self.exprs.push(CompiledExpr { expr, ctx, vars });
         Ok(ExprId(self.exprs.len() as u32 - 1))
     }
 
@@ -136,7 +134,27 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         // The item type, without its occurrence indicator.
         let item = whitespace::trim(text.trim_end_matches(['?', '*', '+'])).to_string();
         let atomic = !item.contains('(') && !item.is_empty();
-        let cast = if atomic && item != "xs:anyAtomicType" {
+        // The expanded name decides which built-in type this is, never the
+        // spelling: XPath 2.0 resolves a prefixed type name through the
+        // in-scope namespaces, and an unprefixed one through the "default
+        // element/type namespace … used for any unprefixed QName appearing in
+        // a position where an element or type name is expected".
+        let target = if atomic {
+            let sc = self.static_contexts.get(ctx);
+            let (prefix, local) = split_qname(&item);
+            let uri = if prefix.is_empty() {
+                Some(sc.xpath_default_namespace.clone())
+            } else {
+                sc.resolve_prefix(prefix)
+            };
+            match uri {
+                Some(uri) if uri == XSD_NS => XmlTypeCode::from_local_name(local),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let cast = if atomic && target != Some(XmlTypeCode::AnyAtomicType) {
             Some(self.compile_probe(&format!("$value cast as {item}?"), ctx, &text)?)
         } else {
             None
@@ -147,6 +165,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             cast,
             atomic,
             item_type: item,
+            target,
         })
     }
 
@@ -168,17 +187,10 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             expr,
             ctx,
             vars: Vec::new(),
-            unavailable: None,
         });
         Ok(ExprId(self.exprs.len() as u32 - 1))
     }
 
-    /// Whether an unresolvable function call is tolerated here until it is
-    /// evaluated (§3.9, §9.10 row 3).
-    fn tolerates_unknown(&self, ctx: StaticContextId) -> bool {
-        let compat = self.static_contexts.get(ctx).compat;
-        compat.is_forwards() || compat.is_backwards()
-    }
     pub(super) fn required_expr(
         &mut self,
         nav: &Nav<'t>,

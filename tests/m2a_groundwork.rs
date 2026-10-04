@@ -323,10 +323,11 @@ fn a_named_untyped_element_test_outranks_the_plain_name_test() {
 /// attribute carries, so `attribute(*, xs:untypedAtomic)` reduces to `@*`, with
 /// priority 0 against the −0.5 of `attribute()`.
 ///
-/// The axis is written out because §5.5.3 adjusts the axis of a first pattern
-/// step from an explicit `PatternAxis` only; a bare `attribute(…)` node test
-/// keeps the (implicit) `child-or-top` axis, whose principal node kind is
-/// element. That is a separate question from the type test.
+/// The axis is written out to keep this test about the type test alone. A
+/// bare `attribute(…)` step means the same thing (M2i): XPath 2.0 §3.2.4, "the
+/// default axis is child unless the axis step contains an AttributeTest or
+/// SchemaAttributeTest; in that case, the default axis is attribute" —
+/// `tests/m2i_core_defects.rs` covers that rule.
 #[test]
 fn an_untyped_attribute_test_matches_every_attribute() {
     let out = transform(
@@ -389,16 +390,15 @@ fn a_type_test_that_needs_a_schema_is_still_not_implemented() {
     // A user-defined type name with no schema behind it is not "schema-aware,
     // later": "TypeName must be present in the in-scope schema types
     // [err:XPST0008]" (XPath 2.0 §2.5.4.3), for any processor. The XPath
-    // engine reports it when the pattern is compiled. The pattern compiler
-    // still wraps every XPath compile error as XTSE0340, which is meant for a
-    // pattern that does not match the Pattern syntax; passing a name error
-    // through with its own code is an M2i item — until then the XPST0008 is
-    // carried in the message.
+    // engine reports it when the pattern is compiled, and since M2i the
+    // pattern compiler keeps that code: XTSE0340 is for a pattern that does
+    // not match the Pattern syntax, while §5.3 gives an expression's other
+    // static errors the XPath codes.
     let body = r#"<xsl:template match="/"><out/></xsl:template>
                <xsl:template match="element(a, my:t)">HIT</xsl:template>"#;
     let error = transform(body, "<r><a/></r>").expect_err("element(a, my:t) unexpectedly compiled");
     assert!(!error.is_not_implemented(), "{error}");
-    assert!(error.to_string().contains("XPST0008"), "{error}");
+    assert_eq!(error.code, "XPST0008", "{error}");
 
     // A built-in type in a typed node test is fine statically; matching it
     // needs typed nodes, which arrive with the schema-aware milestone.
@@ -519,11 +519,8 @@ fn every_notimpl_names_its_sub_milestone() {
             "regex-group()",
             "M2h",
         ),
-        (
-            template(r#"<xsl:copy-of select="document('in.xml#frag')"/>"#),
-            "a fragment identifier in document()",
-            "M2i",
-        ),
+        // (A fragment identifier in document() was NOT-IMPL until M2i, which
+        // made it XTRE1160 — `tests/m2i_core_defects.rs`.)
         // pattern.rs: the key()/id() pattern.
         (
             format!(

@@ -13,6 +13,7 @@ use crate::error::{codes, XsltError};
 use crate::model::*;
 use crate::names::{is_ncname, lexical_qname, QName, XML_NS};
 use crate::receiver::{namespace_nodes_of, CopyNamespaces, Name, Nav, Receiver};
+use crate::stylesheet::attr_ns;
 use crate::whitespace;
 
 impl<'a, 't> Transformation<'a, 't> {
@@ -205,7 +206,11 @@ impl<'a, 't> Transformation<'a, 't> {
                 self.attribute_sets(attr_sets, frame, cx, out)?;
                 for (attr_name, avt) in attrs {
                     let value = self.avt(avt, frame, cx)?;
-                    out.attribute(attr_name, &value, None)?;
+                    out.attribute(
+                        attr_name,
+                        &constructed_attribute_value(attr_name, value),
+                        None,
+                    )?;
                 }
                 out.end_start_tag()?;
                 self.eval_body(body, frame, cx, out)?;
@@ -298,7 +303,8 @@ impl<'a, 't> Transformation<'a, 't> {
                     SimpleDefault::of(value),
                 )?;
                 let prefix = if uri.is_empty() { "" } else { prefix };
-                out.attribute(&Name::qualified(prefix, local, &uri), &text, None)
+                let name = Name::qualified(prefix, local, &uri);
+                out.attribute(&name, &constructed_attribute_value(&name, text), None)
             }
 
             InstructionKind::Namespace { name, value } => {
@@ -331,7 +337,7 @@ impl<'a, 't> Transformation<'a, 't> {
             InstructionKind::Comment { value } => {
                 let text =
                     self.simple_content(value, None, frame, cx, false, SimpleDefault::Space)?;
-                out.comment(&text)
+                out.comment(&repair_comment(&text))
             }
 
             InstructionKind::ProcessingInstruction { name, value } => {
@@ -345,7 +351,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 }
                 let text =
                     self.simple_content(value, None, frame, cx, false, SimpleDefault::Space)?;
-                out.pi(target, whitespace::trim_start(&text))
+                out.pi(target, &repair_pi_data(whitespace::trim_start(&text)))
             }
 
             InstructionKind::Document { body } => {
@@ -369,6 +375,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 },
                 attr_sets,
                 body,
+                &self.sheet.static_contexts.get(instruction.ctx).base_uri,
                 frame,
                 cx,
                 out,
@@ -396,7 +403,11 @@ impl<'a, 't> Transformation<'a, 't> {
                 terminate,
             } => {
                 let terminate = self.avt(terminate, frame, cx)?;
-                let terminate = crate::names::parse_yes_no(&terminate, "terminate")?;
+                // §2.2: an attribute value template's *effective* value that
+                // is not a permitted value is the dynamic XTDE0030, not the
+                // static XTSE0020 of a fixed attribute.
+                let terminate = crate::names::parse_yes_no(&terminate, "terminate")
+                    .map_err(|e| XsltError::new(codes::XTDE0030, e.message))?;
                 let content = self.message_content(*select, body, frame, cx)?;
                 let message = Message { content, terminate };
                 if let Some(sink) = &self.message_sink {
@@ -433,11 +444,13 @@ impl<'a, 't> Transformation<'a, 't> {
     }
 
     /// §11.9.1 `xsl:copy`.
+    #[allow(clippy::too_many_arguments)]
     fn copy_shallow(
         &self,
         namespaces: ShallowCopyNamespaces,
         attr_sets: &[QName],
         body: &Body,
+        instruction_base: &str,
         frame: &mut Frame<'t>,
         cx: &XsltContext<'t>,
         out: &mut dyn Receiver<'t>,
@@ -462,6 +475,18 @@ impl<'a, 't> Transformation<'a, 't> {
             }
             DomNodeType::Element => {
                 out.start_element(&Name::of(&nav), None, false)?;
+                // §11.9.1: "The base URI of a node is copied, except in the
+                // case of an element node having an xml:base attribute, in
+                // which case the base URI of the new node is taken as the value
+                // of the xml:base attribute, resolved if it is relative against
+                // the base URI of the xsl:copy instruction." It matters only
+                // for a copy that stays parentless: one attached to a parent
+                // "inherits its base URI from its parent node".
+                let base = match attr_ns(&nav, XML_NS, "base") {
+                    Some(xml_base) => crate::resolver::resolve_uri(instruction_base, &xml_base),
+                    None => node_base_uri(&nav, instruction_base),
+                };
+                out.element_base_uri(&base)?;
                 if !namespaces.inherit {
                     out.no_inherit_namespaces()?;
                 }
@@ -523,9 +548,13 @@ impl<'a, 't> Transformation<'a, 't> {
                 ));
             };
             seen.push(name.clone());
-            self.attribute_sets_inner(&set.use_attribute_sets, seen, frame, cx, out)?;
-            for attribute in &set.attributes {
-                self.eval(attribute, frame, cx, out)?;
+            // §10.2: each declaration in turn, its own use-attribute-sets
+            // before its own attributes.
+            for decl in &set.declarations {
+                self.attribute_sets_inner(&decl.use_attribute_sets, seen, frame, cx, out)?;
+                for attribute in &decl.attributes {
+                    self.eval(attribute, frame, cx, out)?;
+                }
             }
             seen.pop();
         }
@@ -537,8 +566,11 @@ impl<'a, 't> Transformation<'a, 't> {
     fn children_of_focus(&self, cx: &XsltContext<'t>) -> Result<Vec<XmlItem<Nav<'t>>>, XsltError> {
         match &cx.item {
             Some(XmlItem::Node(nav)) => Ok(children_of(nav)),
+            // > \[ERR XTTE0510\] It is a type error if an xsl:apply-templates
+            // > instruction with no select attribute is evaluated when the
+            // > context item is not a node.
             Some(XmlItem::Atomic(_)) => Err(XsltError::new(
-                "XPTY0019",
+                codes::XTTE0510,
                 "xsl:apply-templates with no select needs a node as the context item",
             )),
             None => Err(XsltError::new(
@@ -650,5 +682,65 @@ fn copy_scope(copy_namespaces: bool) -> CopyNamespaces {
         CopyNamespaces::All
     } else {
         CopyNamespaces::FixupOnly
+    }
+}
+
+/// The base URI of an element node — the XDM `base-uri` accessor, as
+/// `fn:base-uri` computes it: the `xml:base` values of its ancestor-or-self
+/// elements, resolved outermost first against the base URI of the document
+/// the node lives in, which itself resolves against `fallback` (the static
+/// base URI; it is the whole answer when the document has none).
+///
+/// Not `DomNavigator::base_uri`: upstream's `BufferDocNavigator` answers that
+/// with the **raw** value of the nearest `xml:base` (or the document's base
+/// URI when there is none), so a relative `xml:base` on an ancestor would be
+/// reported unresolved (review R1).
+fn node_base_uri(nav: &Nav<'_>, fallback: &str) -> String {
+    let document = match nav.document().document_base_uri() {
+        Some(uri) if !uri.is_empty() => crate::resolver::resolve_uri(fallback, uri),
+        _ => fallback.to_string(),
+    };
+    crate::stylesheet::base_uri_of(nav, &document)
+}
+
+/// §11.8: "In the generated comment node, the processor must insert a space
+/// after any occurrence of `-` that is followed by another `-` or that ends
+/// the comment." A silent repair, not an error: `--` becomes `- -` and a
+/// trailing `-` becomes `- `, so the node can always be serialized.
+fn repair_comment(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c == '-' && matches!(chars.peek(), None | Some('-')) {
+            out.push(' ');
+        }
+    }
+    out
+}
+
+/// §11.6: "If the result of evaluating the content of the
+/// `xsl:processing-instruction` contains the string `?>`, this string is
+/// modified by inserting a space between the `?` and `>` characters."
+fn repair_pi_data(data: &str) -> String {
+    data.replace("?>", "? >")
+}
+
+/// The value a **constructed** attribute takes (§11.1.2 for a literal result
+/// element's attributes, §11.3 for `xsl:attribute`):
+///
+/// > If the name of a constructed attribute is `xml:id`, the processor must
+/// > perform attribute value normalization by effectively applying the
+/// > `normalize-space` function to the value of the attribute, and the
+/// > resulting attribute node must be given the is-id property.
+///
+/// The is-id property is the tree builder's business (it registers every
+/// `xml:id`); the normalization is this crate's. A *copied* `xml:id` is left as
+/// it is — §11.9.1 makes normalizing it implementation-defined.
+fn constructed_attribute_value(name: &Name, value: String) -> String {
+    if name.uri == XML_NS && name.local == "id" {
+        whitespace::tokens(&value).collect::<Vec<_>>().join(" ")
+    } else {
+        value
     }
 }

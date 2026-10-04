@@ -30,6 +30,17 @@ impl<'a, 't> Transformation<'a, 't> {
     /// document's own base URI are applied exactly once, in one place, and no
     /// future loader can forget them.
     pub(super) fn admit(&self, uri: Option<&str>, xml: &str) -> Result<DocId, XsltError> {
+        self.admit_with(uri, xml, codes::XTDE1170)
+    }
+
+    /// [`admit`](Self::admit), reporting a document that cannot be parsed
+    /// with `parse_code`. (A re-entrant load keeps XTDE1170, §9.1.)
+    fn admit_with(
+        &self,
+        uri: Option<&str>,
+        xml: &str,
+        parse_code: &str,
+    ) -> Result<DocId, XsltError> {
         if let Some(uri) = uri {
             if let Some(id) = self.store.borrow().id_of_uri(uri) {
                 return Ok(id);
@@ -43,7 +54,10 @@ impl<'a, 't> Transformation<'a, 't> {
         if let Some(uri) = uri {
             self.store.borrow_mut().leave_load(uri);
         }
-        let parsed = parsed?;
+        let parsed = parsed.map_err(|mut e| {
+            e.code = parse_code.to_string();
+            e
+        })?;
         let doc = self.strip_source(parsed, uri)?;
         let stripped = !std::ptr::eq(doc, parsed);
         if let Some(uri) = uri {
@@ -288,6 +302,24 @@ impl<'a, 't> Transformation<'a, 't> {
     /// > static context otherwise (this will usually be the base URI of the
     /// > stylesheet module).
     pub(super) fn load_relative_to(&self, base: &str, uri: &str) -> Result<DocId, XsltError> {
+        self.load_with_code(base, uri, codes::XTDE1170)
+    }
+
+    /// The load behind `document()` and `fn:doc` (§16.1), which report the
+    /// failure with `fn:doc`'s own code.
+    ///
+    /// §16.1: the URI "is passed to the doc function … If an error occurs
+    /// during evaluation of the doc function, the processor may either signal
+    /// this error in the normal way, or may recover". F&O §15.5.4 (`fn:doc`):
+    /// a resource that cannot be retrieved, or whose content cannot be parsed,
+    /// raises FODC0002. XTDE1170 is `unparsed-text()`'s code (§16.2).
+    pub(super) fn load_for_doc(&self, base: &str, uri: &str) -> Result<DocId, XsltError> {
+        self.load_with_code(base, uri, "FODC0002")
+    }
+
+    /// Loads `uri` resolved against `base`, reporting a resource that cannot
+    /// be read or parsed with `code`.
+    fn load_with_code(&self, base: &str, uri: &str, code: &str) -> Result<DocId, XsltError> {
         let absolute = resolver::resolve_uri(base, uri);
         if let Some(id) = self.store.borrow().id_of_uri(&absolute) {
             return Ok(id);
@@ -301,11 +333,12 @@ impl<'a, 't> Transformation<'a, 't> {
             .map(str::to_string);
         let text = match registered {
             Some(text) => text,
-            None => self.resolver.resolve_text(&absolute).map_err(|e| {
-                XsltError::new(codes::XTDE1170, format!("cannot read {absolute:?}: {e}"))
-            })?,
+            None => self
+                .resolver
+                .resolve_text(&absolute)
+                .map_err(|e| XsltError::new(code, format!("cannot read {absolute:?}: {e}")))?,
         };
-        self.admit(Some(&absolute), &text)
+        self.admit_with(Some(&absolute), &text, code)
     }
 }
 

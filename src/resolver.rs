@@ -193,81 +193,259 @@ pub fn has_scheme(uri: &str) -> bool {
     }
 }
 
-/// Resolves `reference` against `base`, RFC 3986-style but only as far as XSLT
-/// needs: absolute references win, an empty reference is the base itself, a
-/// fragment-only reference is appended, everything else is joined to the base's
-/// directory and normalized (`.` and `..` removed).
+/// Resolves `reference` against `base` by RFC 3986 §5.2 ("Relative
+/// Resolution"): §5.2.2's transform, §5.2.3's merge and §5.2.4's
+/// `remove_dot_segments`, on the five components Appendix B's parse yields.
+///
+/// Two consequences the earlier ad-hoc join got wrong (`base-uri-013`,
+/// `-014`, `document-2003`): an absolute-path reference `/main/` keeps the
+/// base's scheme and authority (§5.2.2: "if (R.path starts-with "/") then
+/// T.path = remove_dot_segments(R.path) … T.authority = Base.authority"), and a
+/// final `..` or `.` segment leaves the trailing slash behind (§5.2.4:
+/// `/a/b/..` is `/a/`). A scheme is any `ALPHA *( ALPHA / DIGIT / "+" / "-" /
+/// "." )` before the first `:` (§3.1), a one-letter one included.
+///
+/// A base that is itself relative (no scheme) is outside RFC 3986, which
+/// requires an absolute base; it is merged the same way, and a leading `..`
+/// that has nothing to remove is kept rather than dropped. Whenever the result
+/// has a scheme, §5.2.4 applies as written — rule A: "If the input buffer
+/// begins with a prefix of "../" or "./", then remove that prefix from the
+/// input buffer" — so `urn:a` + `../b` is `urn:b`, not `urn:../b`.
 pub fn resolve_uri(base: &str, reference: &str) -> String {
-    if reference.is_empty() {
-        return base.to_string();
-    }
-    if has_scheme(reference) || reference.starts_with('/') {
-        return normalize_uri(reference);
-    }
-    if let Some(rest) = reference.strip_prefix('#') {
-        let stem = base.split('#').next().unwrap_or(base);
-        return format!("{stem}#{rest}");
-    }
-    let base = base.split('#').next().unwrap_or(base);
-    let dir = match base.rfind('/') {
-        Some(i) => &base[..=i],
-        None => "",
-    };
-    normalize_uri(&format!("{dir}{reference}"))
-}
-
-/// Removes `.` and `..` segments, keeping any scheme and authority intact.
-pub fn normalize_uri(uri: &str) -> String {
-    let (head, path) = split_authority(uri);
-    let (path, tail) = match path.find(['#', '?']) {
-        Some(i) => (&path[..i], &path[i..]),
-        None => (path, ""),
-    };
-    let absolute = path.starts_with('/');
-    let mut out: Vec<&str> = Vec::new();
-    for segment in path.split('/') {
-        match segment {
-            "." => {}
-            ".." => {
-                // A leading `..` of a relative path has nothing to pop and must
-                // be kept (`xsd-schema`'s own 0.2.0 bug, `resolver.rs`).
-                match out.last() {
-                    Some(&last) if last != ".." => {
-                        out.pop();
-                    }
-                    _ if absolute => {}
-                    _ => out.push(".."),
-                }
-            }
-            "" => {}
-            s => out.push(s),
-        }
-    }
-    let trailing = if path.ends_with('/') && !out.is_empty() {
-        "/"
+    let r = UriParts::parse(reference);
+    let b = UriParts::parse(base);
+    // RFC 3986 governs whenever the target URI has a scheme (§5.2.2 takes it
+    // from the reference or the base); only with no scheme at all is the
+    // relative-path behaviour kept.
+    let dots = if r.scheme.is_some() || b.scheme.is_some() {
+        Dots::Rfc3986
     } else {
-        ""
+        Dots::KeepLeading
     };
-    let body = out.join("/");
-    let slash = if absolute { "/" } else { "" };
-    format!("{head}{slash}{body}{trailing}{tail}")
+    let (scheme, authority, path, query);
+    if r.scheme.is_some() {
+        scheme = r.scheme;
+        authority = r.authority;
+        path = remove_dot_segments(r.path, dots);
+        query = r.query;
+    } else {
+        if r.authority.is_some() {
+            authority = r.authority;
+            path = remove_dot_segments(r.path, dots);
+            query = r.query;
+        } else {
+            if r.path.is_empty() {
+                path = b.path.to_string();
+                query = r.query.or(b.query);
+            } else {
+                path = if r.path.starts_with('/') {
+                    remove_dot_segments(r.path, dots)
+                } else {
+                    remove_dot_segments(&merge_paths(&b, r.path), dots)
+                };
+                query = r.query;
+            }
+            authority = b.authority;
+        }
+        scheme = b.scheme;
+    }
+    UriParts {
+        scheme,
+        authority,
+        path: &path,
+        query,
+        fragment: r.fragment,
+    }
+    .recompose()
 }
 
-/// Splits a `scheme://authority` (or `scheme:`) prefix off a URI.
-fn split_authority(uri: &str) -> (&str, &str) {
-    let Some(colon) = uri.find(':') else {
-        return ("", uri);
-    };
-    if !has_scheme(uri) {
-        return ("", uri);
+/// Removes `.` and `..` segments from the path of `uri` (RFC 3986 §5.2.4),
+/// keeping its scheme, authority, query and fragment intact. A leading `..`
+/// of a relative path, which has nothing to remove, is kept.
+pub fn normalize_uri(uri: &str) -> String {
+    let parts = UriParts::parse(uri);
+    let path = remove_dot_segments(parts.path, Dots::KeepLeading);
+    UriParts {
+        path: &path,
+        ..parts
     }
-    let after = &uri[colon + 1..];
-    match after.strip_prefix("//") {
-        Some(rest) => {
-            let end = rest.find('/').unwrap_or(rest.len());
-            (&uri[..colon + 3 + end], &rest[end..])
+    .recompose()
+}
+
+/// The five components of a URI reference (RFC 3986 §3, parsed as Appendix B
+/// does): `scheme ":" "//" authority path "?" query "#" fragment`, each but
+/// the path optional.
+struct UriParts<'u> {
+    scheme: Option<&'u str>,
+    authority: Option<&'u str>,
+    path: &'u str,
+    query: Option<&'u str>,
+    fragment: Option<&'u str>,
+}
+
+impl<'u> UriParts<'u> {
+    fn parse(text: &'u str) -> Self {
+        let (rest, fragment) = match text.split_once('#') {
+            Some((rest, fragment)) => (rest, Some(fragment)),
+            None => (text, None),
+        };
+        let (rest, query) = match rest.split_once('?') {
+            Some((rest, query)) => (rest, Some(query)),
+            None => (rest, None),
+        };
+        let (scheme, rest) = match rest.find([':', '/']) {
+            Some(i) if rest.as_bytes()[i] == b':' && is_scheme(&rest[..i]) => {
+                (Some(&rest[..i]), &rest[i + 1..])
+            }
+            _ => (None, rest),
+        };
+        let (authority, path) = match rest.strip_prefix("//") {
+            Some(after) => {
+                let end = after.find('/').unwrap_or(after.len());
+                (Some(&after[..end]), &after[end..])
+            }
+            None => (None, rest),
+        };
+        UriParts {
+            scheme,
+            authority,
+            path,
+            query,
+            fragment,
         }
-        None => (&uri[..colon + 1], after),
+    }
+
+    /// RFC 3986 §5.3, "Component Recomposition".
+    fn recompose(&self) -> String {
+        let mut out = String::new();
+        if let Some(scheme) = self.scheme {
+            out.push_str(scheme);
+            out.push(':');
+        }
+        if let Some(authority) = self.authority {
+            out.push_str("//");
+            out.push_str(authority);
+        }
+        out.push_str(self.path);
+        if let Some(query) = self.query {
+            out.push('?');
+            out.push_str(query);
+        }
+        if let Some(fragment) = self.fragment {
+            out.push('#');
+            out.push_str(fragment);
+        }
+        out
+    }
+}
+
+/// The identity of the resource `uri` names, for **comparing** documents —
+/// never for retrieving them.
+///
+/// RFC 3986 keeps empty path segments, so `file:///d//m.xsl` and
+/// `file:///d/m.xsl` are different URIs (and resolution must keep them
+/// apart); but a file system ignores empty segments, so for a `file:` URI the
+/// two name the same file. The stylesheet loader's cycle check (§3.10.2
+/// XTSE0180, §3.10.3 XTSE0210) compares modules by this identity, or a
+/// self-include spelled `.//m.xsl` would load itself under an ever longer
+/// name until the operating system refused the path (review R6). For a `file:`
+/// URI the runs of `/` in the path are collapsed; every other URI is its own
+/// identity.
+pub(crate) fn resource_identity(uri: &str) -> String {
+    let parts = UriParts::parse(uri);
+    if !parts
+        .scheme
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file"))
+    {
+        return uri.to_string();
+    }
+    let mut path = String::with_capacity(parts.path.len());
+    for ch in parts.path.chars() {
+        if ch == '/' && path.ends_with('/') {
+            continue;
+        }
+        path.push(ch);
+    }
+    UriParts {
+        path: &path,
+        ..parts
+    }
+    .recompose()
+}
+
+/// RFC 3986 §3.1: `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`.
+fn is_scheme(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// RFC 3986 §5.2.3, "Merge Paths".
+///
+/// > If the base URI has a defined authority component and an empty path,
+/// > then return a string consisting of "/" concatenated with the reference's
+/// > path; otherwise, return a string consisting of the reference's path
+/// > component appended to all but the last segment of the base URI's path
+/// > (i.e., excluding any characters after the right-most "/" in the base URI
+/// > path, or excluding the entire base URI path if it does not contain any
+/// > "/" characters).
+fn merge_paths(base: &UriParts<'_>, reference: &str) -> String {
+    if base.authority.is_some() && base.path.is_empty() {
+        return format!("/{reference}");
+    }
+    match base.path.rfind('/') {
+        Some(i) => format!("{}{reference}", &base.path[..=i]),
+        None => reference.to_string(),
+    }
+}
+
+/// What [`remove_dot_segments`] does with a `..` that has no segment before
+/// it to remove, in a path that does not start with `/`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dots {
+    /// RFC 3986 §5.2.4 as written (rule A drops a leading `../`): for a path
+    /// that belongs to a URI with a scheme.
+    Rfc3986,
+    /// Keep it: a relative reference resolved against nothing absolute, which
+    /// is outside RFC 3986, must not lose its way up (`../a` stays `../a`).
+    KeepLeading,
+}
+
+/// RFC 3986 §5.2.4, "Remove Dot Segments", as a segment stack: a `.` is
+/// dropped, a `..` removes the segment before it, and either one in the
+/// **last** position leaves the path ending in `/`. Empty segments (`a//b`)
+/// are kept. A `..` with nothing to remove is dropped in an absolute path and
+/// under [`Dots::Rfc3986`], and kept under [`Dots::KeepLeading`].
+fn remove_dot_segments(path: &str, dots: Dots) -> String {
+    let absolute = path.starts_with('/');
+    let body = if absolute { &path[1..] } else { path };
+    let segments: Vec<&str> = body.split('/').collect();
+    let last = segments.len() - 1;
+    let mut out: Vec<&str> = Vec::with_capacity(segments.len());
+    for (index, segment) in segments.iter().enumerate() {
+        match *segment {
+            "." => {}
+            ".." => match out.last() {
+                Some(&previous) if previous != ".." => {
+                    out.pop();
+                }
+                _ if absolute || dots == Dots::Rfc3986 => {}
+                _ => out.push(".."),
+            },
+            other => {
+                out.push(other);
+                continue;
+            }
+        }
+        if index == last {
+            out.push("");
+        }
+    }
+    let joined = out.join("/");
+    if absolute {
+        format!("/{joined}")
+    } else {
+        joined
     }
 }
 
@@ -369,6 +547,69 @@ mod tests {
             resolve_uri("file:///a/b/c.xsl", "#x"),
             "file:///a/b/c.xsl#x"
         );
+    }
+
+    /// RFC 3986 §5.4.1, "Normal Examples", against its base
+    /// `http://a/b/c/d;p?q` — every row of the table.
+    #[test]
+    fn rfc_3986_normal_examples() {
+        let base = "http://a/b/c/d;p?q";
+        for (reference, expected) in [
+            ("g:h", "g:h"),
+            ("g", "http://a/b/c/g"),
+            ("./g", "http://a/b/c/g"),
+            ("g/", "http://a/b/c/g/"),
+            ("/g", "http://a/g"),
+            ("//g", "http://g"),
+            ("?y", "http://a/b/c/d;p?y"),
+            ("g?y", "http://a/b/c/g?y"),
+            ("#s", "http://a/b/c/d;p?q#s"),
+            ("g#s", "http://a/b/c/g#s"),
+            ("g?y#s", "http://a/b/c/g?y#s"),
+            (";x", "http://a/b/c/;x"),
+            ("g;x", "http://a/b/c/g;x"),
+            ("g;x?y#s", "http://a/b/c/g;x?y#s"),
+            ("", "http://a/b/c/d;p?q"),
+            (".", "http://a/b/c/"),
+            ("./", "http://a/b/c/"),
+            ("..", "http://a/b/"),
+            ("../", "http://a/b/"),
+            ("../g", "http://a/b/g"),
+            ("../..", "http://a/"),
+            ("../../", "http://a/"),
+            ("../../g", "http://a/g"),
+        ] {
+            assert_eq!(resolve_uri(base, reference), expected, "{reference:?}");
+        }
+    }
+
+    /// RFC 3986 §5.4.2, "Abnormal Examples" (the strict-parser column).
+    #[test]
+    fn rfc_3986_abnormal_examples() {
+        let base = "http://a/b/c/d;p?q";
+        for (reference, expected) in [
+            ("../../../g", "http://a/g"),
+            ("../../../../g", "http://a/g"),
+            ("/./g", "http://a/g"),
+            ("/../g", "http://a/g"),
+            ("g.", "http://a/b/c/g."),
+            (".g", "http://a/b/c/.g"),
+            ("g..", "http://a/b/c/g.."),
+            ("..g", "http://a/b/c/..g"),
+            ("./../g", "http://a/b/g"),
+            ("./g/.", "http://a/b/c/g/"),
+            ("g/./h", "http://a/b/c/g/h"),
+            ("g/../h", "http://a/b/c/h"),
+            ("g;x=1/./y", "http://a/b/c/g;x=1/y"),
+            ("g;x=1/../y", "http://a/b/c/y"),
+            ("g?y/./x", "http://a/b/c/g?y/./x"),
+            ("g?y/../x", "http://a/b/c/g?y/../x"),
+            ("g#s/./x", "http://a/b/c/g#s/./x"),
+            ("g#s/../x", "http://a/b/c/g#s/../x"),
+            ("http:g", "http:g"),
+        ] {
+            assert_eq!(resolve_uri(base, reference), expected, "{reference:?}");
+        }
     }
 
     #[test]

@@ -58,7 +58,7 @@ use crate::names::{resolve_qname, QName, XML_NS, XSLT_NS};
 use crate::receiver::Nav;
 use crate::stylesheet::{
     attr_local, attributes, in_scope_namespaces, is_stripped_stylesheet_text,
-    move_to_document_element, static_context_of, Module, ModuleSet, StaticContext,
+    move_to_document_element, static_context_of, text_run_value, Module, ModuleSet, StaticContext,
 };
 use crate::whitespace;
 
@@ -1356,8 +1356,12 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             out.push(&rule.body);
             out.extend(rule.params.iter().filter_map(|p| body_of(&p.value)));
         }
-        for set in self.attribute_sets.values() {
-            out.extend(set.attributes.iter().filter_map(|i| match &i.kind {
+        for decl in self
+            .attribute_sets
+            .values()
+            .flat_map(|set| &set.declarations)
+        {
+            out.extend(decl.attributes.iter().filter_map(|i| match &i.kind {
                 InstructionKind::Attribute {
                     value: ValueSource::Content(body),
                     ..
@@ -1457,7 +1461,8 @@ pub(crate) fn is_significant_text(parent: &Nav<'_>, child: &Nav<'_>) -> bool {
     if !child.node_type().is_text_like() {
         return false;
     }
-    if !whitespace::is_all_xml_whitespace(&child.value()) {
+    // §4.2 decides on the merged text node, not on one piece of it.
+    if !whitespace::is_all_xml_whitespace(&text_run_value(child)) {
         return true;
     }
     if is_stripped_stylesheet_text(child) {
@@ -1471,12 +1476,15 @@ pub(crate) fn is_significant_text(parent: &Nav<'_>, child: &Nav<'_>) -> bool {
 
 /// Whether the next sibling element of a text node is `xsl:param` or `xsl:sort`
 /// (§4.2, last bullet). Comments and processing instructions are removed by the
-/// first bullet, so they are skipped here.
+/// first bullet, so they are skipped here; so are the other text nodes of the
+/// same run, which the second bullet merges with this one (and which are
+/// whitespace too, or this test would not be reached).
 fn followed_by_param_or_sort(child: &Nav<'_>) -> bool {
     let mut cursor = child.clone();
     while cursor.move_to_next_sibling() {
         match cursor.node_type() {
             DomNodeType::Comment | DomNodeType::ProcessingInstruction => continue,
+            kind if kind.is_text_like() => continue,
             DomNodeType::Element => {
                 return cursor.namespace_uri() == XSLT_NS
                     && matches!(cursor.local_name(), "param" | "sort")

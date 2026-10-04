@@ -9,7 +9,10 @@ use crate::error::{codes, Location, XsltError};
 use crate::model::*;
 use crate::names::{parse_yes_no, XSLT_NS};
 use crate::receiver::Nav;
-use crate::stylesheet::{attr_local, is_stripped_stylesheet_text, ModuleId, StaticContextId};
+use crate::stylesheet::{
+    attr_local, is_stripped_stylesheet_text, starts_text_run, text_run_value, ModuleId,
+    StaticContextId,
+};
 use crate::whitespace;
 
 impl<'a, 'm, 't> Builder<'a, 'm, 't> {
@@ -43,13 +46,18 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                         out.push(self.instruction(&child, module_id)?);
                     }
                 }
-                // §4.2: whitespace-only text nodes are stripped.
-                kind if kind.is_text_like() && !is_stripped_stylesheet_text(&child) => {
+                // §4.2: comments and PIs are removed, the text nodes that
+                // become adjacent are merged — one instruction per run, made
+                // by its first node — and whitespace-only runs are stripped.
+                kind if kind.is_text_like()
+                    && starts_text_run(&child)
+                    && !is_stripped_stylesheet_text(&child) =>
+                {
                     let module = self.modules.module(module_id);
                     let ctx = self.context_of(parent, module)?;
                     out.push(self.wrap(
                         InstructionKind::Text {
-                            text: child.value(),
+                            text: text_run_value(&child),
                             disable_output_escaping: false,
                         },
                         ctx,
@@ -366,6 +374,15 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     Some(text) => self.avt(&text, ctx)?,
                     None => Avt::literal("no"),
                 };
+                // > [ERR XTSE0020] It is a static error if an attribute (other
+                // > than an attribute written using curly brackets in a
+                // > position where an attribute value template is permitted)
+                // > contains a value that is not one of the permitted values.
+                // A value with no expression in it is checked here; only an
+                // effective value computed at run time is XTDE0030.
+                if let Some(fixed) = terminate.as_literal() {
+                    parse_yes_no(fixed, "terminate").map_err(|e| e.with_location(loc.clone()))?;
+                }
                 let select = match attr_local(nav, "select") {
                     Some(source) => Some(self.compile_expr(&source, ctx)?),
                     None => None,

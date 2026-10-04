@@ -82,12 +82,6 @@ pub struct CompiledExpr {
     pub expr: XPathExpr,
     pub ctx: StaticContextId,
     pub vars: Vec<VarLocation>,
-    /// Set when the expression could not be bound because it calls a function
-    /// this processor does not have, in a region where that is only an error
-    /// if the expression is evaluated (§3.9 forwards-compatible processing,
-    /// §9.10 row 3 backwards-compatible behaviour). Evaluating it raises
-    /// XTDE1425 with this message; not evaluating it costs nothing.
-    pub unavailable: Option<String>,
 }
 
 /// One part of an attribute value template (§5.6).
@@ -170,6 +164,11 @@ pub struct TypeCheck {
     pub atomic: bool,
     /// The item type, without its occurrence indicator, as written.
     pub item_type: String,
+    /// The built-in atomic type the item type names, resolved in the static
+    /// context of the `as` attribute — so `xsd:string`, and `double` under an
+    /// `xpath-default-namespace` of the XML Schema namespace, are recognised
+    /// as what they are. `None` for anything else.
+    pub target: Option<xsd_schema::types::XmlTypeCode>,
 }
 
 /// `xsl:with-param` (§10.1.1).
@@ -400,13 +399,33 @@ pub struct GlobalVar {
     pub loc: Location,
 }
 
-/// An `xsl:attribute-set` (§10.2), already merged across declarations of the
-/// same name.
+/// An `xsl:attribute-set` (§10.2): every declaration of one name.
+///
+/// The declarations are kept apart, not merged, because §10.2 expands each
+/// one in turn — its own `use-attribute-sets` first, then its own
+/// `xsl:attribute` instructions:
+///
+/// > Each xsl:attribute-set declaration whose name matches is processed as
+/// > follows. Where two such declarations have different import precedence,
+/// > the one with lower import precedence is processed first. Where two
+/// > declarations have the same import precedence, they are processed in
+/// > declaration order. If the xsl:attribute-set declaration has a
+/// > use-attribute-sets attribute, the attribute is expanded by applying this
+/// > algorithm recursively. If the xsl:attribute-set declaration contains one
+/// > or more xsl:attribute instructions, these instructions are evaluated …
+/// > These attribute nodes are appended to the result sequence.
 pub struct AttributeSet {
     pub name: QName,
+    /// In the order §10.2 processes them: ascending import precedence, then
+    /// declaration order.
+    pub declarations: Vec<AttributeSetDecl>,
+}
+
+/// One `xsl:attribute-set` declaration.
+pub struct AttributeSetDecl {
+    pub precedence: u32,
     pub use_attribute_sets: Vec<QName>,
-    /// The `xsl:attribute` instructions of every declaration of this name, in
-    /// import-precedence order (lowest first, so the highest wins last).
+    /// Its `xsl:attribute` instructions.
     pub attributes: Vec<Instruction>,
 }
 

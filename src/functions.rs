@@ -82,6 +82,11 @@ pub enum XsltFn {
     /// error-raising function. The engine ships the implementation but does not
     /// register it among its built-ins, so it is registered here.
     Error,
+    /// §3.8's *fallback error function*: what a call to a function with no
+    /// implementation is bound to under backwards-compatible behaviour (see
+    /// `XsltFunctions::backwards_compatible_catalog`). Evaluating it raises
+    /// XTDE1425.
+    FallbackError,
 }
 
 impl XsltFn {
@@ -138,6 +143,7 @@ impl XsltFn {
             XsltFn::FormatDate => "format-date",
             XsltFn::FormatTime => "format-time",
             XsltFn::Error => "error",
+            XsltFn::FallbackError => "the fallback error function",
         }
     }
 }
@@ -151,7 +157,10 @@ impl XsltFn {
 /// evaluated — so a `'static` navigator type is used and `XsltFunctions`
 /// itself carries no lifetime.
 pub struct XsltFunctions {
-    set: FunctionSet<RoXmlNavigator<'static>>,
+    /// The function set, wrapped with §3.8's fallback binding: `catalog.set`
+    /// is the catalog of an ordinary expression, `catalog` itself that of an
+    /// expression with backwards-compatible behaviour.
+    catalog: BackwardsCompatibleCatalog,
     by_handle: HashMap<FunctionHandle, XsltFn>,
     names: HashMap<(&'static str, usize), XsltFn>,
     /// The handles registered by [`Self::add_stub`]: in the catalog so that a
@@ -169,7 +178,11 @@ impl XsltFunctions {
     /// The XPath built-ins plus the XSLT function library.
     pub fn new() -> Self {
         let mut this = Self {
-            set: FunctionSet::with_builtins(),
+            catalog: BackwardsCompatibleCatalog {
+                set: FunctionSet::with_builtins(),
+                // Replaced below, once the function is registered.
+                fallback: None,
+            },
             by_handle: HashMap::new(),
             names: HashMap::new(),
             stubs: HashSet::new(),
@@ -398,6 +411,28 @@ impl XsltFunctions {
             vec![qname_opt, string(), items()],
             SequenceType::empty(),
         );
+
+        // ── §3.8: the fallback error function ────────────────────────────
+        //
+        // One variadic entry with no declared parameter types, so that a call
+        // of any arity binds to it and its arguments pass through untouched
+        // (XPath 1.0 compatibility mode converts only the arguments a
+        // signature declares). Its name is not a QName (`#` is not a name
+        // character), so no expression can call it by name: it is reached
+        // only through `BackwardsCompatibleCatalog`. Recorded as a stub, so
+        // that `function-available()` could not answer true for it either.
+        let handle = this.catalog.set.register(
+            DynamicFunctionSignature::variadic(FALLBACK_NS, FALLBACK_LOCAL, 0, vec![], items()),
+            |_ctx, _args| {
+                Err(XPathError::internal(
+                    "the fallback error function must be evaluated through xslt2's own \
+                     FunctionEvaluator",
+                ))
+            },
+        );
+        this.by_handle.insert(handle, XsltFn::FallbackError);
+        this.stubs.insert(handle);
+        this.catalog.fallback = Some(handle);
         this
     }
 
@@ -409,7 +444,7 @@ impl XsltFunctions {
         result: SequenceType,
     ) -> FunctionHandle {
         let arity = params.len();
-        let handle = self.set.register(
+        let handle = self.catalog.set.register(
             DynamicFunctionSignature::new(FN_NS, local, params, result),
             move |_ctx, _args| {
                 Err(XPathError::internal(format!(
@@ -445,7 +480,25 @@ impl XsltFunctions {
 
     /// Pass this to `XPathContext::with_function_catalog`.
     pub fn catalog(&self) -> &dyn FunctionCatalog {
-        &self.set
+        &self.catalog.set
+    }
+
+    /// The catalog of an expression processed with backwards-compatible
+    /// behaviour (§3.8): the same functions, and in addition "any function
+    /// call for which no implementation is available (unless it uses the
+    /// standard function namespace) is bound to a fallback error function
+    /// whose effect when evaluated is to raise a dynamic error \[see ERR
+    /// XTDE1425\]".
+    ///
+    /// Only the *call* is bound to the fallback, so the rest of the
+    /// expression compiles and runs normally — a call guarded by
+    /// `function-available()` is simply never evaluated (§3.8: "calls on
+    /// extension functions that are not available in a particular
+    /// implementation do not cause an error unless the function call is
+    /// actually evaluated"). A missing name in the standard function namespace
+    /// stays XPath's static XPST0017.
+    pub(crate) fn backwards_compatible_catalog(&self) -> &dyn FunctionCatalog {
+        &self.catalog
     }
 
     /// The catalog §3.12 gives a `use-when` expression: the same one with every
@@ -460,7 +513,7 @@ impl XsltFunctions {
     /// functions that can be called within the scope of the `use-when`
     /// attribute").
     pub fn is_available_in_use_when(&self, namespace: &str, local: &str, arity: usize) -> bool {
-        match self.set.lookup(namespace, local, arity) {
+        match self.catalog.set.lookup(namespace, local, arity) {
             Some(handle) if self.stubs.contains(&handle) => false,
             Some(handle) => match self.by_handle.get(&handle) {
                 Some(which) => which.in_use_when_scope(),
@@ -484,10 +537,46 @@ impl XsltFunctions {
     /// *available*: it exists only so that a call to it is classified as a
     /// missing feature rather than as an unknown function.
     pub fn is_available(&self, namespace: &str, local: &str, arity: usize) -> bool {
-        match self.set.lookup(namespace, local, arity) {
+        match self.catalog.set.lookup(namespace, local, arity) {
             Some(handle) => !self.stubs.contains(&handle),
             None => false,
         }
+    }
+}
+
+/// The namespace of §3.8's fallback error function. Never written by a
+/// stylesheet: together with [`FALLBACK_LOCAL`], which is not a QName, it
+/// only keeps the registration apart from every nameable function.
+const FALLBACK_NS: &str = "urn:x-xslt2:fallback-error-function";
+
+/// The local name of the fallback error function — deliberately not an
+/// NCName, so that no function call can spell it.
+const FALLBACK_LOCAL: &str = "#fallback";
+
+/// The function catalog of an expression with backwards-compatible behaviour
+/// (§3.8): the stylesheet's own catalog, plus the fallback binding. See
+/// [`XsltFunctions::backwards_compatible_catalog`].
+#[derive(Debug)]
+struct BackwardsCompatibleCatalog {
+    set: FunctionSet<RoXmlNavigator<'static>>,
+    /// The fallback error function's handle; `None` only while
+    /// [`XsltFunctions::new`] is still registering.
+    fallback: Option<FunctionHandle>,
+}
+
+impl FunctionCatalog for BackwardsCompatibleCatalog {
+    fn lookup(&self, namespace: &str, local_name: &str, arity: usize) -> Option<FunctionHandle> {
+        match self.set.lookup(namespace, local_name, arity) {
+            Some(handle) => Some(handle),
+            // "(unless it uses the standard function namespace)": an unknown
+            // name or arity there is XPST0017 whatever the mode.
+            None if namespace == FN_NS => None,
+            None => self.fallback,
+        }
+    }
+
+    fn get_signature(&self, handle: FunctionHandle) -> Option<DynamicFunctionSignature> {
+        self.set.get_signature(handle)
     }
 }
 
@@ -510,7 +599,11 @@ impl std::fmt::Debug for UseWhenCatalog<'_> {
 
 impl FunctionCatalog for UseWhenCatalog<'_> {
     fn lookup(&self, namespace: &str, local_name: &str, arity: usize) -> Option<FunctionHandle> {
-        let handle = self.functions.set.lookup(namespace, local_name, arity)?;
+        let handle = self
+            .functions
+            .catalog
+            .set
+            .lookup(namespace, local_name, arity)?;
         match self.functions.by_handle.get(&handle) {
             Some(which) if !which.in_use_when_scope() => None,
             _ => Some(handle),
@@ -518,7 +611,7 @@ impl FunctionCatalog for UseWhenCatalog<'_> {
     }
 
     fn get_signature(&self, handle: FunctionHandle) -> Option<DynamicFunctionSignature> {
-        self.functions.set.get_signature(handle)
+        self.functions.catalog.set.get_signature(handle)
     }
 }
 
@@ -647,13 +740,17 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
             XsltFn::Doc if args.first().is_none_or(XPathValue::is_empty) => Ok(XPathValue::empty()),
             // §3.12: "Statically known documents: None" and "Available
             // documents: None", so `fn:doc` can never find its document. F&O
-            // gives that FODC0002; the engine has no variant of its own for it,
-            // so it travels as an error QName, which
-            // `error::raised_error_to_xslt` turns back into the code.
-            XsltFn::Doc => Err(XPathError::internal(format!(
-                "Q{{{}}}FODC0002: a use-when expression has no available documents, so doc({name:?}) \
-                 cannot be resolved",
-                crate::error::XQT_ERRORS_NAMESPACE
+            // gives that FODC0002 (`use-when-0128`). It is the processor's
+            // error, not one the stylesheet raised through `fn:error`, so it
+            // is parked like the four name errors above and collected with
+            // `ErrorOrigin::Processor`; the engine itself only carries its
+            // message.
+            XsltFn::Doc => Err(self.park(crate::error::XsltError::new(
+                "FODC0002",
+                format!(
+                    "a use-when expression has no available documents, so doc({name:?}) cannot \
+                     be resolved"
+                ),
             ))),
             // F&O `fn:doc-available`: "If `$uri` is the empty sequence, this
             // function returns false" (from memory) — and with no available

@@ -2,13 +2,15 @@
 //! focus and the variable bindings of §5.4, and recovering an XSLT error code
 //! from an `XPathError` on the way out.
 
+use xsd_schema::types::{DateTimeValue, TimezoneOffset, XmlAtomicValue, XmlValue, XmlValueKind};
+use xsd_schema::xpath::functions::datetime::current_datetime;
 use xsd_schema::xpath::functions::{effective_boolean_value, XPathValue};
-use xsd_schema::xpath::XPathError;
+use xsd_schema::xpath::{DynamicContext, XPathContext, XPathError, XmlItem};
 
 use super::context::XsltContext;
 use super::functions::XsltEvaluator;
 use super::{Frame, Transformation};
-use crate::error::{codes, XsltError};
+use crate::error::XsltError;
 use crate::model::*;
 use crate::receiver::Nav;
 
@@ -32,13 +34,6 @@ impl<'a, 't> Transformation<'a, 't> {
         cx: &XsltContext<'t>,
     ) -> Result<XPathValue<Nav<'t>>, XsltError> {
         let compiled = self.sheet.expr(id);
-        if let Some(why) = &compiled.unavailable {
-            // §18.1.2: "When backwards compatible behavior is enabled, it is a
-            // non-recoverable dynamic error to evaluate an extension function
-            // call if no implementation of the extension function is
-            // available."
-            return Err(XsltError::new(codes::XTDE1425, why.clone()));
-        }
         let ctx = self.sheet.context(compiled.ctx);
         // A parked error belongs to the evaluation that parked it; one that
         // was swallowed (a pattern predicate treated as a non-match, §5.5.4)
@@ -67,6 +62,7 @@ impl<'a, 't> Transformation<'a, 't> {
         };
         let item = cx.item.clone();
         let (position, size) = (cx.position, cx.size);
+        let clock = self.clock(ctx).clone();
         let result = compiled
             .expr
             .evaluator(ctx)
@@ -78,9 +74,45 @@ impl<'a, 't> Transformation<'a, 't> {
                 dynamic.context_item = item;
                 dynamic.context_position = position;
                 dynamic.context_size = size;
+                if let Some((now, timezone)) = clock {
+                    dynamic.current_datetime = Some(now);
+                    dynamic.implicit_timezone = Some(timezone);
+                }
                 dynamic.set_function_evaluator(Some(&evaluator));
             });
         result.map_err(|e| self.xpath_error(e))
+    }
+
+    /// The current dateTime and implicit timezone of this transformation.
+    ///
+    /// §5.4.3.2: "The current date and time represents an
+    /// implementation-dependent point in time during processing of the
+    /// transformation; it does not change during the course of the
+    /// transformation. The implicit timezone is implementation-defined." §16
+    /// adds that "function implementations, current dateTime, implicit
+    /// timezone, … must be stable" for the duration of the transformation.
+    ///
+    /// The engine fixes `current-dateTime()` only for one evaluation (its
+    /// dynamic context caches it), so the transformation takes the value once,
+    /// from the engine's own `current-dateTime()`, and hands it — and its
+    /// timezone, the host's local offset, as the implicit timezone — to every
+    /// dynamic context it builds. `None` only if the engine stops returning an
+    /// `xs:dateTime`, in which case every evaluation keeps its own clock.
+    fn clock(&self, ctx: &XPathContext<'_>) -> &Option<(DateTimeValue, TimezoneOffset)> {
+        self.clock.get_or_init(|| {
+            let mut dynamic = DynamicContext::<Nav<'t>>::new(ctx, 0);
+            let value = current_datetime(&mut dynamic, Vec::new()).ok()?;
+            match value.into_vec().into_iter().next()? {
+                XmlItem::Atomic(XmlValue {
+                    value: XmlValueKind::Atomic(XmlAtomicValue::DateTime(now)),
+                    ..
+                }) => {
+                    let timezone = now.timezone?;
+                    Some((now, timezone))
+                }
+                _ => None,
+            }
+        })
     }
 
     /// Turns an `XPathError` back into an `XsltError`, recovering an XSLT code

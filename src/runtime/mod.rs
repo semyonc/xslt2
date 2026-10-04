@@ -34,6 +34,7 @@ use std::sync::Arc;
 use bumpalo::Bump;
 use xsd_schema::document::BufferDocument;
 use xsd_schema::navigator::DomNavigator;
+use xsd_schema::types::{DateTimeValue, TimezoneOffset};
 use xsd_schema::xpath::functions::XPathValue;
 use xsd_schema::xpath::XmlItem;
 
@@ -165,6 +166,9 @@ pub struct Transformation<'a, 't> {
     terminated: RefCell<bool>,
     /// How deep template invocation is nested right now.
     depth: std::cell::Cell<usize>,
+    /// The current dateTime and implicit timezone of this transformation,
+    /// fixed the first time an expression is evaluated (§5.4.3.2).
+    clock: std::cell::OnceCell<Option<(DateTimeValue, TimezoneOffset)>>,
     #[allow(clippy::type_complexity)]
     message_sink: Option<Box<dyn Fn(&Message)>>,
 }
@@ -194,6 +198,7 @@ impl<'a> CompiledStylesheet<'a> {
             initial_root: RefCell::new(None),
             terminated: RefCell::new(false),
             depth: std::cell::Cell::new(0),
+            clock: std::cell::OnceCell::new(),
             message_sink: None,
         }
     }
@@ -354,6 +359,33 @@ impl<'a, 't> Transformation<'a, 't> {
                 codes::XTDE0047,
                 "the invocation specifies both an initial mode and an initial template",
             ));
+        }
+        // > [ERR XTDE0050] It is a non-recoverable dynamic error if the
+        // > stylesheet that is invoked declares a visible stylesheet parameter
+        // > with required="yes" and no value for this parameter is supplied
+        // > during the invocation of the stylesheet.
+        //
+        // Checked here, at the invocation, and not when the parameter is first
+        // read: globals are evaluated lazily (§9.5), so one that is never
+        // referenced would never be checked (`initial-mode-003`). The globals
+        // table holds the visible declaration of each name only.
+        {
+            let params = self.params.borrow();
+            if let Some(missing) = self
+                .sheet
+                .globals()
+                .iter()
+                .find(|g| g.is_param && g.required && !params.contains_key(&g.name))
+            {
+                return Err(XsltError::new(
+                    codes::XTDE0050,
+                    format!(
+                        "no value was supplied for the required stylesheet parameter {}",
+                        missing.name
+                    ),
+                )
+                .or_location(&missing.loc));
+            }
         }
         if let Some(name) = self.options.initial_template.clone() {
             let id = self.sheet.named_template(&name).ok_or_else(|| {

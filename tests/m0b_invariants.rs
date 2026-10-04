@@ -47,7 +47,11 @@ fn store<'t>(arena: &'t Bump, names: &'t NameTable) -> RefCell<DocumentStore<'t>
 /// the real compiler and runtime wherever a stylesheet can express the claim.
 fn run_sheet(body: &str) -> String {
     let mut memory = xslt2::MemoryResolver::new();
-    memory.insert("extra.xml", SECOND);
+    // `document('extra.xml')` resolves against the stylesheet's base URI
+    // `urn:invariants:sheet.xsl` by RFC 3986 §5.2: the base has a scheme and a
+    // path with no `/`, so the merge (§5.2.3) replaces the whole path and the
+    // target is `urn:extra.xml`.
+    memory.insert("urn:extra.xml", SECOND);
     let resolver = std::sync::Arc::new(memory);
     let names = NameTable::new();
     let functions = XsltFunctions::new();

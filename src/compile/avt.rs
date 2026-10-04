@@ -74,20 +74,43 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
 
 /// Reads the expression between `{` and its matching `}` in an AVT.
 ///
+/// > Note: An expression within a variable part may contain an unescaped curly
+/// > bracket within a StringLiteral or within a comment.
+///
+/// So a `}` ends the expression only outside string literals and outside
+/// XPath comments `(: … :)`, which nest (XPath 2.0 §2.6: "Comments may be
+/// nested"); inside a comment a quote does not open a string literal either
+/// (`avt-1202`: `(: isn't } :)`).
+///
 /// > \[ERR XTSE0350\] It is a static error if an unescaped left curly bracket
 /// > appears in a fixed part of an attribute value template without a matching
 /// > right curly bracket.
 fn avt_expression(chars: &[char], mut i: usize, value: &str) -> Result<(String, usize), XsltError> {
     let mut source = String::new();
     let mut quote: Option<char> = None;
+    let mut comment_depth = 0usize;
     while i < chars.len() {
         let c = chars[i];
+        let next = chars.get(i + 1).copied();
         match (quote, c) {
             (Some(q), c) if c == q => {
                 quote = None;
                 source.push(c);
             }
             (Some(_), c) => source.push(c),
+            (None, '(') if next == Some(':') => {
+                comment_depth += 1;
+                source.push_str("(:");
+                i += 2;
+                continue;
+            }
+            (None, ':') if comment_depth > 0 && next == Some(')') => {
+                comment_depth -= 1;
+                source.push_str(":)");
+                i += 2;
+                continue;
+            }
+            (None, c) if comment_depth > 0 => source.push(c),
             (None, '"') | (None, '\'') => {
                 quote = Some(c);
                 source.push(c);

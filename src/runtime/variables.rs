@@ -44,6 +44,46 @@ impl<'a, 't> Transformation<'a, 't> {
         self.convert(raw, as_type, code)
     }
 
+    /// The default value of an optional parameter that no caller supplied a
+    /// value for (§9.2), with the two error codes §9.2 gives its two cases.
+    ///
+    /// > \[ERR XTTE0600\] If a default value is given explicitly, that is, if
+    /// > there is either a `select` attribute or a non-empty sequence
+    /// > constructor, then it is a type error if the default value cannot be
+    /// > converted to the required type, using the function conversion rules.
+    ///
+    /// > \[ERR XTDE0610\] If an optional parameter has no `select` attribute
+    /// > and has an empty sequence constructor, and if there is an `as`
+    /// > attribute, then the default value of the parameter is an empty
+    /// > sequence. If the empty sequence is not a valid instance of the required
+    /// > type defined in the `as` attribute, then the parameter is treated as a
+    /// > required parameter, which means that it is a non-recoverable dynamic
+    /// > error if the caller supplies no value for the parameter.
+    pub(super) fn param_default(
+        &self,
+        name: &crate::names::QName,
+        value: &VarValue,
+        as_type: Option<&TypeCheck>,
+        frame: &mut Frame<'t>,
+        cx: &XsltContext<'t>,
+    ) -> Result<XPathValue<Nav<'t>>, XsltError> {
+        if let (VarValue::Empty, Some(check)) = (value, as_type) {
+            let empty = XPathValue::empty();
+            if self.instance_of(&empty, check)? {
+                return Ok(empty);
+            }
+            return Err(XsltError::new(
+                codes::XTDE0610,
+                format!(
+                    "no value was supplied for the parameter {name}, which has no default \
+                     and whose required type {} does not allow the empty sequence",
+                    check.text
+                ),
+            ));
+        }
+        self.var_value(value, as_type, frame, cx, codes::XTTE0600)
+    }
+
     /// §9.4: a sequence constructor with no `as` builds a temporary tree.
     ///
     /// > The base URI of the document node is taken from the base URI of the
@@ -96,16 +136,15 @@ impl<'a, 't> Transformation<'a, 't> {
         if check.atomic {
             // XPath 2.0 §3.1.5, the function conversion rules XSLT §9.3 cites:
             // the value is atomized; an `xs:untypedAtomic` item is cast to the
-            // expected type; a numeric item is promoted to `xs:double` or
-            // `xs:float`, and `xs:anyURI` to `xs:string`. Nothing else is
-            // converted, so a genuine type mismatch stays one.
+            // expected type; type promotion (Appendix B.1) applies. Nothing
+            // else is converted, so a genuine type mismatch stays one.
             let atomized = atomize_sequence(value.clone()).map_err(|e| self.xpath_error(e))?;
             let mut items: Vec<XmlItem<Nav<'t>>> = Vec::with_capacity(atomized.len());
             for atom in atomized {
                 let needs_cast = atom.type_code == XmlTypeCode::UntypedAtomic
-                    || (atom.type_code.is_numeric()
-                        && matches!(check.item_type.as_str(), "xs:double" | "xs:float"))
-                    || (atom.type_code == XmlTypeCode::AnyUri && check.item_type == "xs:string");
+                    || check
+                        .target
+                        .is_some_and(|target| promotes_to(atom.type_code, target));
                 let item = XPathValue::from_atomic(atom);
                 let converted = match (&check.cast, needs_cast) {
                     (Some(cast), true) => match self.apply_probe(*cast, item.clone()) {
@@ -217,6 +256,15 @@ impl<'a, 't> Transformation<'a, 't> {
             }
         }
         let mut frame = Frame::with_slots(global.frame_size);
+        if global.is_param {
+            return self.param_default(
+                &global.name,
+                &global.value,
+                global.as_type.as_ref(),
+                &mut frame,
+                &cx,
+            );
+        }
         self.var_value(
             &global.value,
             global.as_type.as_ref(),
@@ -224,5 +272,28 @@ impl<'a, 't> Transformation<'a, 't> {
             &cx,
             codes::XTTE0570,
         )
+    }
+}
+
+/// XPath 2.0 Appendix B.1, type promotion — the only conversions between
+/// atomic types the function conversion rules make besides casting
+/// `xs:untypedAtomic`:
+///
+/// > A value of type `xs:float` (or any type derived by restriction from
+/// > `xs:float`) can be promoted to the type `xs:double`. … A value of type
+/// > `xs:decimal` (or any type derived by restriction from `xs:decimal`) can be
+/// > promoted to either of the types `xs:float` or `xs:double`. … A value of
+/// > type `xs:anyURI` (or any type derived by restriction from `xs:anyURI`) can
+/// > be promoted to the type `xs:string`.
+///
+/// So `xs:double` is never promoted to `xs:float`: that is a type error.
+fn promotes_to(source: XmlTypeCode, target: XmlTypeCode) -> bool {
+    let decimal =
+        source.is_numeric() && !matches!(source, XmlTypeCode::Float | XmlTypeCode::Double);
+    match target {
+        XmlTypeCode::Double => decimal || source == XmlTypeCode::Float,
+        XmlTypeCode::Float => decimal,
+        XmlTypeCode::String => source == XmlTypeCode::AnyUri,
+        _ => false,
     }
 }

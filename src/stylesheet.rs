@@ -377,7 +377,9 @@ pub struct Loader<'a, 't> {
     functions: &'a XsltFunctions,
     modules: Vec<Module<'t>>,
     units: Vec<Unit<'t>>,
-    /// URIs on the current load path, with the edge that reached them.
+    /// The modules on the current load path, by
+    /// [`resolver::resource_identity`] (so that `d//m.xsl` and `d/m.xsl` are
+    /// one module), with the edge that reached them.
     stack: Vec<(String, Inclusion)>,
     next_precedence: u32,
     /// The `input-type-annotations` values the modules of this stylesheet ask
@@ -439,7 +441,8 @@ impl<'a, 't> Loader<'a, 't> {
         edge: Inclusion,
         principal: bool,
     ) -> Result<(ModuleId, bool), XsltError> {
-        if self.stack.iter().any(|(u, _)| u == uri) {
+        let identity = resolver::resource_identity(uri);
+        if self.stack.iter().any(|(u, _)| *u == identity) {
             // §3.10.2 / §3.10.3: an include cycle is XTSE0180, an import cycle
             // XTSE0210. The edge that closes the cycle names it.
             let code = if edge == Inclusion::Include {
@@ -459,7 +462,7 @@ impl<'a, 't> Loader<'a, 't> {
                 ),
             ));
         }
-        self.stack.push((uri.to_string(), edge));
+        self.stack.push((identity, edge));
         let result = self.visit_inner(uri, text, principal);
         self.stack.pop();
         result
@@ -703,13 +706,14 @@ impl<'a, 't> Loader<'a, 't> {
         uri: &str,
         out: &mut Vec<(ModuleId, Nav<'t>, DeclKind)>,
     ) -> Result<(), XsltError> {
-        if self.stack.iter().any(|(u, _)| u == uri) {
+        let identity = resolver::resource_identity(uri);
+        if self.stack.iter().any(|(u, _)| *u == identity) {
             return Err(XsltError::new(
                 codes::XTSE0180,
                 format!("the stylesheet module {uri:?} directly or indirectly includes itself"),
             ));
         }
-        self.stack.push((uri.to_string(), Inclusion::Include));
+        self.stack.push((identity, Inclusion::Include));
         let result = self
             .parse(uri, None)
             .and_then(|id| self.collect(id, out).map(|_| ()));
@@ -862,10 +866,11 @@ fn evaluate_use_when(
         ctx = ctx.with_default_element_ns(names.add(&sc.xpath_default_namespace));
     }
     let fail = |e: xsd_schema::xpath::XPathError| {
-        // An error the engine identifies by an error QName — `fn:error`, and the
-        // FODC0002 §3.12 makes `fn:doc` raise — keeps that identity; anything
-        // else that has no code of its own is an error in the `use-when`
-        // attribute itself, which §3.12 leaves as XTSE0010.
+        // An error the engine identifies by an error QName — `fn:error` —
+        // keeps that identity; anything else that has no code of its own is an
+        // error in the `use-when` attribute itself, which §3.12 leaves as
+        // XTSE0010. (The FODC0002 §3.12 makes `fn:doc` raise is parked by the
+        // evaluator and collected below, with its processor origin.)
         crate::error::raised_error_to_xslt(&e)
             .unwrap_or_else(|| {
                 XsltError::new(
@@ -887,7 +892,8 @@ fn evaluate_use_when(
             ev.context().set_function_evaluator(Some(&evaluator));
         });
     // An error one of the name-answering functions raised keeps its own code
-    // (XTDE1390, XTDE1400, XTDE1428, XTDE1440): §3.12 excludes an element with
+    // (XTDE1390, XTDE1400, XTDE1428, XTDE1440, and `fn:doc`'s FODC0002), with
+    // the processor as its origin: §3.12 excludes an element with
     // "no static or dynamic errors … other than errors in the use-when attribute
     // itself", and names no code of its own for those, so the error is reported
     // as it is, while the stylesheet is compiled.
@@ -1335,11 +1341,16 @@ fn push_namespace(
 /// > whose parent is not an `xsl:text` element and whose content consists
 /// > entirely of whitespace characters, unless … an `xml:space` attribute with
 /// > the value `preserve` is in scope.
+///
+/// The test is made on the node's whole [text run](text_run_value): §4.2
+/// removes comments and processing instructions first and merges the text
+/// nodes that become adjacent, so `   h<!--c-->   ` is one text node `   h   `
+/// and neither half is whitespace-only on its own.
 pub fn is_stripped_stylesheet_text(nav: &Nav<'_>) -> bool {
     if !nav.node_type().is_text_like() {
         return false;
     }
-    if !whitespace::is_all_xml_whitespace(&nav.value()) {
+    if !whitespace::is_all_xml_whitespace(&text_run_value(nav)) {
         return false;
     }
     let mut parent = nav.clone();
@@ -1350,6 +1361,55 @@ pub fn is_stripped_stylesheet_text(nav: &Nav<'_>) -> bool {
         return false;
     }
     !xml_space_preserves(&parent)
+}
+
+/// The value of the text node §4.2 makes out of `nav` and its neighbours.
+///
+/// > The tree representing the stylesheet is preprocessed as follows: All
+/// > comments and processing instructions are removed. Any text nodes that are
+/// > now adjacent to each other are merged. Any whitespace text node that
+/// > satisfies both the following conditions is removed from the tree: …
+///
+/// A *text run* is a maximal sequence of sibling text nodes separated only by
+/// comments and processing instructions; its value is their concatenation.
+/// Elements end a run — including one that `use-when` excludes, since §3.12:
+/// "Conditional element exclusion happens after stripping of whitespace text
+/// nodes from the stylesheet". The parser already merged directly adjacent
+/// text, so a run of one node is the common case and costs one sibling probe
+/// in each direction.
+pub fn text_run_value(nav: &Nav<'_>) -> String {
+    let mut first = nav.clone();
+    let mut cursor = nav.clone();
+    while cursor.move_to_prev_sibling() {
+        match cursor.node_type() {
+            DomNodeType::Comment | DomNodeType::ProcessingInstruction => {}
+            kind if kind.is_text_like() => first = cursor.clone(),
+            _ => break,
+        }
+    }
+    let mut value = first.value();
+    let mut cursor = first;
+    while cursor.move_to_next_sibling() {
+        match cursor.node_type() {
+            DomNodeType::Comment | DomNodeType::ProcessingInstruction => {}
+            kind if kind.is_text_like() => value.push_str(&cursor.value()),
+            _ => break,
+        }
+    }
+    value
+}
+
+/// Whether `nav` is the first text node of its [text run](text_run_value) —
+/// the one that stands for the merged node; the others are part of it.
+pub fn starts_text_run(nav: &Nav<'_>) -> bool {
+    let mut cursor = nav.clone();
+    while cursor.move_to_prev_sibling() {
+        match cursor.node_type() {
+            DomNodeType::Comment | DomNodeType::ProcessingInstruction => {}
+            kind => return !kind.is_text_like(),
+        }
+    }
+    true
 }
 
 /// Whether `xml:space="preserve"` is in scope on an element (nearest wins).

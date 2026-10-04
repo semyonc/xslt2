@@ -51,11 +51,18 @@ pub enum Connector {
     Ancestor,
 }
 
-/// The two axes §5.5.2 allows in a pattern.
+/// The two axes §5.5.2 allows in a pattern, plus the `self` axis §5.5.3
+/// substitutes for one particular step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PatternAxis {
     Child,
     Attribute,
+    /// §5.5.3: "If the NodeTest in PS is `document-node()` (optionally with
+    /// arguments), and if no explicit axis is specified, then the axis in step
+    /// PS is taken as `self` rather than `child`" — where PS is the first step
+    /// of a RelativePathPattern. Never written by a user; only that step
+    /// carries it.
+    SelfAxis,
 }
 
 /// One step of a path pattern.
@@ -354,7 +361,16 @@ fn parse_alternative(
         } else {
             *connector
         };
-        steps.push(parse_step(text, connector, source, sink)?);
+        // §5.5.3 adjusts "the first PatternStep PS" of a RelativePathPattern
+        // only — the leftmost step of an alternative with no `/` or `//`.
+        let first_of_relative = index == 0 && anchor == Anchor::None;
+        steps.push(parse_step(
+            text,
+            connector,
+            first_of_relative,
+            source,
+            sink,
+        )?);
     }
     steps.reverse();
     Ok(finish(PathPattern {
@@ -421,23 +437,49 @@ fn split_steps(text: &str, source: &str) -> Result<Vec<(Connector, String)>, Xsl
 fn parse_step(
     text: &str,
     connector: Connector,
+    first_of_relative: bool,
     source: &str,
     sink: &mut dyn PatternSink,
 ) -> Result<PatternStep, XsltError> {
-    // PatternAxis
-    let (axis, rest) = if let Some(rest) = text.strip_prefix("child::") {
-        (PatternAxis::Child, whitespace::trim_start(rest))
+    // PatternAxis, if one is written.
+    let (explicit_axis, rest) = if let Some(rest) = text.strip_prefix("child::") {
+        (Some(PatternAxis::Child), whitespace::trim_start(rest))
     } else if let Some(rest) = text.strip_prefix("attribute::") {
-        (PatternAxis::Attribute, whitespace::trim_start(rest))
+        (Some(PatternAxis::Attribute), whitespace::trim_start(rest))
     } else if let Some(rest) = text.strip_prefix('@') {
-        (PatternAxis::Attribute, whitespace::trim_start(rest))
+        (Some(PatternAxis::Attribute), whitespace::trim_start(rest))
     } else {
-        (PatternAxis::Child, text)
+        (None, text)
     };
 
     // NodeTest, then the predicate list.
     let (test_text, predicate_text) = split_predicates(rest, source)?;
-    let test = parse_node_test(whitespace::trim(&test_text), axis, source, sink)?;
+    let test_text = whitespace::trim(&test_text);
+    // XPath 2.0 §3.2.4: "If the axis name is omitted from an axis step, the
+    // default axis is child unless the axis step contains an AttributeTest or
+    // SchemaAttributeTest; in that case, the default axis is attribute."
+    // §5.5.3 makes a pattern mean its equivalent XPath expression, so the
+    // same default applies to a pattern step.
+    let axis = explicit_axis.unwrap_or_else(|| {
+        if is_attribute_kind_test(test_text) {
+            PatternAxis::Attribute
+        } else {
+            PatternAxis::Child
+        }
+    });
+    let test = parse_node_test(test_text, axis, source, sink)?;
+    // §5.5.3: "If the NodeTest in PS is document-node() (optionally with
+    // arguments), and if no explicit axis is specified, then the axis in step
+    // PS is taken as self rather than child." Anywhere else — an explicit
+    // `child::document-node()`, or a step that is not the first of a
+    // RelativePathPattern — the step keeps its axis and can never select a
+    // document node, which is never a child or an attribute.
+    let axis = match test {
+        NodeTest::DocumentNode(_) if explicit_axis.is_none() && first_of_relative => {
+            PatternAxis::SelfAxis
+        }
+        _ => axis,
+    };
     let mut predicates = Vec::new();
     for predicate in predicate_text {
         predicates.push(sink.compile_predicate(&predicate)?);
@@ -448,6 +490,14 @@ fn parse_step(
         predicates,
         connector,
     })
+}
+
+/// Whether a node test is an `AttributeTest` or a `SchemaAttributeTest` —
+/// the two kind tests that give an axis step the `attribute` axis by default
+/// (XPath 2.0 §3.2.4).
+fn is_attribute_kind_test(test: &str) -> bool {
+    test.split_once('(')
+        .is_some_and(|(kind, _)| matches!(whitespace::trim(kind), "attribute" | "schema-attribute"))
 }
 
 /// Splits `nodetest[p1][p2]…` into the node test and the predicate sources.
@@ -544,7 +594,9 @@ fn expand(
 ) -> Result<QName, XsltError> {
     if prefix.is_empty() {
         return Ok(match axis {
-            PatternAxis::Child => QName::new(sink.resolve_prefix("").unwrap_or_default(), local),
+            PatternAxis::Child | PatternAxis::SelfAxis => {
+                QName::new(sink.resolve_prefix("").unwrap_or_default(), local)
+            }
             PatternAxis::Attribute => QName::local(local),
         });
     }

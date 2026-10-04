@@ -201,6 +201,9 @@ impl<'a, 't> Transformation<'a, 't> {
                     }
                 }
             }
+            // Only a parentless document node is ever matched along `self`,
+            // and it returned above.
+            PatternAxis::SelfAxis => {}
             PatternAxis::Child => {
                 let mut child = parent.clone();
                 if child.move_to_first_child() {
@@ -236,12 +239,15 @@ impl<'a, 't> Transformation<'a, 't> {
 /// `node()` does **not** match a document node ("for backwards compatibility
 /// reasons the `child-or-top` axis does not match a document node"), and a
 /// step whose node test is `document-node()` uses the `self` axis instead, so
-/// that it does.
+/// that it does — but only when "no explicit axis is specified" and the step
+/// is the first of a RelativePathPattern ([`PatternAxis::SelfAxis`]). On any
+/// other axis a document node is never selected: it is never a child and
+/// never an attribute.
 fn node_test_matches(test: &NodeTest, axis: PatternAxis, nav: &Nav<'_>) -> bool {
     let kind = nav.node_type();
     // `document-node()` is the one test that looks at the node itself.
     if let NodeTest::DocumentNode(inner) = test {
-        if kind != DomNodeType::Root {
+        if kind != DomNodeType::Root || axis != PatternAxis::SelfAxis {
             return false;
         }
         return match inner {
@@ -265,6 +271,8 @@ fn node_test_matches(test: &NodeTest, axis: PatternAxis, nav: &Nav<'_>) -> bool 
     // Everything else selects along `child-or-top` or `attribute-or-top`.
     let on_axis = match axis {
         PatternAxis::Attribute => kind == DomNodeType::Attribute,
+        // Only ever paired with a `document-node()` test, handled above.
+        PatternAxis::SelfAxis => false,
         PatternAxis::Child => matches!(
             kind,
             DomNodeType::Element
@@ -331,7 +339,7 @@ fn name_matches(name: &Option<QName>, nav: &Nav<'_>) -> bool {
 /// `attribute`.
 fn principal_kind(axis: PatternAxis) -> DomNodeType {
     match axis {
-        PatternAxis::Child => DomNodeType::Element,
+        PatternAxis::Child | PatternAxis::SelfAxis => DomNodeType::Element,
         PatternAxis::Attribute => DomNodeType::Attribute,
     }
 }

@@ -384,13 +384,9 @@ impl<'a, 't> Transformation<'a, 't> {
                     )
                     .or_location(&param.loc));
                 }
-                None => self.var_value(
-                    &param.value,
-                    param.as_type.as_ref(),
-                    frame,
-                    cx,
-                    codes::XTTE0590,
-                )?,
+                None => self
+                    .param_default(&param.name, &param.value, param.as_type.as_ref(), frame, cx)
+                    .map_err(|e| e.or_location(&param.loc))?,
             };
             frame.set(param.slot, value);
         }

@@ -226,6 +226,21 @@ pub trait Receiver<'t> {
         Ok(())
     }
 
+    /// The base URI of an element just opened with
+    /// [`start_element`](Receiver::start_element), for the case where the
+    /// element ends up **parentless** (§11.9.1, `xsl:copy`).
+    ///
+    /// > The base URI of a node is copied … If the copied node is subsequently
+    /// > attached as a child to a new element or document node, the final copy
+    /// > of the node inherits its base URI from its parent node.
+    ///
+    /// Only a [`SequenceCollector`] building a parentless element has anywhere
+    /// to put it — on the hidden document the element lives in; in element or
+    /// document content the parent decides, hence the no-op default.
+    fn element_base_uri(&mut self, _uri: &str) -> Result<(), XsltError> {
+        Ok(())
+    }
+
     /// `inherit-namespaces="no"` on the instruction that created the element
     /// just opened (§11.1's `[xsl:]inherit-namespaces`, §11.2, §11.9.1).
     ///
@@ -372,6 +387,16 @@ pub struct ComplexContentNormalizer<'t, R: Receiver<'t>> {
     fixup: NamespaceFixup,
     annotations: Annotations,
     copy_namespaces: CopyNamespaces,
+    /// The depth of `stack` at which each open document node was started.
+    ///
+    /// A document node opened inside element content (`xsl:document`, or
+    /// `xsl:copy` of a document node, in a sequence constructor that builds an
+    /// element) contributes only its children to that element, so it pushes
+    /// no [`Open`] of its own — but its content is still "the content of a
+    /// document node", which XTDE0420 forbids an attribute or namespace node
+    /// in. The innermost container is such a document node exactly when the
+    /// last mark equals the current stack depth.
+    document_marks: Vec<usize>,
     _marker: std::marker::PhantomData<&'t ()>,
 }
 
@@ -392,8 +417,15 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
             fixup: NamespaceFixup::new(),
             annotations,
             copy_namespaces: CopyNamespaces::All,
+            document_marks: Vec::new(),
             _marker: std::marker::PhantomData,
         }
+    }
+
+    /// Whether the innermost container being built is a document node, so
+    /// that an attribute or namespace node here is XTDE0420.
+    fn in_document_content(&self) -> bool {
+        !self.in_element() || self.document_marks.last() == Some(&self.stack.len())
     }
 
     /// The default `copy-namespaces` setting of this pipeline.
@@ -508,7 +540,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         value: &str,
         binding: Option<NodeSchemaBinding>,
     ) -> Result<(), XsltError> {
-        if !self.in_element() {
+        if self.in_document_content() {
             return Err(XsltError::new(
                 codes::XTDE0420,
                 format!(
@@ -562,7 +594,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
     /// `xsl:namespace` (whose own zero-length URI is XTDE0930, raised before
     /// it gets here).
     fn push_namespace(&mut self, prefix: &str, uri: &str) -> Result<(), XsltError> {
-        if !self.in_element() {
+        if self.in_document_content() {
             return Err(XsltError::new(
                 codes::XTDE0420,
                 format!("namespace node {prefix:?} cannot be a child of a document node"),
@@ -754,11 +786,13 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
 
 impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
     fn start_document(&mut self) -> Result<(), XsltError> {
+        self.document_marks.push(self.stack.len());
         self.out.start_document()
     }
 
     fn end_document(&mut self) -> Result<(), XsltError> {
         self.flush_text()?;
+        self.document_marks.pop();
         self.out.end_document()
     }
 
@@ -1638,6 +1672,16 @@ impl<'t> Receiver<'t> for SequenceCollector<'_, 't> {
         // Only the outermost group is a document node of its own; an inner
         // `xsl:document` contributes its children to the element around it.
         if self.depth == 1 && self.group == GroupKind::Document && !uri.is_empty() {
+            self.base_uri = Some(uri.to_string());
+        }
+        Ok(())
+    }
+
+    fn element_base_uri(&mut self, uri: &str) -> Result<(), XsltError> {
+        // Only the outermost element of a group is parentless; `end_group`
+        // records the URI on the hidden document it is built in, which is
+        // where the navigator looks once no `xml:base` is found.
+        if self.depth == 1 && self.group == GroupKind::Element && !uri.is_empty() {
             self.base_uri = Some(uri.to_string());
         }
         Ok(())

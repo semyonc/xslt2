@@ -131,19 +131,32 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                         XmlItem::Atomic(value) => (value.to_string_value(), None),
                         XmlItem::Node(nav) => (nav.value(), Some(nav.base_uri().to_string())),
                     };
-                    if uri.contains('#') {
-                        return Err(XsltError::not_implemented(
-                            "a fragment identifier in document()",
-                            "M2i",
-                        ));
-                    }
                     let base = explicit_base
                         .clone()
                         .or(item_base)
                         .unwrap_or_else(|| self.static_base_uri().to_string());
-                    // §16.1: an empty URI means the stylesheet module itself,
-                    // which falls out of resolving "" against the base URI.
-                    let id = self.run.load_relative_to(&base, &uri)?;
+                    let id = match fragment_split(&uri) {
+                        None => {
+                            // §16.1: an empty URI means the stylesheet module
+                            // itself, which falls out of resolving "" against
+                            // the base URI.
+                            self.run.load_for_doc(&base, &uri)?
+                        }
+                        // F&O §15.5.4 `fn:doc`: "If the Available documents
+                        // provides no mapping for the string, an error is
+                        // raised [err:FODC0005]" — and they map no URI that
+                        // carries a fragment identifier (`doc-available()`
+                        // agrees, below).
+                        Some(_) if which == XsltFn::Doc => {
+                            return Err(XsltError::new(
+                                "FODC0005",
+                                format!("doc(): no document is available at {uri:?}"),
+                            ))
+                        }
+                        Some((document, _)) => {
+                            self.document_with_fragment(&base, &uri, document)?
+                        }
+                    };
                     nodes.push(XmlItem::Node(self.run.store.borrow().navigator(id)));
                 }
                 Ok(XPathValue::from_sequence(nodes))
@@ -158,7 +171,12 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                 // not: it means this call cannot tell, and answering `false`
                 // would silently send the stylesheet down its fallback path.
                 let available = match uris.first() {
-                    Some(uri) => match self.run.load_relative_to(self.static_base_uri(), uri) {
+                    // `doc()` maps no URI with a fragment identifier (FODC0005,
+                    // above), so neither does this — whatever the resolver could
+                    // serve for it (`FileResolver` drops the fragment when it
+                    // maps the URI to a path).
+                    Some(uri) if fragment_split(uri).is_some() => false,
+                    Some(uri) => match self.run.load_for_doc(self.static_base_uri(), uri) {
                         Ok(_) => true,
                         Err(e) if e.is_processor_failure() => return Err(e),
                         Err(_) => false,
@@ -257,6 +275,65 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                 format!("{}()", which.name()),
                 "M3d",
             )),
+            // §3.8: a call bound to the fallback error function — reached only
+            // with backwards-compatible behaviour — raises XTDE1425 when, and
+            // only when, it is evaluated. §18.1.2: "When backwards compatible
+            // behavior is enabled, it is a non-recoverable dynamic error to
+            // evaluate an extension function call if no implementation of the
+            // extension function is available."
+            XsltFn::FallbackError => Err(XsltError::new(
+                codes::XTDE1425,
+                format!(
+                    "a call to a function with no implementation ({} argument(s)) was \
+                     evaluated with backwards-compatible behaviour enabled",
+                    args.len()
+                ),
+            )),
+        }
+    }
+
+    /// `document()` of a URI reference that carries a fragment identifier
+    /// (§16.1); `document` is the reference without it.
+    ///
+    /// > \[ERR XTRE1160\] When a URI reference contains a fragment identifier,
+    /// > it is a recoverable dynamic error if the media type is not one that is
+    /// > recognized by the processor … The optional recovery action is to
+    /// > ignore the fragment identifier and return the document node. The set
+    /// > of media types recognized by a processor is implementation-defined.
+    ///
+    /// This processor recognizes no media type's fragment identifiers, so the
+    /// error always applies, and `TransformOptions::strict_recoverable` decides
+    /// between signalling it and taking the recovery action. When the recovery
+    /// cannot be completed because the document itself cannot be retrieved,
+    /// two errors have arisen, and §2.9: "If more than one error arises, an
+    /// implementation is not required to signal any errors other than the
+    /// first one that it detects. It is implementation-dependent which of the
+    /// several errors is signaled." XTRE1160 is the one detected first, and
+    /// the retrieval failure goes into its message.
+    fn document_with_fragment(
+        &self,
+        base: &str,
+        uri: &str,
+        document: &str,
+    ) -> Result<crate::store::DocId, XsltError> {
+        let unrecognized = |why: String| {
+            XsltError::new(
+                codes::XTRE1160,
+                format!(
+                    "document(): the fragment identifier in {uri:?} cannot be interpreted: this \
+                     processor recognizes no media type's fragment identifiers{why}"
+                ),
+            )
+        };
+        if self.run.options.strict_recoverable {
+            return Err(unrecognized(String::new()));
+        }
+        match self.run.load_for_doc(base, document) {
+            Ok(id) => Ok(id),
+            Err(e) if e.is_processor_failure() => Err(e),
+            Err(e) => Err(unrecognized(format!(
+                ", and the recovery action (ignoring it) failed too: {e}"
+            ))),
         }
     }
 
@@ -388,4 +465,11 @@ fn string_args<N: DomNavigator>(value: Option<&XPathValue<N>>) -> Result<Vec<Str
             XmlItem::Node(n) => n.value(),
         })
         .collect())
+}
+
+/// Splits a URI reference at its fragment identifier: `Some((document,
+/// fragment))` when it has one (RFC 3986 §3.5: the fragment is everything
+/// after the first `#`), `None` otherwise.
+fn fragment_split(uri: &str) -> Option<(&str, &str)> {
+    uri.split_once('#')
 }

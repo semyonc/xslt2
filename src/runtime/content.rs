@@ -1,6 +1,7 @@
 //! Simple content (§5.7.2), attribute value templates (§5.6) and the
 //! document an `xsl:message` builds (§17).
 
+use xsd_schema::document::BufferDocumentOptions;
 use xsd_schema::navigator::DomNavigator;
 use xsd_schema::types::XmlValue;
 use xsd_schema::xpath::functions::atomize_sequence;
@@ -73,7 +74,11 @@ impl<'a, 't> Transformation<'a, 't> {
                 Ok(strings.join(&separator))
             }
             ValueSource::Content(body) => {
-                let mut collector = SimpleContentCollector::new(self.sheet.names());
+                let (arena, names) = {
+                    let store = self.store.borrow();
+                    (store.arena(), store.names())
+                };
+                let mut collector = SimpleContentCollector::new(arena, names);
                 self.eval_body(body, frame, cx, &mut collector)?;
                 collector.finish(&separator)
             }
@@ -140,39 +145,52 @@ impl SimpleDefault {
 /// Collects the result of a sequence constructor that feeds simple content
 /// (§5.7.2).
 ///
-/// The distinction the rules turn on is text node versus atomic value:
+/// > 1. Zero-length text nodes in the sequence are discarded.
+/// > 2. Adjacent text nodes in the sequence are merged into a single text node.
+/// > 3. The sequence is atomized.
+/// > 4. Every value in the atomized sequence is cast to a string.
+/// > 5. The strings within the resulting sequence are concatenated, with a
+/// >    (possibly zero-length) separator inserted between successive strings.
+///
+/// So the distinction the rules turn on is text node versus everything else:
 /// adjacent text nodes merge into one string and are never separated, while
-/// adjacent atomic values are. Constructed elements contribute their string
-/// value, which for an untyped element is the concatenation of its descendant
-/// text.
-struct SimpleContentCollector<'n> {
-    names: &'n xsd_schema::namespace::NameTable,
-    parts: Vec<SimplePart>,
+/// every other item is one string of its own. An element or document node the
+/// sequence constructor *builds* is one item too, and atomizing it gives its
+/// string value — which is the string value of the node §5.7.1 builds, where
+/// adjacent atomic values are joined by spaces and comments and processing
+/// instructions contribute nothing. Such a node is therefore built for real,
+/// through the same [`ComplexContentNormalizer`] every other result tree goes
+/// through, and only its string value is kept (`xsl-document-0601`).
+/// Attribute and namespace nodes atomize to their values (`namespace-2602`).
+struct SimpleContentCollector<'t> {
+    arena: &'t bumpalo::Bump,
+    names: &'t xsd_schema::namespace::NameTable,
+    parts: Vec<String>,
     pending_text: Option<String>,
+    /// The element or document node being built at the top level, if any.
+    nested: Option<ComplexContentNormalizer<'t, ResultBuilder<'t>>>,
+    /// How many containers of the nested node are open.
     depth: usize,
-    element_text: String,
 }
 
-enum SimplePart {
-    Text(String),
-    Atomic(String),
-}
-
-impl<'n> SimpleContentCollector<'n> {
-    fn new(names: &'n xsd_schema::namespace::NameTable) -> Self {
+impl<'t> SimpleContentCollector<'t> {
+    fn new(arena: &'t bumpalo::Bump, names: &'t xsd_schema::namespace::NameTable) -> Self {
         Self {
+            arena,
             names,
             parts: Vec::new(),
             pending_text: None,
+            nested: None,
             depth: 0,
-            element_text: String::new(),
         }
     }
 
     fn flush_text(&mut self) {
         if let Some(text) = self.pending_text.take() {
+            // Step 1: a zero-length text node is discarded — after step 2's
+            // merge it is the run as a whole that has to be empty.
             if !text.is_empty() {
-                self.parts.push(SimplePart::Text(text));
+                self.parts.push(text);
             }
         }
     }
@@ -185,108 +203,155 @@ impl<'n> SimpleContentCollector<'n> {
 
     fn push_atomic(&mut self, s: String) {
         self.flush_text();
-        self.parts.push(SimplePart::Atomic(s));
+        self.parts.push(s);
     }
 
     fn finish(mut self, separator: &str) -> Result<String, XsltError> {
         self.flush_text();
-        let mut out = String::new();
-        let mut first = true;
-        for part in &self.parts {
-            let text = match part {
-                SimplePart::Text(text) => text,
-                SimplePart::Atomic(text) => text,
-            };
-            if !first {
-                out.push_str(separator);
-            }
-            out.push_str(text);
-            first = false;
-        }
-        Ok(out)
+        Ok(self.parts.join(separator))
+    }
+
+    /// Opens a node built at the top level: an element (`document = false`)
+    /// or a document node.
+    fn open(&mut self, document: bool) -> Result<(), XsltError> {
+        let options = if document {
+            BufferDocumentOptions::default()
+        } else {
+            BufferDocumentOptions::fragment()
+        };
+        let builder = ResultBuilder::with_options(self.arena, self.names, None, options)?;
+        self.nested = Some(ComplexContentNormalizer::new(builder));
+        Ok(())
+    }
+
+    /// Closes the top-level node and contributes its string value.
+    fn close(&mut self) -> Result<(), XsltError> {
+        let Some(nested) = self.nested.take() else {
+            return Ok(());
+        };
+        let doc = nested.into_inner().finish()?;
+        let value = doc.create_navigator().value();
+        self.push_atomic(value);
+        Ok(())
+    }
+
+    fn nested(
+        &mut self,
+    ) -> Result<&mut ComplexContentNormalizer<'t, ResultBuilder<'t>>, XsltError> {
+        self.nested
+            .as_mut()
+            .ok_or_else(|| XsltError::internal("simple content: no node is open"))
     }
 }
 
-impl<'t> Receiver<'t> for SimpleContentCollector<'_> {
+impl<'t> Receiver<'t> for SimpleContentCollector<'t> {
     fn start_document(&mut self) -> Result<(), XsltError> {
-        Ok(())
+        if self.depth == 0 {
+            self.open(true)?;
+        }
+        self.depth += 1;
+        self.nested()?.start_document()
     }
     fn end_document(&mut self) -> Result<(), XsltError> {
+        if self.depth == 0 {
+            return Ok(());
+        }
+        self.nested()?.end_document()?;
+        self.depth -= 1;
+        if self.depth == 0 {
+            self.close()?;
+        }
         Ok(())
     }
     fn start_element(
         &mut self,
-        _name: &Name,
-        _binding: Option<xsd_schema::document::NodeSchemaBinding>,
-        _nilled: bool,
+        name: &Name,
+        binding: Option<xsd_schema::document::NodeSchemaBinding>,
+        nilled: bool,
     ) -> Result<(), XsltError> {
         if self.depth == 0 {
-            self.flush_text();
-            self.element_text.clear();
+            self.open(false)?;
         }
         self.depth += 1;
-        Ok(())
+        self.nested()?.start_element(name, binding, nilled)
     }
-    fn namespace(&mut self, _prefix: &str, _uri: &str) -> Result<(), XsltError> {
+    fn namespace(&mut self, prefix: &str, uri: &str) -> Result<(), XsltError> {
+        if self.depth > 0 {
+            return self.nested()?.namespace(prefix, uri);
+        }
+        // A parentless namespace node atomizes to its string value, the URI.
+        self.push_atomic(uri.to_string());
         Ok(())
     }
     fn attribute(
         &mut self,
-        _name: &Name,
-        _value: &str,
-        _binding: Option<xsd_schema::document::NodeSchemaBinding>,
+        name: &Name,
+        value: &str,
+        binding: Option<xsd_schema::document::NodeSchemaBinding>,
     ) -> Result<(), XsltError> {
-        // An attribute node in a sequence used as simple content is not part
-        // of the string value of the element it belongs to; inside one, it
-        // contributes nothing.
+        if self.depth > 0 {
+            return self.nested()?.attribute(name, value, binding);
+        }
+        // A parentless attribute node atomizes to its value (§5.7.2 step 3).
+        self.push_atomic(value.to_string());
         Ok(())
     }
     fn end_start_tag(&mut self) -> Result<(), XsltError> {
+        if self.depth > 0 {
+            return self.nested()?.end_start_tag();
+        }
         Ok(())
     }
-    fn text(&mut self, s: &str, _disable_escaping: bool) -> Result<(), XsltError> {
+    fn no_inherit_namespaces(&mut self) -> Result<(), XsltError> {
         if self.depth > 0 {
-            self.element_text.push_str(s);
-        } else {
-            self.push_text(s);
+            return self.nested()?.no_inherit_namespaces();
         }
+        Ok(())
+    }
+    fn text(&mut self, s: &str, disable_escaping: bool) -> Result<(), XsltError> {
+        if self.depth > 0 {
+            return self.nested()?.text(s, disable_escaping);
+        }
+        self.push_text(s);
         Ok(())
     }
     fn comment(&mut self, s: &str) -> Result<(), XsltError> {
-        if self.depth == 0 {
-            self.push_atomic(s.to_string());
+        if self.depth > 0 {
+            return self.nested()?.comment(s);
         }
+        self.push_atomic(s.to_string());
         Ok(())
     }
-    fn pi(&mut self, _target: &str, data: &str) -> Result<(), XsltError> {
-        if self.depth == 0 {
-            self.push_atomic(data.to_string());
+    fn pi(&mut self, target: &str, data: &str) -> Result<(), XsltError> {
+        if self.depth > 0 {
+            return self.nested()?.pi(target, data);
         }
+        self.push_atomic(data.to_string());
         Ok(())
     }
     fn end_element(&mut self) -> Result<(), XsltError> {
+        if self.depth == 0 {
+            return Err(XsltError::internal("end_element with no element open"));
+        }
+        self.nested()?.end_element()?;
         self.depth -= 1;
         if self.depth == 0 {
-            let text = std::mem::take(&mut self.element_text);
-            self.push_atomic(text);
+            self.close()?;
         }
         Ok(())
     }
     fn append_item(&mut self, item: &XmlItem<Nav<'t>>) -> Result<(), XsltError> {
+        if self.depth > 0 {
+            return self.nested()?.append_item(item);
+        }
         match item {
             XmlItem::Atomic(value) => {
                 let text = atom_to_string(self.names, value);
-                if self.depth > 0 {
-                    self.element_text.push_str(&text);
-                } else {
-                    self.push_atomic(text);
-                }
+                self.push_atomic(text);
             }
             XmlItem::Node(nav) => {
                 let text = nav.value();
-                if self.depth > 0 {
-                    self.element_text.push_str(&text);
-                } else if nav.node_type().is_text_like() {
+                if nav.node_type().is_text_like() {
                     // "Adjacent text nodes in the sequence are merged."
                     self.push_text(&text);
                 } else {
@@ -295,6 +360,17 @@ impl<'t> Receiver<'t> for SimpleContentCollector<'_> {
             }
         }
         Ok(())
+    }
+    fn append_copy(
+        &mut self,
+        item: &XmlItem<Nav<'t>>,
+        namespaces: crate::receiver::CopyNamespaces,
+    ) -> Result<(), XsltError> {
+        if self.depth > 0 {
+            return self.nested()?.append_copy(item, namespaces);
+        }
+        // A copy has the same string value as its original.
+        self.append_item(item)
     }
 }
 /// The string an atomized item contributes to simple content (§5.7.2 step 4).
