@@ -73,6 +73,10 @@ impl<'a, 't> Transformation<'a, 't> {
             XmlItem::Atomic(value) => out.text(&self.atom_string(value), false),
             XmlItem::Node(nav) => match nav.node_type() {
                 DomNodeType::Root | DomNodeType::Element => {
+                    // The built-in rule recurses into the children without a
+                    // template invocation to count, so over a deep enough
+                    // document only the stack guard stops it (Q33).
+                    self.check_stack()?;
                     let children = children_of(nav);
                     self.apply_to_items(children, mode.clone(), params.to_vec(), cx, out)
                 }
@@ -287,18 +291,77 @@ impl<'a, 't> Transformation<'a, 't> {
         out: &mut dyn Receiver<'t>,
         how: Invocation,
     ) -> Result<(), XsltError> {
-        let depth = self.depth.get() + 1;
-        if depth > self.options.max_recursion_depth {
-            return Err(XsltError::internal(format!(
-                "template invocation nested more than {} deep; the stylesheet is probably \
-                 recursing without end (TransformOptions::max_recursion_depth)",
-                self.options.max_recursion_depth
-            )));
-        }
-        self.depth.set(depth);
+        let depth = self.enter(1)?;
         let result = self.invoke_body(id, params, cx, out, how);
         self.depth.set(depth - 1);
         result
+    }
+
+    /// Counts one more level of template invocation or function call against
+    /// `TransformOptions::max_recursion_depth` (Q33), checks the stack guard
+    /// (`TransformOptions::stack_limit`), and returns the new depth, which the
+    /// caller restores to `depth - weight` when the call returns.
+    ///
+    /// `weight` is 1 for a template and `calls::FUNCTION_CALL_DEPTH` for a
+    /// stylesheet function, whose calls take more host stack each.
+    pub(super) fn enter(&self, weight: usize) -> Result<usize, XsltError> {
+        let depth = self.depth.get() + weight;
+        if depth > self.options.max_recursion_depth {
+            return Err(XsltError::internal(format!(
+                "template invocation nested more than {} deep (a stylesheet-function call \
+                 counts as {}); the stylesheet is probably recursing without end \
+                 (TransformOptions::max_recursion_depth)",
+                self.options.max_recursion_depth,
+                super::calls::FUNCTION_CALL_DEPTH
+            )));
+        }
+        self.check_stack()?;
+        self.depth.set(depth);
+        Ok(depth)
+    }
+
+    /// The stack guard (Q33): fails with the depth error once the run has used
+    /// more stack, measured from where it started, than its limit allows.
+    ///
+    /// A count of nested calls cannot stand in for this, because the stack one
+    /// call uses depends on its body — an `xsl:variable` holding nested literal
+    /// result elements, nested `xsl:if` / `xsl:for-each`, nested XPath `if` and
+    /// `for` all deepen it — so a heavy enough body would overflow the stack
+    /// before any fixed count is reached.
+    pub(super) fn check_stack(&self) -> Result<(), XsltError> {
+        let guard = self.stack.get();
+        if guard.base == 0 {
+            return Ok(());
+        }
+        let used = guard.base.abs_diff(super::stack_position());
+        if used > guard.limit {
+            return Err(XsltError::internal(format!(
+                "template invocation nested so deep that the run used {used} bytes of stack, \
+                 more than the {} it may use; the stylesheet is probably recursing without \
+                 end (TransformOptions::stack_limit, TransformOptions::max_recursion_depth)",
+                guard.limit
+            )));
+        }
+        Ok(())
+    }
+
+    /// `TransformOptions::stack_limit` for a run whose stack is measured from
+    /// `base`: the explicit option, else what the thread allows (see the
+    /// option's documentation).
+    pub(super) fn stack_limit_from(&self, base: usize) -> usize {
+        if let Some(limit) = self.options.stack_limit {
+            return limit;
+        }
+        match super::LARGE_STACK.with(std::cell::Cell::get) {
+            Some((top, size)) => {
+                let in_use = top.abs_diff(base);
+                // One eighth, at least 1 MiB — but never more than half, so
+                // that a small worker stack still runs shallow stylesheets.
+                let reserve = (size / 8).max(super::MIN_STACK_RESERVE.min(size / 2));
+                size.saturating_sub(in_use).saturating_sub(reserve)
+            }
+            None => super::OTHER_THREAD_STACK_LIMIT,
+        }
     }
 
     fn invoke_body(

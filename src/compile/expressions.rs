@@ -55,10 +55,27 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             if !sc.xpath_default_namespace.is_empty() {
                 ctx = ctx.with_default_element_ns(self.names.add(&sc.xpath_default_namespace));
             }
+            // §10.3: the binder also sees the stylesheet functions — before
+            // the processor's own functions for `override="yes"`, after them
+            // for `override="no"`, and before the §3.8 fallback in either case.
+            let compile_catalog = if sc.compat.is_backwards() {
+                &self.catalogs.backwards
+            } else {
+                &self.catalogs.plain
+            };
+            let compile_ctx = ctx.clone().with_function_catalog(compile_catalog);
             self.contexts.push(ctx);
+            self.compile_contexts.push(compile_ctx);
         }
         debug_assert_eq!(self.contexts.len(), self.static_contexts.len());
+        debug_assert_eq!(self.compile_contexts.len(), self.static_contexts.len());
         Ok(id)
+    }
+
+    /// The context an expression in static context `ctx` is compiled against
+    /// (see `Builder::compile_contexts`).
+    pub(super) fn compile_context(&self, ctx: StaticContextId) -> &XPathContext<'m> {
+        &self.compile_contexts[ctx.0 as usize]
     }
 
     // ── Expressions ──────────────────────────────────────────────────────
@@ -119,7 +136,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         // here: with backwards-compatible behaviour the context's catalog
         // binds *the call* to §3.8's fallback error function (see
         // `context_of`), and anywhere else it is the static XPST0017.
-        let expr = XPathExpr::compile_with_vars(source, &self.contexts[ctx.0 as usize], &names)
+        let expr = XPathExpr::compile_with_vars(source, self.compile_context(ctx), &names)
             .map_err(|e| {
                 XsltError::new(
                     e.error_code().unwrap_or(codes::XTSE0010),
@@ -183,7 +200,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         ctx: StaticContextId,
         what: &str,
     ) -> Result<ExprId, XsltError> {
-        let expr = XPathExpr::compile_with_vars(source, &self.contexts[ctx.0 as usize], &["value"])
+        let expr = XPathExpr::compile_with_vars(source, self.compile_context(ctx), &["value"])
             .map_err(|e| {
                 XsltError::new(
                     e.error_code().unwrap_or(codes::XTSE0010),
@@ -283,8 +300,10 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
 
     /// The name a declaration gives itself, rejecting the reserved namespaces.
     ///
-    /// > \[ERR XTSE0080\] It is a static error if a name occurring in the
-    /// > stylesheet that is required to be a QName uses a reserved namespace.
+    /// > \[ERR XTSE0080\] It is a static error to use a reserved namespace in
+    /// > the name of a named template, a mode, an attribute set, a key, a
+    /// > decimal-format, a variable or parameter, a stylesheet function, a named
+    /// > output definition, or a character map.
     pub(super) fn declared_name(
         &mut self,
         nav: &Nav<'t>,
@@ -292,27 +311,71 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         ctx: StaticContextId,
         module: &Module<'t>,
     ) -> Result<Option<QName>, XsltError> {
+        self.checked_declared_name(nav, attr, ctx, module, false)
+    }
+
+    /// [`Self::declared_name`] for `xsl:template`: the same check, except that a
+    /// template may be named `xsl:initial-template`, the conventional default
+    /// entry point. The exemption is for templates only — a stylesheet
+    /// function or an attribute set of that name is XTSE0080 like any other
+    /// name in the XSLT namespace.
+    pub(super) fn declared_template_name(
+        &mut self,
+        nav: &Nav<'t>,
+        ctx: StaticContextId,
+        module: &Module<'t>,
+    ) -> Result<Option<QName>, XsltError> {
+        self.checked_declared_name(nav, "name", ctx, module, true)
+    }
+
+    fn checked_declared_name(
+        &mut self,
+        nav: &Nav<'t>,
+        attr: &str,
+        ctx: StaticContextId,
+        module: &Module<'t>,
+        entry_point_allowed: bool,
+    ) -> Result<Option<QName>, XsltError> {
         let Some(name) = self.qname_attr(nav, attr, ctx, module)? else {
             return Ok(None);
         };
-        // `xsl:initial-template` is the conventional default entry point and
-        // is the one name in the XSLT namespace a stylesheet may declare.
-        let is_entry_point = name.uri == XSLT_NS && name.local == "initial-template";
-        if !is_entry_point && RESERVED_NAMESPACES.contains(&name.uri.as_str()) {
+        let is_entry_point =
+            entry_point_allowed && name.uri == XSLT_NS && name.local == "initial-template";
+        if !is_entry_point {
+            self.reject_reserved(&name, nav, module)?;
+        }
+        Ok(Some(name))
+    }
+
+    /// XTSE0080 for a name that is not read through [`Self::declared_name`]:
+    /// a mode, which a `mode` attribute names rather than declares.
+    pub(super) fn reject_reserved(
+        &self,
+        name: &QName,
+        nav: &Nav<'t>,
+        module: &Module<'t>,
+    ) -> Result<(), XsltError> {
+        if RESERVED_NAMESPACES.contains(&name.uri.as_str()) {
             return Err(XsltError::new(
                 codes::XTSE0080,
                 format!("{name} is in a reserved namespace"),
             )
             .with_location(module.location(nav)));
         }
-        Ok(Some(name))
+        Ok(())
     }
 }
 
-/// The namespaces §3.2 reserves; a stylesheet may not declare a name in one.
+/// The namespaces §3.2 reserves ("The reserved namespaces are those listed
+/// below"); a stylesheet may not declare a name in one: the XSLT namespace, the
+/// standard function namespace, the XML namespace, the schema namespace, the
+/// schema instance namespace, and "The namespace `http://www.w3.org/2000/xmlns/`
+/// is reserved for use as described in \[Namespaces in XML 1.0\]".
 const RESERVED_NAMESPACES: &[&str] = &[
     XSLT_NS,
     "http://www.w3.org/2005/xpath-functions",
+    crate::names::XML_NS,
     "http://www.w3.org/2001/XMLSchema",
     "http://www.w3.org/2001/XMLSchema-instance",
+    "http://www.w3.org/2000/xmlns/",
 ];

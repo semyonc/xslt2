@@ -183,6 +183,9 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     None => None,
                 };
                 let mode = self.mode_ref(nav, ctx)?;
+                if let ModeRef::Named(name) = &mode {
+                    self.reject_reserved(name, nav, module)?;
+                }
                 let sort = self.sort_keys(nav, module_id)?;
                 let params = self.with_params(nav, module_id)?;
                 Ok(InstructionKind::ApplyTemplates {
@@ -344,10 +347,12 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 })
             }
             "variable" => {
-                let name = self.qname_attr(nav, "name", ctx, module)?.ok_or_else(|| {
-                    XsltError::new(codes::XTSE0010, "xsl:variable has no name attribute")
-                        .with_location(loc.clone())
-                })?;
+                let name = self
+                    .declared_name(nav, "name", ctx, module)?
+                    .ok_or_else(|| {
+                        XsltError::new(codes::XTSE0010, "xsl:variable has no name attribute")
+                            .with_location(loc.clone())
+                    })?;
                 let as_type = match attr_local(nav, "as") {
                     Some(text) => Some(self.compile_type(&text, ctx)?),
                     None => None,
@@ -408,20 +413,20 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                  xsl:perform-sort or xsl:for-each-group",
             )
             .with_location(loc)),
-            "number" | "for-each-group" | "analyze-string" | "result-document" | "function"
-            | "key" => Ok(InstructionKind::NotImplemented {
-                feature: format!("xsl:{local}"),
-                // The owner of each, per the roadmap's §4.
-                milestone: match local.as_str() {
-                    "function" => "M2e",
-                    "key" => "M2f",
-                    "for-each-group" => "M2g",
-                    "analyze-string" => "M2h",
-                    "result-document" => "M3b",
-                    "number" => "M3c",
-                    _ => unreachable!("the arm above lists exactly these elements"),
-                },
-            }),
+            "number" | "for-each-group" | "analyze-string" | "result-document" | "key" => {
+                Ok(InstructionKind::NotImplemented {
+                    feature: format!("xsl:{local}"),
+                    // The owner of each, per the roadmap's §4.
+                    milestone: match local.as_str() {
+                        "key" => "M2f",
+                        "for-each-group" => "M2g",
+                        "analyze-string" => "M2h",
+                        "result-document" => "M3b",
+                        "number" => "M3c",
+                        _ => unreachable!("the arm above lists exactly these elements"),
+                    },
+                })
+            }
             other => {
                 // §3.9: in a forwards-compatible region an unknown XSLT
                 // instruction becomes its xsl:fallback children; with no

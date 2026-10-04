@@ -37,8 +37,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         // compiles and raises XTDE1425 only if it is evaluated.
         let visible = self.visible_vars(ctx);
         let names: Vec<&str> = visible.iter().map(|(n, _)| n.as_str()).collect();
-        if let Err(e) = XPathExpr::compile_with_vars(source, &self.contexts[ctx.0 as usize], &names)
-        {
+        if let Err(e) = XPathExpr::compile_with_vars(source, self.compile_context(ctx), &names) {
             return Err(match e.error_code() {
                 Some(code @ ("XPST0008" | "XPST0017" | "XPST0051" | "XPST0081"))
                     if has_pattern_shape(source) =>

@@ -11,6 +11,7 @@ mod avt;
 pub(crate) mod checks;
 mod declarations;
 mod expressions;
+mod functions;
 mod instructions;
 mod literal;
 mod modes;
@@ -26,7 +27,7 @@ use xsd_schema::namespace::NameTable;
 use xsd_schema::xpath::XPathContext;
 
 use crate::error::XsltError;
-use crate::functions::XsltFunctions;
+use crate::functions::{StylesheetCatalog, StylesheetFunctionTable, XsltFunctions};
 use crate::model::*;
 use crate::names::QName;
 use crate::output::OutputDefinition;
@@ -93,7 +94,17 @@ impl<'a> Compiler<'a> {
         // that escapes this function is owned, so the arena dies here.
         let modules = Loader::new(&arena, self.names, self.resolver.as_ref(), self.functions)
             .load(uri, text)?;
-        let mut builder = Builder::new(self.names, self.functions, &modules);
+        // §10.3: the stylesheet functions join the in-scope functions of every
+        // expression. The catalog that adds them lives only as long as the
+        // compilation (see `StylesheetCatalog`); the builder fills the table
+        // before it compiles the first expression.
+        let table = std::cell::OnceCell::new();
+        let catalogs = CompileCatalogs {
+            plain: StylesheetCatalog::new(self.functions, &table, false),
+            backwards: StylesheetCatalog::new(self.functions, &table, true),
+            table: &table,
+        };
+        let mut builder = Builder::new(self.names, self.functions, &modules, &catalogs);
         builder.build()
     }
 }
@@ -117,12 +128,29 @@ struct ScopeEntry {
 
 // ── Builder ──────────────────────────────────────────────────────────────
 
+/// The two function catalogs expressions are **compiled** against — one per
+/// compatibility mode — and the stylesheet-function table both consult
+/// (§10.3, §3.8).
+struct CompileCatalogs<'a, 'm> {
+    plain: StylesheetCatalog<'a, 'm>,
+    backwards: StylesheetCatalog<'a, 'm>,
+    table: &'m std::cell::OnceCell<StylesheetFunctionTable>,
+}
+
 struct Builder<'a, 'm, 't> {
     names: &'a NameTable,
     functions: &'a XsltFunctions,
     modules: &'m ModuleSet<'t>,
+    catalogs: &'m CompileCatalogs<'a, 'm>,
     static_contexts: StaticContexts,
+    /// The static context of each [`StaticContextId`] as evaluation sees it,
+    /// with the caller's [`XsltFunctions`] as its catalog; these are kept in
+    /// the compiled stylesheet.
     contexts: Vec<XPathContext<'a>>,
+    /// The same static contexts as the binder sees them, with the stylesheet
+    /// functions in scope (§10.3). Every expression is compiled against one of
+    /// these; they die with the compilation.
+    compile_contexts: Vec<XPathContext<'m>>,
     exprs: Vec<CompiledExpr>,
     patterns: Vec<Pattern>,
     templates: Vec<TemplateRule>,
@@ -147,6 +175,15 @@ struct Builder<'a, 'm, 't> {
     /// Every name a `use-attribute-sets` / `xsl:use-attribute-sets` attribute
     /// mentions, for the static half of XTSE0710 (§10.2).
     attr_set_refs: Vec<QName>,
+    /// Every `xsl:function` declaration, from the pre-pass (§10.3).
+    function_decls: Vec<functions::FunctionDecl<'t>>,
+    /// The compiled winners, indexed by `StylesheetFunctionId`; `None` until
+    /// the body is compiled.
+    functions_table: Vec<Option<StylesheetFunction>>,
+    /// The bodies of the `xsl:function` declarations that lost to one of
+    /// higher import precedence: never called, but checked (§2.9).
+    losing_function_bodies: Vec<Body>,
+    function_handles: HashMap<xsd_schema::xpath::functions::FunctionHandle, StylesheetFunctionId>,
 }
 
 /// One winning `xsl:namespace-alias` declaration (§11.1.4).
@@ -164,13 +201,20 @@ struct Alias {
 }
 
 impl<'a, 'm, 't> Builder<'a, 'm, 't> {
-    fn new(names: &'a NameTable, functions: &'a XsltFunctions, modules: &'m ModuleSet<'t>) -> Self {
+    fn new(
+        names: &'a NameTable,
+        functions: &'a XsltFunctions,
+        modules: &'m ModuleSet<'t>,
+        catalogs: &'m CompileCatalogs<'a, 'm>,
+    ) -> Self {
         Self {
             names,
             functions,
             modules,
+            catalogs,
             static_contexts: StaticContexts::default(),
             contexts: Vec::new(),
+            compile_contexts: Vec::new(),
             exprs: Vec::new(),
             patterns: Vec::new(),
             templates: Vec::new(),
@@ -186,6 +230,10 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             decl_order: 0,
             aliases: HashMap::new(),
             attr_set_refs: Vec::new(),
+            function_decls: Vec::new(),
+            functions_table: Vec::new(),
+            losing_function_bodies: Vec::new(),
+            function_handles: HashMap::new(),
         }
     }
 
@@ -194,6 +242,10 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         // element or a content model the spec does not allow is reported even
         // when it stands in a subtree nothing would compile (M2c).
         checks::check(self.modules, self.functions.collations())?;
+        // §10.3: every stylesheet function is in the static context of every
+        // expression, wherever it is declared — so they are all collected, and
+        // their winners settled, before the first expression is compiled.
+        self.collect_functions()?;
         self.build_declarations()?;
         // §10.1.1's XTSE0680 needs the declaration tables, so it runs over the
         // compiled tree rather than over the stylesheet tree.
@@ -229,6 +281,11 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             output: std::mem::take(&mut self.output),
             named_outputs: std::mem::take(&mut self.named_outputs),
             space_rules: std::mem::take(&mut self.space_rules),
+            functions_table: std::mem::take(&mut self.functions_table)
+                .into_iter()
+                .map(|f| f.expect("every winning xsl:function is compiled by build_declarations"))
+                .collect(),
+            function_handles: std::mem::take(&mut self.function_handles),
             module_uris: self.modules.modules.iter().map(|m| m.uri.clone()).collect(),
             base_uri,
             principal_compat,

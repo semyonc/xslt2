@@ -37,6 +37,18 @@ impl<'t> FunctionEvaluator<Nav<'t>> for XsltEvaluator<'_, '_, 't> {
         ctx: &mut DynamicContext<'_, Nav<'t>>,
         args: Vec<XPathValue<Nav<'t>>>,
     ) -> Result<XPathValue<Nav<'t>>, XPathError> {
+        // §10.3: a call bound to a stylesheet function runs its body. Its
+        // handle is a custom one, and never one of the function library's.
+        if let Some(id) = handle
+            .is_custom()
+            .then(|| self.run.sheet.stylesheet_function_of(handle))
+            .flatten()
+        {
+            return self
+                .run
+                .call_stylesheet_function(id, args)
+                .map_err(|e| self.park(e));
+        }
         let Some(which) = self.run.sheet.functions().resolve(handle) else {
             return BuiltinEvaluator.eval(handle, ctx, args);
         };
@@ -44,16 +56,21 @@ impl<'t> FunctionEvaluator<Nav<'t>> for XsltEvaluator<'_, '_, 't> {
             Ok(value) => Ok(value),
             // `XPathError` has no host-error variant, so the real error is
             // parked on the transformation and picked up by `xpath_error`.
-            Err(e) => {
-                let message = e.to_string();
-                *self.run.parked_error.borrow_mut() = Some(e);
-                Err(XPathError::internal(message))
-            }
+            Err(e) => Err(self.park(e)),
         }
     }
 }
 
 impl<'t> XsltEvaluator<'_, '_, 't> {
+    /// Parks an error raised below an XPath function call on the
+    /// transformation, where `xpath_error` picks it up: `XPathError` has no
+    /// host-error variant to carry it in.
+    fn park(&self, e: XsltError) -> XPathError {
+        let message = e.to_string();
+        *self.run.parked_error.borrow_mut() = Some(e);
+        XPathError::internal(message)
+    }
+
     /// The base URI relative references in *this* expression resolve against.
     ///
     /// §5.4.1 gives the static context "Base URI: The base URI of the
@@ -96,7 +113,19 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                 // §16.6.4: "If the argument is omitted, it defaults to the
                 // context node", i.e. the XPath context item.
                 let node = match args.first() {
-                    None => self.context_item(ctx),
+                    // With the focus undefined — the body of a stylesheet
+                    // function (§10.3: "any attempt to reference the context
+                    // item … is a non-recoverable dynamic error. [XPDY0002]"),
+                    // or a run with no initial context node — there is no
+                    // context node to default to; only an *explicitly* empty
+                    // argument gives the zero-length string.
+                    None => Some(self.context_item(ctx).ok_or_else(|| {
+                        XsltError::new(
+                            "XPDY0002",
+                            "generate-id() with no argument needs a context node, and the \
+                             focus is undefined",
+                        )
+                    })?),
                     Some(value) => value.first().cloned(),
                 };
                 Ok(match node {
@@ -233,7 +262,8 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
             }
             XsltFn::FunctionAvailable => {
                 let name = single_string(args.first()).unwrap_or_default();
-                Ok(XPathValue::boolean(self.function_available(&name)?))
+                let arity = crate::functions::arity_argument(args.get(1))?;
+                Ok(XPathValue::boolean(self.function_available(&name, arity)?))
             }
             XsltFn::TypeAvailable => {
                 let name = single_string(args.first()).unwrap_or_default();
@@ -423,15 +453,28 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
     }
 
     /// §18.1.1 function-available: an unprefixed name takes the standard
-    /// function namespace.
-    fn function_available(&self, name: &str) -> Result<bool, XsltError> {
+    /// function namespace; the two-argument form asks about one arity
+    /// (`arity` is `Some`, see `functions::arity_argument`).
+    ///
+    /// "A function is said to be available within an XPath expression if it is
+    /// present in the in-scope functions for that expression", and §10.3 puts
+    /// every stylesheet function there, so they count as well as the
+    /// processor's own.
+    fn function_available(
+        &self,
+        name: &str,
+        arity: Option<Option<usize>>,
+    ) -> Result<bool, XsltError> {
         let (uri, local) =
             expand_name_argument(&self.name_scope(), XsltFn::FunctionAvailable, name)?;
-        Ok(crate::functions::function_available(
-            self.run.sheet.functions(),
-            &uri,
-            local,
-        ))
+        let arity = match arity {
+            None => None,
+            Some(Some(arity)) => Some(arity),
+            Some(None) => return Ok(false),
+        };
+        let name = crate::names::QName::new(uri.as_str(), local);
+        Ok(self.run.sheet.has_stylesheet_function(&name, arity)
+            || crate::functions::function_available(self.run.sheet.functions(), &uri, local, arity))
     }
 
     /// §18.1.4 type-available.

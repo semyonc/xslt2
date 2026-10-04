@@ -25,6 +25,9 @@ impl<'a, 't> Transformation<'a, 't> {
     /// optional recovery action is to treat the pattern as not matching".
     /// `TransformOptions::strict_recoverable` signals it instead.
     pub fn matches(&self, pattern: &Pattern, node: &Nav<'t>) -> Result<bool, XsltError> {
+        // A pattern's predicates may call stylesheet functions, so a direct
+        // call measures the stack it uses from here, as a run does (Q33).
+        let _stack = self.stack_scope(super::stack_position());
         for alternative in &pattern.alternatives {
             // The node handed in is both the candidate and, per §16.6.1, the
             // node `current()` reports throughout the match.

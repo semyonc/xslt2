@@ -1,11 +1,14 @@
 //! Q33: how deep a recursive named template can go before the host stack runs
-//! out, M1 having no tail-call elimination.
+//! out, there being no tail-call elimination.
 //!
-//! The measurement, on this machine with the default 256 MiB worker stack:
-//! **50 000 levels succeed, 55 000 overflow** — roughly 5 KiB of stack per
-//! template call. A 1 GiB stack reaches 100 000. `TransformOptions::
-//! max_recursion_depth` defaults to 40 000 so that a runaway recursion ends in
-//! an error a caller can catch rather than in a process abort it cannot.
+//! The measurement, on this machine with the default 256 MiB worker stack, in a
+//! release build: M1 measured **50 000 levels succeed, 55 000 overflow** —
+//! roughly 5 KiB of stack per template call. At M2e the same template uses about
+//! 7.5 KB per level: without a guard it overflowed between 35 000 and 36 000
+//! levels, and the stack guard (`TransformOptions::stack_limit`, about 224 MiB
+//! on this stack) now ends it in the depth error at about 31 000 — an error a
+//! caller can catch rather than a process abort it cannot. `TransformOptions::
+//! max_recursion_depth` (40 000 by default) is the second, count-based limit.
 //!
 //! The test itself runs a modest depth so that `cargo test` stays quick; set
 //! `Q33_DEPTH` and `Q33_STACK` to repeat the measurement.

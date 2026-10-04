@@ -3,14 +3,15 @@
 Schema-aware XSLT 2.0 processor in Rust, built on the
 [`xsd-schema`](../xsd-schema) validator and its XPath 2.0 engine.
 
-Status: **M1 — core transformation**. Stylesheets are loaded, compiled and run: the module
-graph with import precedence, the lexical static contexts of §5.4.1, template rules with the
-§6.4 priorities and conflict resolution, the built-in rules, `xsl:apply-imports` and
-`xsl:next-match`, variables and parameters (tunnel included), attribute value templates,
-attribute sets, the node constructors, `xsl:copy`/`xsl:copy-of`, `xsl:message`, and the XML and
-text output methods. `xsl:sort`, `xsl:function`, `xsl:key`, `xsl:for-each-group`,
-`xsl:analyze-string`, `xsl:number`, `format-number` and the HTML/XHTML output methods belong to
-M2–M4 and report the internal `XSLT2-NOTIMPL` code rather than a wrong answer.
+Status: **M2 — full language, in progress** (M1, M2a–M2e, M2i, M2j done). Stylesheets are loaded,
+compiled and run: the module graph with import precedence, the lexical static contexts of §5.4.1,
+template rules with the §6.4 priorities and conflict resolution, the built-in rules,
+`xsl:apply-imports` and `xsl:next-match`, variables and parameters (tunnel included), attribute
+value templates, attribute sets, the node constructors, `xsl:copy`/`xsl:copy-of`, `xsl:message`,
+`xsl:sort` / `xsl:perform-sort` with collations, `xsl:function`, and the XML and text output
+methods. `xsl:key`, `xsl:for-each-group`, `xsl:analyze-string`, `xsl:number`, `format-number` and
+the HTML/XHTML output methods belong to later milestones and report the internal `XSLT2-NOTIMPL`
+code rather than a wrong answer.
 
 ```rust
 use xsd_schema::namespace::NameTable;
@@ -27,6 +28,15 @@ println!("{}", sheet.serialize_primary(&outcome)?);
 # Ok::<(), xslt2::XsltError>(())
 ```
 
+**Deep recursion.** Recursive templates and stylesheet functions use the native stack. A run checks
+how much stack it has used and stops with a depth error instead of overflowing. On a thread
+whose stack size it cannot know — any thread the host started — it allows itself only
+`OTHER_THREAD_STACK_LIMIT` (1 MiB): safe on a default 2 MiB thread, but enough for only about a hundred
+nested template calls in a release build. For deep recursion, run the whole job (compile,
+transform, serialize — the compiled stylesheet and the arena are `!Send`) on a large stack with
+`xslt2::run_on_large_stack(xslt2::DEFAULT_STACK_SIZE, || …)` (256 MiB), or set
+`TransformOptions::stack_limit` for a thread whose stack size you know.
+
 ## Conformance
 
 The XSLT 2.0 test suite (XSLTS 1.0.4) was never published; the public W3C XSLT 3.0 suite
@@ -38,13 +48,13 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 | | |
 |---|---|
 | XSLT 2.0-applicable | 6,619 |
-| excluded (documented in `tests/xslts/filter.rs`) | 26 |
-| runnable (dependencies satisfied) | 5,725 |
-| pass | 4,522 |
-| fail / wrongError / harnessError | 59 / 0 / 3 |
-| not implemented (`XSLT2-NOTIMPL`, M2–M4) | 1,141 |
-| pass rate over runnable | 78.99% |
-| headline (basic profile, non-regex families) | 3,378 / 4,215 = **80.1%** |
+| excluded (documented in `tests/xslts/filter.rs`) | 30 |
+| runnable (dependencies satisfied) | 5,721 |
+| pass | 4,628 |
+| fail / wrongError / harnessError | 62 / 0 / 3 |
+| not implemented (`XSLT2-NOTIMPL`, M2–M4) | 1,028 |
+| pass rate over runnable | 80.89% |
+| headline (basic profile, non-regex families) | 3,484 / 4,211 = **82.7%** |
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the
@@ -63,7 +73,8 @@ namespace node) to 4,299. The 0.2.1 release fixes, M2i (core defects in what M1 
 took it to 4,369 of 5,725 on 2026-10-04: 26 cases whose expectation is wrong for an XSLT 2.0 processor are
 excluded with the spec text that says so, and 3 are harness errors until the public API can start a
 transformation at a node other than the document. M2d (sorting: `xsl:sort`, `xsl:perform-sort` and the collation
-registry, `../../XSLT2_M2D_REPORT.md`) took it to 4,522 on 2026-10-04.
+registry, `../../XSLT2_M2D_REPORT.md`) took it to 4,522, and M2e (`xsl:function`, `../../XSLT2_M2E_REPORT.md`; four
+more documented exclusions) to 4,628 of 5,721 on 2026-10-04.
 
 The sixteen test-sets M1 targets:
 
@@ -74,16 +85,16 @@ The sixteen test-sets M1 targets:
 | choose | 54 | 53 | 0 | 0 | 0 | 1 | 98.1% |
 | call-template | 35 | 33 | 0 | 0 | 1 | 1 | 94.3% |
 | lre | 26 | 26 | 0 | 0 | 0 | 0 | 100.0% |
-| variable | 101 | 99 | 0 | 0 | 0 | 2 | 98.0% |
+| variable | 101 | 100 | 0 | 0 | 0 | 1 | 99.0% |
 | include | 14 | 13 | 1 | 0 | 0 | 0 | 92.9% |
 | apply-templates | 36 | 36 | 0 | 0 | 0 | 0 | 100.0% |
 | element | 19 | 18 | 1 | 0 | 0 | 0 | 94.7% |
 | version | 33 | 30 | 0 | 0 | 0 | 3 | 90.9% |
-| param | 26 | 23 | 0 | 0 | 0 | 3 | 88.5% |
+| param | 25 | 25 | 0 | 0 | 0 | 0 | 100.0% |
 | attribute | 21 | 19 | 0 | 0 | 0 | 2 | 90.5% |
-| copy | 72 | 62 | 2 | 0 | 0 | 8 | 86.1% |
-| sequence | 87 | 82 | 0 | 0 | 0 | 5 | 94.3% |
-| message | 26 | 22 | 2 | 0 | 0 | 2 | 84.6% |
+| copy | 70 | 65 | 2 | 0 | 0 | 3 | 92.9% |
+| sequence | 87 | 86 | 0 | 0 | 0 | 1 | 98.9% |
+| message | 26 | 23 | 2 | 0 | 0 | 1 | 88.5% |
 | output | 137 | 10 | 21 | 0 | 0 | 106 | 7.3% |
 
 `output` is dominated by the `html`, `xhtml`, `doctype-*` and character-map serialization

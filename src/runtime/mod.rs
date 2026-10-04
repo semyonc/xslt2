@@ -11,6 +11,7 @@
 //! tunnel parameters — is passed down explicitly, so no `RefCell` is ever
 //! borrowed across an evaluation.
 
+mod calls;
 mod content;
 mod context;
 mod dispatch;
@@ -55,15 +56,53 @@ pub struct TransformOptions {
     pub initial_mode: ModeKey,
     /// Signal recoverable errors instead of taking the spec's recovery action.
     pub strict_recoverable: bool,
-    /// Stack size of the thread [`run_on_large_stack`] uses (Q33).
-    pub stack_size: usize,
-    /// How deep template invocation may nest before the run is abandoned.
+    /// A stack size for the host to pass to [`run_on_large_stack`] (Q33).
     ///
-    /// M1 has no tail-call elimination, so a recursive named template consumes
-    /// host stack — about 5 KiB per call — and a runaway recursion would
-    /// otherwise abort the process, which a conformance harness cannot catch.
-    /// The default is chosen to stay inside [`DEFAULT_STACK_SIZE`].
+    /// The transformation does not read it: [`run_on_large_stack`] takes its
+    /// size as an argument, and the stack guard learns the size of the thread
+    /// from there (see [`Self::stack_limit`]).
+    pub stack_size: usize,
+    /// How deep template invocations and stylesheet-function calls may nest
+    /// before the run is abandoned with an `XSLT2-INTERNAL` error (Q33).
+    ///
+    /// There is no tail-call elimination, so every nested call consumes host
+    /// stack, and a runaway recursion would otherwise abort the process, which
+    /// a caller cannot catch. Each template invocation — named, applied
+    /// (including `xsl:apply-imports` and `xsl:next-match`) or the initial one
+    /// — counts **1**; each stylesheet-function call counts **8**, because a
+    /// call through the XPath engine nests deeper on the host stack. A limit
+    /// below 8 therefore makes even a single, non-recursive function call
+    /// fail. The default, [`DEFAULT_MAX_RECURSION_DEPTH`], allows 40 000 nested
+    /// templates or 5 000 nested function calls.
+    ///
+    /// A count cannot bound the stack a call uses, which depends on its body;
+    /// [`Self::stack_limit`] does, and the run stops at whichever limit is
+    /// reached first.
     pub max_recursion_depth: usize,
+    /// How many bytes of host stack the run may use, measured from the point
+    /// where it starts, before it is abandoned with the same error as
+    /// [`Self::max_recursion_depth`] (Q33).
+    ///
+    /// Checked on entry to every template invocation (built-in template rules
+    /// included) and every stylesheet-function call, so a deep recursion ends
+    /// in that error however much stack each of its calls uses. What one body
+    /// uses *between* two such entries is not checked; the room left above the
+    /// limit is for that.
+    ///
+    /// `None` (the default) derives the limit from the thread the run is on:
+    ///
+    /// - on a thread [`run_on_large_stack`] started, its stack size, less the
+    ///   stack already in use where the run starts, less a reserve of one
+    ///   eighth of the stack (at least 1 MiB, at most half the stack) — on the
+    ///   default [`DEFAULT_STACK_SIZE`] about 224 MiB;
+    /// - on any other thread, whose stack size the run cannot know,
+    ///   [`OTHER_THREAD_STACK_LIMIT`] (1 MiB), which leaves room on a thread
+    ///   with Rust's default 2 MiB stack.
+    ///
+    /// A host that runs the transformation on a thread of its own with a known
+    /// stack can set the limit explicitly: that stack size, less what is in use
+    /// when the run starts, less a reserve.
+    pub stack_limit: Option<usize>,
     /// Where `document('')` and relative URIs resolve against.
     pub base_uri: Option<String>,
 }
@@ -76,6 +115,7 @@ impl Default for TransformOptions {
             strict_recoverable: false,
             stack_size: DEFAULT_STACK_SIZE,
             max_recursion_depth: DEFAULT_MAX_RECURSION_DEPTH,
+            stack_limit: None,
             base_uri: None,
         }
     }
@@ -83,19 +123,59 @@ impl Default for TransformOptions {
 
 /// The stack a transformation runs on by default (Q33).
 ///
-/// A deeply recursive named template consumes host stack, and M1 has no
+/// A deeply recursive named template consumes host stack, and there is no
 /// tail-call elimination. Running the whole job on a thread with a large stack
-/// is the stopgap; see [`run_on_large_stack`]. Measured on this stack: a
-/// recursive named template reaches **50 000** levels and overflows before
-/// 55 000, i.e. about 5 KiB of stack per call; 1 GiB reaches 100 000.
+/// is the stopgap; see [`run_on_large_stack`]. Measured on this stack in a
+/// release build (M2e): the recursive named template of `tests/q33_depth.rs`
+/// uses about 7.5 KB per level, so the stack guard
+/// ([`TransformOptions::stack_limit`], about 224 MiB here) stops it with the
+/// depth error at about 31 000 levels; without the guard it overflowed between
+/// 35 000 and 36 000. (M1 measured 50 000 levels, about 5 KiB per call; the
+/// frames have grown since.)
 pub const DEFAULT_STACK_SIZE: usize = 256 * 1024 * 1024;
 
-/// The template-invocation depth a run allows by default.
+/// The nesting depth a run allows by default
+/// ([`TransformOptions::max_recursion_depth`]): 40 000 template invocations, a
+/// stylesheet-function call counting as 8.
 ///
-/// Set below the depth [`DEFAULT_STACK_SIZE`] can carry, so that a runaway
-/// recursion ends in an error the caller can catch rather than in a process
-/// abort the caller cannot.
+/// Set below the depth of light template bodies [`DEFAULT_STACK_SIZE`] can
+/// carry, so that a runaway recursion through them ends in an error the caller
+/// can catch rather than in a process abort the caller cannot. Heavier bodies
+/// are stopped by [`TransformOptions::stack_limit`] first.
 pub const DEFAULT_MAX_RECURSION_DEPTH: usize = 40_000;
+
+/// The [`TransformOptions::stack_limit`] a run uses by default on a thread that
+/// [`run_on_large_stack`] did not start: 1 MiB from the point where the run
+/// starts.
+///
+/// The run cannot know the size of such a thread's stack. Rust gives a spawned
+/// thread 2 MiB by default (and a test thread the same), so this limit leaves
+/// half of that for what was in use before the run and for the stack one body
+/// uses between two checks.
+pub const OTHER_THREAD_STACK_LIMIT: usize = 1024 * 1024;
+
+/// The smallest reserve the stack guard keeps on a [`run_on_large_stack`]
+/// thread (but never more than half its stack); the reserve is one eighth of
+/// the thread's stack when that is more.
+const MIN_STACK_RESERVE: usize = 1024 * 1024;
+
+thread_local! {
+    /// For a thread [`run_on_large_stack`] started: the stack position where
+    /// the thread began and its stack size, from which the stack guard derives
+    /// [`TransformOptions::stack_limit`] (Q33). `None` on every other thread.
+    static LARGE_STACK: std::cell::Cell<Option<(usize, usize)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// A position on the current thread's stack: the address of a local of the
+/// caller's frame. Stacks grow downwards on every supported target, but the
+/// guard only ever takes the distance between two positions, so the direction
+/// does not matter.
+#[inline(always)]
+fn stack_position() -> usize {
+    let marker = 0u8;
+    std::hint::black_box(std::ptr::addr_of!(marker)) as usize
+}
 
 /// Runs `job` on a thread with `stack_size` bytes of stack and returns its
 /// result (Q33).
@@ -103,6 +183,10 @@ pub const DEFAULT_MAX_RECURSION_DEPTH: usize = 40_000;
 /// The compiled stylesheet, the name table and the arena are all `!Send`, so
 /// the *whole* job — compile, load, transform, serialize — has to happen
 /// inside the closure; only owned, `Send` values cross the boundary.
+///
+/// The thread remembers its stack size, so a transformation run inside `job`
+/// knows how much stack it may use before it stops with the depth error
+/// rather than overflowing ([`TransformOptions::stack_limit`]).
 pub fn run_on_large_stack<R, F>(stack_size: usize, job: F) -> R
 where
     F: FnOnce() -> R + Send + 'static,
@@ -110,10 +194,40 @@ where
 {
     std::thread::Builder::new()
         .stack_size(stack_size)
-        .spawn(job)
+        .spawn(move || {
+            LARGE_STACK.with(|cell| cell.set(Some((stack_position(), stack_size))));
+            job()
+        })
         .expect("a worker thread")
         .join()
         .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+}
+
+/// Where on the stack a run started, and how far below that it may go
+/// ([`TransformOptions::stack_limit`]). `base` is 0 outside a run.
+#[derive(Clone, Copy, Default)]
+struct StackGuard {
+    base: usize,
+    limit: usize,
+}
+
+/// The extent of one public entry point that evaluates stylesheet code (a
+/// run, a direct [`Transformation::matches`]): the outermost one sets the
+/// stack guard's base on entry and clears it on exit, so the guard is on for
+/// everything evaluated below it and a later call, from wherever on the stack
+/// it is made, never measures from a stale base. A nested one leaves the
+/// outer base alone.
+pub(super) struct StackScope<'g> {
+    cell: &'g std::cell::Cell<StackGuard>,
+    owner: bool,
+}
+
+impl Drop for StackScope<'_> {
+    fn drop(&mut self) {
+        if self.owner {
+            self.cell.set(StackGuard::default());
+        }
+    }
 }
 
 /// One `xsl:message` (§17).
@@ -165,8 +279,11 @@ pub struct Transformation<'a, 't> {
     /// tree containing the initial context node.
     initial_root: RefCell<Option<Nav<'t>>>,
     terminated: RefCell<bool>,
-    /// How deep template invocation is nested right now.
+    /// How deep template invocation is nested right now, a function call
+    /// counting `calls::FUNCTION_CALL_DEPTH`.
     depth: std::cell::Cell<usize>,
+    /// The stack guard of the current run (Q33).
+    stack: std::cell::Cell<StackGuard>,
     /// The current dateTime and implicit timezone of this transformation,
     /// fixed the first time an expression is evaluated (§5.4.3.2).
     clock: std::cell::OnceCell<Option<(DateTimeValue, TimezoneOffset)>>,
@@ -199,6 +316,7 @@ impl<'a> CompiledStylesheet<'a> {
             initial_root: RefCell::new(None),
             terminated: RefCell::new(false),
             depth: std::cell::Cell::new(0),
+            stack: std::cell::Cell::new(StackGuard::default()),
             clock: std::cell::OnceCell::new(),
             message_sink: None,
         }
@@ -276,7 +394,29 @@ impl<'a, 't> Transformation<'a, 't> {
         self.run(None)
     }
 
+    /// Enters a [`StackScope`] whose base, if it is the outermost one, is
+    /// `base` — the caller's [`stack_position`], taken in its own frame.
+    pub(super) fn stack_scope(&self, base: usize) -> StackScope<'_> {
+        if self.stack.get().base != 0 {
+            return StackScope {
+                cell: &self.stack,
+                owner: false,
+            };
+        }
+        self.stack.set(StackGuard {
+            base,
+            limit: self.stack_limit_from(base),
+        });
+        StackScope {
+            cell: &self.stack,
+            owner: true,
+        }
+    }
+
     fn run(&self, initial: Option<Nav<'t>>) -> Result<Outcome<'t>, XsltError> {
+        // Q33: everything the run evaluates happens below this frame, so the
+        // stack it uses is measured from here.
+        let _stack = self.stack_scope(stack_position());
         // §21.1 XTDE1665, before anything can observe a typed node: "the input
         // to the processor" is the tree containing the initial context node and
         // every tree passed as a stylesheet parameter. Both are checked here,

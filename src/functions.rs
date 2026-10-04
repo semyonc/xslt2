@@ -277,15 +277,15 @@ impl XsltFunctions {
             vec![string()],
             SequenceType::boolean(),
         );
+        // §18.1.1 defines both forms: `function-available($function-name as
+        // xs:string) as xs:boolean` and `function-available($function-name as
+        // xs:string, $arity as xs:integer) as xs:boolean`.
         this.add(
             XsltFn::FunctionAvailable,
             "function-available",
             vec![string()],
             SequenceType::boolean(),
         );
-        // XSLT 2.0 defines only the one-argument form; the two-argument form
-        // is XSLT 3.0's, and several forwards-compatible test stylesheets
-        // guard 3.0 features with it, so it is offered as an extension.
         this.add(
             XsltFn::FunctionAvailable,
             "function-available",
@@ -566,7 +566,14 @@ impl XsltFunctions {
     /// rule is to ensure that `function-available` returns true in respect of
     /// functions that can be called within the scope of the `use-when`
     /// attribute").
+    ///
+    /// §3.12 keeps "the core functions defined in \[Functions and Operators\]"
+    /// in scope, and the constructor functions are among them (see
+    /// [`is_constructor_function`]).
     pub fn is_available_in_use_when(&self, namespace: &str, local: &str, arity: usize) -> bool {
+        if is_constructor_function(namespace, local, arity) {
+            return true;
+        }
         match self.catalog.set.lookup(namespace, local, arity) {
             Some(handle) if self.stubs.contains(&handle) => false,
             Some(handle) => match self.by_handle.get(&handle) {
@@ -584,17 +591,209 @@ impl XsltFunctions {
         self.by_handle.get(&handle).copied()
     }
 
-    /// Whether a name and arity in the standard function namespace resolves —
-    /// what `function-available()` answers (§18.1.2).
+    /// Whether one of the processor's functions of this name and arity is in
+    /// the in-scope functions — what `function-available()` answers (§18.1.1)
+    /// for everything but the stylesheet functions: the catalog, and the
+    /// constructor functions the XPath binder resolves outside it (see
+    /// [`is_constructor_function`]).
     ///
     /// A function registered by `add_stub` is in the catalog but is not
     /// *available*: it exists only so that a call to it is classified as a
     /// missing feature rather than as an unknown function.
     pub fn is_available(&self, namespace: &str, local: &str, arity: usize) -> bool {
+        if is_constructor_function(namespace, local, arity) {
+            return true;
+        }
         match self.catalog.set.lookup(namespace, local, arity) {
             Some(handle) => !self.stubs.contains(&handle),
             None => false,
         }
+    }
+
+    /// `n` function handles that no handle of this set's own catalog can be
+    /// confused with, for the stylesheet functions of one compilation (§10.3).
+    ///
+    /// The engine mints a custom handle only through `FunctionSet::register`,
+    /// which numbers its entries from a fixed base, so two sets number theirs
+    /// alike. The handles are therefore minted from a scratch set that first
+    /// skips every number this set has used: a stylesheet-function handle then
+    /// resolves to nothing here — [`Self::resolve`] says `None` and the
+    /// catalog's `get_signature` finds no entry — and the evaluator can tell
+    /// the two kinds apart. (A public `FunctionHandle` constructor, ROADMAP
+    /// §3.5, would make the scratch set unnecessary.)
+    pub(crate) fn mint_handles(&self, n: usize) -> Vec<FunctionHandle> {
+        let mut scratch: FunctionSet<RoXmlNavigator<'static>> = FunctionSet::new();
+        let placeholder = || {
+            DynamicFunctionSignature::new(
+                FALLBACK_NS,
+                "#placeholder",
+                vec![],
+                SequenceType::empty(),
+            )
+        };
+        for _ in 0..self.catalog.set.custom_count() {
+            scratch.register(placeholder(), never_called);
+        }
+        (0..n)
+            .map(|_| scratch.register(placeholder(), never_called))
+            .collect()
+    }
+}
+
+/// The implementation `mint_handles` registers with each handle: never called,
+/// because the handle is only ever evaluated by xslt2's own `FunctionEvaluator`.
+fn never_called(
+    _: &mut xsd_schema::xpath::DynamicContext<'_, RoXmlNavigator<'static>>,
+    _: Vec<xsd_schema::xpath::functions::XPathValue<RoXmlNavigator<'static>>>,
+) -> Result<xsd_schema::xpath::functions::XPathValue<RoXmlNavigator<'static>>, XPathError> {
+    Err(XPathError::internal(
+        "a stylesheet function must be evaluated through xslt2's own FunctionEvaluator",
+    ))
+}
+
+// ── Stylesheet functions in the static context (§10.3) ─────────────────────
+
+/// The stylesheet functions of one compilation, as the XPath binder sees them:
+/// the winning declaration of every expanded QName and arity (§10.3).
+///
+/// Built once, by the compiler's declaration pre-pass, before the first
+/// expression of the stylesheet is compiled.
+#[derive(Debug, Default)]
+pub(crate) struct StylesheetFunctionTable {
+    /// `(namespace URI, local name, arity)` → the handle and the `override`
+    /// attribute of the declaration that won.
+    entries: HashMap<(String, String, usize), (FunctionHandle, bool)>,
+    /// What `get_signature` reports for each handle.
+    signatures: HashMap<FunctionHandle, DynamicFunctionSignature>,
+}
+
+impl StylesheetFunctionTable {
+    /// Records the winning declaration of `uri`/`local` with `arity`
+    /// parameters.
+    ///
+    /// The signature declares every parameter and the result as `item()*`.
+    /// §10.3 converts the arguments of a stylesheet function by "the rules …
+    /// for the case where XPath 1.0 compatibility mode is set to false", and the
+    /// engine applies the XPath 1.0 conversions only to a parameter declared as
+    /// a single or optional single item, so a call written in a
+    /// backwards-compatible region stays untouched by them; the real `as`
+    /// conversion is the evaluator's (XTTE0790).
+    pub(crate) fn insert(
+        &mut self,
+        uri: &str,
+        local: &str,
+        arity: usize,
+        handle: FunctionHandle,
+        override_vendor: bool,
+    ) {
+        self.entries.insert(
+            (uri.to_string(), local.to_string(), arity),
+            (handle, override_vendor),
+        );
+        self.signatures.insert(
+            handle,
+            DynamicFunctionSignature::new(
+                uri,
+                local,
+                vec![SequenceType::any(); arity],
+                SequenceType::any(),
+            ),
+        );
+    }
+
+    fn get(&self, uri: &str, local: &str, arity: usize) -> Option<(FunctionHandle, bool)> {
+        self.entries
+            .get(&(uri.to_string(), local.to_string(), arity))
+            .copied()
+    }
+}
+
+/// The function catalog the compiler binds an expression against: the
+/// caller's [`XsltFunctions`] plus the stylesheet functions of the compilation
+/// in progress (§10.3).
+///
+/// > A stylesheet function is included in the in-scope functions of the static
+/// > context for all XPath expressions used in the stylesheet, unless … the
+/// > `override` attribute has the value `no` and there is already a function
+/// > with the same name and arity in the in-scope functions.
+///
+/// So a stylesheet function with `override="yes"` (the default) is looked up
+/// before the processor's own functions, and one with `override="no"` after
+/// them. Either way it comes before §3.8's fallback binding, which is only for
+/// "any function call for which no implementation is available".
+///
+/// The catalog lives only as long as the compilation: the static contexts a
+/// [`CompiledStylesheet`](crate::CompiledStylesheet) keeps for evaluation
+/// point at [`XsltFunctions`] itself, which is all evaluation consults —
+/// `get_signature`, for the XPath 1.0 conversions §10.3 says do not apply to a
+/// stylesheet function, and which therefore finds nothing for one.
+pub(crate) struct StylesheetCatalog<'a, 'm> {
+    functions: &'a XsltFunctions,
+    table: &'m std::cell::OnceCell<StylesheetFunctionTable>,
+    /// Whether this is the catalog of an expression with backwards-compatible
+    /// behaviour (§3.8).
+    backwards: bool,
+}
+
+impl<'a, 'm> StylesheetCatalog<'a, 'm> {
+    pub(crate) fn new(
+        functions: &'a XsltFunctions,
+        table: &'m std::cell::OnceCell<StylesheetFunctionTable>,
+        backwards: bool,
+    ) -> Self {
+        Self {
+            functions,
+            table,
+            backwards,
+        }
+    }
+}
+
+impl std::fmt::Debug for StylesheetCatalog<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StylesheetCatalog")
+            .field("backwards", &self.backwards)
+            .field("table", &self.table.get())
+            .finish()
+    }
+}
+
+impl FunctionCatalog for StylesheetCatalog<'_, '_> {
+    fn lookup(&self, namespace: &str, local_name: &str, arity: usize) -> Option<FunctionHandle> {
+        let processor = || {
+            self.functions
+                .catalog
+                .set
+                .lookup(namespace, local_name, arity)
+        };
+        if let Some((handle, override_vendor)) = self
+            .table
+            .get()
+            .and_then(|table| table.get(namespace, local_name, arity))
+        {
+            // §10.3: "If the override attribute has the value yes, then this
+            // function is used in preference; if it has the value no, then the
+            // other function is used in preference."
+            if override_vendor || processor().is_none() {
+                return Some(handle);
+            }
+        }
+        if self.backwards {
+            self.functions.catalog.lookup(namespace, local_name, arity)
+        } else {
+            processor()
+        }
+    }
+
+    fn get_signature(&self, handle: FunctionHandle) -> Option<DynamicFunctionSignature> {
+        if let Some(signature) = self
+            .table
+            .get()
+            .and_then(|table| table.signatures.get(&handle))
+        {
+            return Some(signature.clone());
+        }
+        self.functions.catalog.get_signature(handle)
     }
 }
 
@@ -773,10 +972,20 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
             XsltFn::FunctionAvailable => {
                 let (uri, local) = expand()?;
                 // §3.12: the answer is about the functions that can be called
-                // *from here*, which is the use-when set, not the stylesheet's.
-                Ok(XPathValue::boolean((0..=MAX_ARITY).any(|arity| {
-                    self.functions.is_available_in_use_when(&uri, local, arity)
-                })))
+                // *from here*, which is the use-when set, not the stylesheet's
+                // — "stylesheet functions are not included in the context,
+                // which means that the function function-available will return
+                // false in respect of such functions". §18.1.1: the
+                // two-argument form asks about one arity only.
+                let arity = arity_argument(args.get(1)).map_err(|e| self.park(e))?;
+                Ok(XPathValue::boolean(match arity {
+                    None => (0..=MAX_ARITY)
+                        .any(|arity| self.functions.is_available_in_use_when(&uri, local, arity)),
+                    Some(Some(arity)) => {
+                        self.functions.is_available_in_use_when(&uri, local, arity)
+                    }
+                    Some(None) => false,
+                }))
             }
             XsltFn::TypeAvailable => {
                 let (uri, local) = expand()?;
@@ -1041,9 +1250,140 @@ pub fn element_available(uri: &str, local: &str) -> bool {
         )
 }
 
-/// §18.1.2: whether a function of this name is available at any arity.
-pub fn function_available(functions: &XsltFunctions, uri: &str, local: &str) -> bool {
-    (0..=MAX_ARITY).any(|arity| functions.is_available(uri, local, arity))
+/// §18.1.1: whether one of the processor's own functions of this name is
+/// available — at `arity`, or at any arity when `arity` is `None`.
+///
+/// > The two-argument version of the `function-available` function returns
+/// > true if and only if there is an available function whose name matches the
+/// > value of the `$function-name` argument and whose arity matches the value
+/// > of the `$arity` argument. The single-argument version of the
+/// > `function-available` function returns true if and only if there is at
+/// > least one available function (with some arity) whose name matches the
+/// > value of the `$function-name` argument.
+///
+/// Stylesheet functions are not the processor's: the run-time evaluator asks
+/// the compiled stylesheet about those as well.
+pub fn function_available(
+    functions: &XsltFunctions,
+    uri: &str,
+    local: &str,
+    arity: Option<usize>,
+) -> bool {
+    match arity {
+        Some(arity) => functions.is_available(uri, local, arity),
+        None => (0..=MAX_ARITY).any(|arity| functions.is_available(uri, local, arity)),
+    }
+}
+
+/// The `$arity` argument of `function-available` (§18.1.1): `Ok(None)` for the
+/// one-argument form; `Ok(Some(Some(n)))` for an arity a function can have;
+/// `Ok(Some(None))` for one no function has (a negative or absurdly large
+/// integer), of which the answer is simply false.
+///
+/// The signature is `function-available($function-name as xs:string, $arity as
+/// xs:integer)`, so the argument goes through XPath 2.0 §3.1.5's function
+/// conversion rules: "Atomization is applied to the given value", "Each item in
+/// the atomic sequence that is of type xs:untypedAtomic is cast to the expected
+/// atomic type", numeric promotion (B.1) can only widen — nothing is promoted
+/// *to* `xs:integer` — and "If, after the above conversions, the resulting value
+/// does not match the expected type according to the rules for SequenceType
+/// Matching, a type error is raised \[err:XPTY0004\]": two items, the empty
+/// sequence, an `xs:double`, an `xs:decimal` or a string. A failed cast is the
+/// cast's own error (FORG0001). In XPath 1.0 compatibility mode the engine has
+/// already applied the first of §3.1.5's extra steps ("the value V is
+/// effectively replaced by V\[1\]"); the `fn:string` / `fn:number` steps name
+/// only `xs:string` and `xs:double`, so an `xs:double` is XPTY0004 there too.
+/// The run-time evaluator and the `use-when` evaluator both call this.
+pub fn arity_argument<N: xsd_schema::navigator::DomNavigator>(
+    value: Option<&xsd_schema::xpath::functions::XPathValue<N>>,
+) -> Result<Option<Option<usize>>, crate::error::XsltError> {
+    use crate::error::XsltError;
+    use xsd_schema::types::XmlTypeCode;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let atoms = xsd_schema::xpath::functions::atomize_sequence(value.clone())?;
+    let [atom] = atoms.as_slice() else {
+        return Err(XsltError::new(
+            "XPTY0004",
+            format!(
+                "the $arity argument of function-available() must be a single xs:integer, \
+                 not a sequence of {} atomic values",
+                atoms.len()
+            ),
+        ));
+    };
+    let integer = match atom.type_code {
+        XmlTypeCode::UntypedAtomic => xsd_schema::xpath::cast::cast_to(atom, XmlTypeCode::Integer)?,
+        code if is_integer_type(code) => atom.clone(),
+        code => {
+            return Err(XsltError::new(
+                "XPTY0004",
+                format!(
+                    "the $arity argument of function-available() must be an xs:integer, not \
+                     a value of type xs:{}",
+                    code.local_name().unwrap_or("anyAtomicType")
+                ),
+            ))
+        }
+    };
+    Ok(Some(
+        integer
+            .to_string_value()
+            .parse::<i64>()
+            .ok()
+            .and_then(|n| usize::try_from(n).ok()),
+    ))
+}
+
+/// `xs:integer` and the built-in types derived from it — the values that match
+/// the sequence type `xs:integer` ("SequenceType Matching permit\[s\] a value of
+/// a derived type to be substituted for a value of its base type", XPath 2.0
+/// §3.1.5).
+fn is_integer_type(code: xsd_schema::types::XmlTypeCode) -> bool {
+    use xsd_schema::types::XmlTypeCode as T;
+    matches!(
+        code,
+        T::Integer
+            | T::NonPositiveInteger
+            | T::NegativeInteger
+            | T::Long
+            | T::Int
+            | T::Short
+            | T::Byte
+            | T::NonNegativeInteger
+            | T::UnsignedLong
+            | T::UnsignedInt
+            | T::UnsignedShort
+            | T::UnsignedByte
+            | T::PositiveInteger
+    )
+}
+
+/// Whether `{namespace}local` with `arity` arguments is a constructor function
+/// of this processor.
+///
+/// XPath 2.0 §2.1.1: "The function signatures include the signatures of
+/// constructor functions", and §3.10.4: "For every atomic type in the in-scope
+/// schema types (except xs:NOTATION and xs:anyAtomicType, which are not
+/// instantiable), a constructor function is implicitly defined", with the
+/// signature `T($arg as xs:anyAtomicType?) as T?` — arity 1 only. For a basic
+/// processor §21.1 limits the set: "The set of constructor functions available
+/// are limited to those that construct values of the above atomic types", the
+/// atomic types of §3.13 (see [`type_available`]). The XPath binder resolves a
+/// constructor call outside the function catalog, so `function-available()`
+/// has to be told about them here.
+pub fn is_constructor_function(namespace: &str, local: &str, arity: usize) -> bool {
+    arity == 1
+        && namespace == crate::names::XSD_NS
+        && BUILT_IN_TYPES.contains(&local)
+        && !matches!(
+            local,
+            // Not atomic: no constructor at all.
+            "anyType" | "anySimpleType" | "untyped"
+            // Atomic but "not instantiable".
+            | "anyAtomicType"
+        )
 }
 
 /// §18.1.4: whether a schema type of this name is in the static context.

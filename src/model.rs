@@ -535,6 +535,48 @@ pub struct TemplateRule {
     pub loc: Location,
 }
 
+/// Index into the stylesheet-function table of a [`CompiledStylesheet`]
+/// (`functions_table`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StylesheetFunctionId(pub u32);
+
+/// One `xsl:function` declaration that won for its expanded QName and arity
+/// (§10.3) — the one the XPath function calls of the stylesheet are bound to.
+pub struct StylesheetFunction {
+    pub name: QName,
+    /// The `xsl:param` children, in order: §10.3 "These are interpreted
+    /// positionally."
+    pub params: Vec<FunctionParam>,
+    /// The `as` attribute: the result is converted to it, and XTTE0780 when it
+    /// cannot be.
+    pub as_type: Option<TypeCheck>,
+    pub body: Body,
+    pub frame_size: usize,
+    /// `override` (§10.3; default `yes`).
+    pub override_vendor: bool,
+    pub precedence: u32,
+    pub module: ModuleId,
+    pub loc: Location,
+}
+
+impl StylesheetFunction {
+    /// The function's arity: "the number of `xsl:param` elements in the
+    /// function definition" (§10.3).
+    pub fn arity(&self) -> usize {
+        self.params.len()
+    }
+}
+
+/// An `xsl:param` of a stylesheet function (§10.3): always mandatory, never a
+/// tunnel parameter, and never with a default value (XTSE0760).
+pub struct FunctionParam {
+    pub name: QName,
+    pub slot: usize,
+    /// The required type; XTTE0790 when an argument cannot be converted to it.
+    pub as_type: Option<TypeCheck>,
+    pub loc: Location,
+}
+
 /// A global `xsl:variable` or `xsl:param` (§9.5).
 pub struct GlobalVar {
     pub name: QName,
@@ -685,6 +727,11 @@ pub struct CompiledStylesheet<'a> {
     pub(crate) output: OutputDefinition,
     pub(crate) named_outputs: HashMap<QName, OutputDefinition>,
     pub(crate) space_rules: Vec<SpaceRule>,
+    /// The stylesheet functions that won for their name and arity (§10.3).
+    pub(crate) functions_table: Vec<StylesheetFunction>,
+    /// The handle an XPath function call to each of them was bound to.
+    pub(crate) function_handles:
+        HashMap<xsd_schema::xpath::functions::FunctionHandle, StylesheetFunctionId>,
     pub(crate) module_uris: Vec<String>,
     /// The base URI of the principal module.
     pub(crate) base_uri: String,
@@ -807,6 +854,37 @@ impl<'a> CompiledStylesheet<'a> {
     /// Whether any mode of the stylesheet is named `mode`.
     pub fn has_mode(&self, mode: &ModeKey) -> bool {
         self.modes.modes.contains_key(mode)
+    }
+
+    /// The stylesheet function an XPath function call was bound to, if the
+    /// handle is one (§10.3).
+    pub fn stylesheet_function_of(
+        &self,
+        handle: xsd_schema::xpath::functions::FunctionHandle,
+    ) -> Option<StylesheetFunctionId> {
+        self.function_handles.get(&handle).copied()
+    }
+
+    pub fn stylesheet_function(&self, id: StylesheetFunctionId) -> &StylesheetFunction {
+        &self.functions_table[id.0 as usize]
+    }
+
+    /// Every stylesheet function in the static context of the stylesheet's
+    /// expressions (§10.3).
+    pub fn stylesheet_functions(&self) -> &[StylesheetFunction] {
+        &self.functions_table
+    }
+
+    /// Whether a stylesheet function named `name` exists — with `arity`
+    /// parameters, or with any number when `arity` is `None` (§10.3: "If a
+    /// stylesheet function has been defined with a particular expanded-QName,
+    /// then a call on `function-available` will return true when called with an
+    /// argument that is a lexical QName that expands to this same
+    /// expanded-QName").
+    pub fn has_stylesheet_function(&self, name: &QName, arity: Option<usize>) -> bool {
+        self.functions_table
+            .iter()
+            .any(|f| f.name == *name && arity.is_none_or(|a| a == f.arity()))
     }
 
     /// Whether a `[xsl:]version` less than 2.0 is in force at `ctx`.

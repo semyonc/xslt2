@@ -103,6 +103,8 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         // §11.1.4 is a whole-stylesheet mapping resolved by import precedence,
         // so it is settled before the first literal result element compiles.
         self.collect_aliases()?;
+        // §10.3: the function bodies, with every global in scope.
+        self.compile_functions()?;
 
         // Pass 2: everything, now that names resolve.
         for unit_index in 0..self.modules.units.len() {
@@ -196,13 +198,15 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         for (precedence, module_id, nav) in decls {
             let module = self.modules.module(*module_id);
             let ctx = self.context_of(nav, module)?;
-            let name = self.qname_attr(nav, "name", ctx, module)?.ok_or_else(|| {
-                XsltError::new(
-                    codes::XTSE0010,
-                    format!("xsl:{} has no name attribute", nav.local_name()),
-                )
-                .with_location(module.location(nav))
-            })?;
+            let name = self
+                .declared_name(nav, "name", ctx, module)?
+                .ok_or_else(|| {
+                    XsltError::new(
+                        codes::XTSE0010,
+                        format!("xsl:{} has no name attribute", nav.local_name()),
+                    )
+                    .with_location(module.location(nav))
+                })?;
             entries.push((name, *precedence, *module_id, nav.clone()));
         }
         for (index, (name, precedence, _, nav)) in entries.iter().enumerate() {
@@ -297,6 +301,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         match local.as_str() {
             "template" => self.template(nav, module_id, ctx, precedence, subtree_min),
             "variable" | "param" => Ok(()), // handled in pass 1
+            "function" => Ok(()),           // `collect_functions`, `compile_functions`
             "output" => self.output_declaration(nav, ctx, precedence, module),
             "strip-space" | "preserve-space" => {
                 self.space_declaration(nav, ctx, precedence, module)
@@ -333,7 +338,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         precedence: u32,
         module: &Module<'t>,
     ) -> Result<(), XsltError> {
-        let name = self.qname_attr(nav, "name", ctx, module)?;
+        let name = self.declared_name(nav, "name", ctx, module)?;
         let target = match &name {
             Some(name) => self.named_outputs.entry(name.clone()).or_default(),
             None => &mut self.output,
@@ -640,7 +645,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     ) -> Result<(), XsltError> {
         let module = self.modules.module(module_id);
         let loc = module.location(nav);
-        let name = self.declared_name(nav, "name", ctx, module)?;
+        let name = self.declared_template_name(nav, ctx, module)?;
         let match_text = attr_local(nav, "match");
         if name.is_none() && match_text.is_none() {
             return Err(XsltError::new(
@@ -774,7 +779,11 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             match token {
                 "#all" => all = true,
                 "#default" => modes.push(ModeKey::Default),
-                name => modes.push(ModeKey::Named(self.resolve(name, ctx, codes::XTSE0550)?)),
+                name => {
+                    let name = self.resolve(name, ctx, codes::XTSE0550)?;
+                    self.reject_reserved(&name, nav, module)?;
+                    modes.push(ModeKey::Named(name));
+                }
             }
         }
         if count == 0 {
@@ -869,10 +878,12 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     ) -> Result<ParamDecl, XsltError> {
         let module = self.modules.module(module_id);
         let ctx = self.context_of(nav, module)?;
-        let name = self.qname_attr(nav, "name", ctx, module)?.ok_or_else(|| {
-            XsltError::new(codes::XTSE0010, "xsl:param has no name attribute")
-                .with_location(module.location(nav))
-        })?;
+        let name = self
+            .declared_name(nav, "name", ctx, module)?
+            .ok_or_else(|| {
+                XsltError::new(codes::XTSE0010, "xsl:param has no name attribute")
+                    .with_location(module.location(nav))
+            })?;
         let as_type = match attr_local(nav, "as") {
             Some(text) => Some(self.compile_type(&text, ctx)?),
             None => None,
@@ -957,7 +968,6 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
 /// yet, and the roadmap sub-milestone (§4) that owns each.
 fn unimplemented_declaration(local: &str) -> Option<&'static str> {
     Some(match local {
-        "function" => "M2e",
         "key" => "M2f",
         "character-map" => "M3a",
         "decimal-format" => "M3d",

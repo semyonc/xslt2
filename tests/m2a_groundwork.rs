@@ -455,14 +455,7 @@ fn every_notimpl_names_its_sub_milestone() {
             "xsl:key",
             "M2f",
         ),
-        (
-            format!(
-                r#"<xsl:function name="my:f"><xsl:sequence select="1"/></xsl:function>{}"#,
-                template("")
-            ),
-            "xsl:function",
-            "M2e",
-        ),
+        // (xsl:function was NOT-IMPL until M2e — `tests/m2e_functions.rs`.)
         (
             format!(r#"<xsl:decimal-format name="d"/>{}"#, template("")),
             "xsl:decimal-format",
