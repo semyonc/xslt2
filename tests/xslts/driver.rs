@@ -12,7 +12,8 @@
 //! ```
 //!
 //! Module layout mirrors `xsd-schema/tests/xqts`: catalog / filter / environment / runner /
-//! compare / report, pulled in with `#[path]`.
+//! compare / report, pulled in with `#[path]`; `xpath30` rewrites the XPath 3.0 constructs some
+//! assertions use into exact XPath 2.0 equivalents.
 
 #[path = "catalog.rs"]
 mod catalog;
@@ -28,6 +29,8 @@ mod filter;
 mod report;
 #[path = "runner.rs"]
 mod runner;
+#[path = "xpath30.rs"]
+mod xpath30;
 
 use std::path::PathBuf;
 use std::process::exit;
@@ -156,7 +159,11 @@ fn parse_args() -> Options {
             }
             "--self-test" => {
                 let n = compare::self_test::run();
-                println!("xslts: {n} self-tests passed");
+                println!(
+                    "xslts: self-tests passed: {} compare functions, {} xpath30 checks, \
+                     {} engine checks",
+                    n.compare_functions, n.xpath30_checks, n.engine_checks
+                );
                 exit(0)
             }
             "-h" | "--help" => {
@@ -372,9 +379,12 @@ fn run_suite() {
                             None => "engine not implemented".to_string(),
                         });
                     } else {
+                        let inputs = compare::CaseInputs::of(&run);
                         let cx = CompareContext {
                             set_dir: &set.dir,
                             lenient_xml: opts.lenient_xml,
+                            inputs: &inputs,
+                            entity_results: filter::result_may_be_entity(case),
                         };
                         let v = compare::evaluate_guarded(&case.result, &exec.output, &cx);
                         rec.status = match v.outcome {

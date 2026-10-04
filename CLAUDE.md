@@ -66,7 +66,7 @@ cargo test --test xslts --release                       # whole applicable suite
 cargo test --test xslts --release -- -g value-of -f     # one test-set, failures only
 cargo test --test xslts --release -- -t lre-027 -v      # one case, by name
 cargo test --test xslts --release -- --stub             # the M0 stub engine
-cargo test --test xslts --release -- --self-test        # the harness's own checks (17)
+cargo test --test xslts --release -- --self-test        # the harness's own checks (compare, xpath30, engine)
 cargo test --test xslts --release -- --lenient-xml      # triage: ignore prefixes/namespaces in assert-xml
 cargo test --test xslts --release -- --report /tmp/x.xml
 cargo test --test xslts --release -- -l                 # list test-sets with counts
@@ -85,7 +85,7 @@ file named after the commits it was taken at:
 
 ```bash
 cargo test --test xslts --release -- --skip unicode-90 --report /tmp/new.xml
-python3 tools/suite_diff.py ../../baselines/xslts-4301-at-A10-A11-uncommitted.xml /tmp/new.xml
+python3 tools/suite_diff.py ../../baselines/<current baseline>.xml /tmp/new.xml   # see ../../baselines/README.md
 ```
 
 `tools/suite_diff.py` compares status **and** failure comment per case; a comment-only change is listed

@@ -35,11 +35,17 @@ impl Engine for XsltEngine {
     fn run(&self, run: &TestRun<'_>) -> RunOutput {
         match Job::from(run) {
             Ok(job) => job.execute(),
-            Err(message) => RunOutput {
-                error: Some(XsltError::internal(message)),
-                ..Default::default()
-            },
+            // The harness refusing a case is not something the engine did: reported as an
+            // engine error (`XSLT2-INTERNAL`) it would satisfy `<error code="*"/>`.
+            Err(message) => harness_refusal(message),
         }
+    }
+}
+
+fn harness_refusal(message: String) -> RunOutput {
+    RunOutput {
+        harness_error: Some(message),
+        ..Default::default()
     }
 }
 
@@ -67,22 +73,50 @@ impl Job {
         let mut source = None;
         let mut extra = Vec::new();
         for (index, entry) in run.env.sources.iter().enumerate() {
+            // `select` makes a node *inside* the source document the initial context item (the
+            // catalog: "an XPath expression to select the initial context item within the
+            // source document"). The public API starts a run only at a document node
+            // (`transform_source` / `transform_document`; `Transformation::run` is private), so
+            // ignoring the attribute would run a different case from the one specified — and
+            // `call-template-0201` used to pass that way only because `copy-of .` of the
+            // document node and of its single element serialize alike.
+            if let Some(select) = entry.select.as_deref().filter(|s| !s.trim().is_empty()) {
+                return Err(format!(
+                    "source/@select={select:?} is not supported: the initial context item would \
+                     be a node inside the source document, and the public API has no entry point \
+                     for a non-document initial context node"
+                ));
+            }
             // A source given as inline `<content>` has neither a file nor a
             // URI; it still needs one, because the document store keys
             // documents by URI.
             //
-            // The synthetic URI has to sit **inside** the test-set directory:
-            // it is the base URI of every node of that document, so §16.1
-            // resolves a relative reference read out of the source against it
-            // (`document-0601` and friends). `path_to_uri` of a directory has
-            // no trailing slash, and without one the reference would resolve
-            // against the *parent* directory.
-            let uri = source_uri(entry.uri.as_deref(), entry.path.as_deref()).or_else(|| {
-                Some(format!(
-                    "{}/#inline-source-{index}",
-                    xslt2::resolver::path_to_uri(&run.base_dir)
-                ))
-            });
+            // The principal source (`role="."`) is text inside the test-set
+            // file, so its base URI is that file's URI (RFC 3986 §5.1.2: "the
+            // default base URI of a representation is the base URI of the
+            // entity in which the representation is encapsulated");
+            // `backwards-041` checks exactly that. That makes the inline text
+            // the *base* of the document, not the resource at that URI: the
+            // resolver must keep serving the real test-set file there (see
+            // `Job::resolver`). Any other inline
+            // source gets a synthetic URI, because two documents cannot share
+            // one key in the store. It too has to sit **inside** the test-set
+            // directory: it is the base URI of every node of that document, so
+            // §16.1 resolves a relative reference read out of the source
+            // against it (`document-0601` and friends). `path_to_uri` of a
+            // directory has no trailing slash, and without one the reference
+            // would resolve against the *parent* directory.
+            let uri = source_uri(entry.uri.as_deref(), entry.path.as_deref(), &run.set.dir)?
+                .or_else(|| {
+                    if entry.role.as_deref() == Some(".") {
+                        Some(xslt2::resolver::path_to_uri(&run.set.file))
+                    } else {
+                        Some(format!(
+                            "{}/#inline-source-{index}",
+                            xslt2::resolver::path_to_uri(&run.base_dir)
+                        ))
+                    }
+                });
             let text = match (&entry.content, &entry.path) {
                 (Some(content), _) => content.clone(),
                 (None, Some(path)) => xslt2::resolver::decode_xml(
@@ -97,6 +131,15 @@ impl Job {
             } else {
                 extra.push((uri, text));
             }
+        }
+
+        // The same for the initial match selection of `<initial-mode select="…">` (no
+        // 2.0-applicable case uses it today).
+        if let Some(select) = run.case.test.initial_mode_select.as_deref() {
+            return Err(format!(
+                "initial-mode/@select={select:?} is not supported: the public API starts a run \
+                 only at a document node"
+            ));
         }
 
         let mut params = Vec::new();
@@ -121,18 +164,29 @@ impl Job {
         })
     }
 
-    fn execute(self) -> RunOutput {
-        let names = NameTable::new();
-        let functions = XsltFunctions::new();
-
+    /// The resolver the compiler and the transformation share: the catalog's extra sources by
+    /// their URIs, then the file system.
+    ///
+    /// The principal source is deliberately **not** in it. It reaches the run through
+    /// `transform_source(uri, text)`, which is all that its base URI needs; registering its text
+    /// here as well would serve it under its URI to everything that reads through the resolver.
+    /// For an inline principal that URI is the test-set file's own, so `xsl:include` /
+    /// `xsl:import` / `unparsed-text()` of the test-set file would get the inline `<content>`
+    /// instead of the file (`error-0150b`, `-0150c` and `-0150e` include their own test-set
+    /// file and compiled against an inline `<doc>`). For a principal read from a file the entry
+    /// would only repeat what the file system serves.
+    fn resolver(&self) -> Arc<dyn Resolver> {
         let mut memory = MemoryResolver::with_fallback(Arc::new(xslt2::FileResolver));
         for (uri, text) in &self.extra {
             memory.insert(uri.clone(), text.clone());
         }
-        if let Some((uri, text)) = &self.source {
-            memory.insert(uri.clone(), text.clone());
-        }
-        let resolver: Arc<dyn Resolver> = Arc::new(memory);
+        Arc::new(memory)
+    }
+
+    fn execute(self) -> RunOutput {
+        let names = NameTable::new();
+        let functions = XsltFunctions::new();
+        let resolver = self.resolver();
 
         let compiled = match Compiler::new(&names, &functions)
             .with_resolver(Arc::clone(&resolver))
@@ -156,7 +210,9 @@ impl Job {
         for (name, select, as_type) in &self.params {
             match eval_param(&names, &functions, select, as_type.as_deref()) {
                 Ok(value) => transformation = transformation.with_param(name.clone(), value),
-                Err(e) => return failure(e),
+                // The harness evaluates catalog parameters itself; a failure there is the
+                // harness's, not the engine's.
+                Err(message) => return harness_refusal(message),
             }
         }
 
@@ -215,13 +271,15 @@ fn failure(e: XsltError) -> RunOutput {
 ///
 /// §2.4 of the design sketch: the expression has no context item; an `as`
 /// attribute is honoured by casting through `treat as`, which is enough for
-/// the literal values the suite uses.
+/// the literal values the suite uses. An error is the harness's (the catalog:
+/// "It should not raise an error as param evaluation is API dependent
+/// behavior"), so it comes back as a message for `harnessError`.
 fn eval_param(
     names: &NameTable,
     functions: &XsltFunctions,
     select: &str,
     as_type: Option<&str>,
-) -> Result<XPathValue<xslt2::Nav<'static>>, XsltError> {
+) -> Result<XPathValue<xslt2::Nav<'static>>, String> {
     // The catalog writes parameter types as `xs:string`, so the conventional
     // prefixes have to be in scope; a stylesheet would declare them itself.
     let mut namespaces = NamespaceContextSnapshot::default();
@@ -241,21 +299,63 @@ fn eval_param(
         Some(t) if !t.trim().is_empty() => format!("({select}) treat as {t}"),
         _ => select.to_string(),
     };
-    let expr = XPathExpr::compile(&source, &ctx).map_err(|e| {
-        XsltError::internal(format!("cannot compile the parameter {select:?}: {e}"))
-    })?;
+    let expr = XPathExpr::compile(&source, &ctx)
+        .map_err(|e| format!("cannot compile the catalog parameter {select:?}: {e}"))?;
     expr.evaluator(&ctx)
         .run::<xslt2::Nav<'static>>()
-        .map_err(|e| XsltError::internal(format!("cannot evaluate the parameter {select:?}: {e}")))
+        .map_err(|e| format!("cannot evaluate the catalog parameter {select:?}: {e}"))
 }
 
-fn source_uri(uri: Option<&str>, path: Option<&Path>) -> Option<String> {
+/// The URI a source is registered under: its `uri` attribute, else its file's URI.
+///
+/// The catalog: "The `uri` attribute is the URI supplied to the `doc()` function to access the
+/// document. This may be an absolute URI or a URI relative to the base URI of the catalog file"
+/// (`admin/catalog-schema.xsd`, `source`). A relative one used to be registered as written, so
+/// the source's document URI and base URI were the bare relative string, while `doc()` with the
+/// same text, resolved against the stylesheet, reached a different document (`accessor-008`).
+fn source_uri(
+    uri: Option<&str>,
+    path: Option<&Path>,
+    set_dir: &Path,
+) -> Result<Option<String>, String> {
     if let Some(uri) = uri {
         if !uri.trim().is_empty() {
-            return Some(uri.to_string());
+            return resolve_catalog_uri(uri, set_dir).map(Some);
         }
     }
-    path.map(xslt2::resolver::path_to_uri)
+    Ok(path.map(xslt2::resolver::path_to_uri))
+}
+
+/// Resolve a catalog `uri` against the test-set file.
+///
+/// An absolute URI is used as it is. A relative one is resolved only when it is a plain
+/// relative path — segments without `.`, `..`, a query, a fragment or percent-escapes — because
+/// then RFC 3986 §5.2 resolution against the test-set file is exactly "replace the file name by
+/// the reference", which `path_to_uri(dir.join(reference))` computes. Anything else is reported
+/// rather than guessed at (every relative `uri` in the 2.0-applicable cases is a plain path).
+fn resolve_catalog_uri(uri: &str, set_dir: &Path) -> Result<String, String> {
+    let has_scheme = uri
+        .split_once(':')
+        .map(|(scheme, _)| {
+            let mut chars = scheme.chars();
+            matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+                && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        })
+        .unwrap_or(false);
+    if has_scheme {
+        return Ok(uri.to_string());
+    }
+    let plain = !uri.starts_with('/')
+        && !uri.contains(['?', '#', '%', '\\'])
+        && uri
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..");
+    if !plain {
+        return Err(format!(
+            "the catalog source uri {uri:?} is not a plain relative path; the harness does not resolve it"
+        ));
+    }
+    Ok(xslt2::resolver::path_to_uri(&set_dir.join(uri)))
 }
 
 fn qname_of(name: &CatalogQName) -> QName {
@@ -274,4 +374,210 @@ fn mode_of(name: &CatalogQName) -> Option<ModeKey> {
         "default" | "unnamed" if name.namespace.is_none() => Some(ModeKey::Default),
         _ => Some(ModeKey::Named(qname_of(name))),
     }
+}
+
+/// The adapter's own checks, run by `--self-test`: how catalog sources are named and served,
+/// and that what the harness refuses is a `harnessError`. Returns the number of checks.
+pub fn self_test() -> usize {
+    use std::collections::HashMap;
+
+    use crate::catalog::{Assertion, TestCase, TestSet, TestSpec};
+    use crate::environment::{ResolvedEnvironment, ResolvedSource};
+
+    let mut checks = 0;
+    let mut check = |ok: bool, what: &str| {
+        assert!(ok, "engine self-test failed: {what}");
+        checks += 1;
+    };
+    let dir = Path::new("/suite/tests/fn/accessor");
+    let file_uri = |p: &str| xslt2::resolver::path_to_uri(Path::new(p));
+
+    // B11: a relative catalog `uri` is resolved against the test-set file …
+    check(
+        resolve_catalog_uri("accessor-004.xml", dir)
+            == Ok(file_uri("/suite/tests/fn/accessor/accessor-004.xml")),
+        "relative uri",
+    );
+    check(
+        resolve_catalog_uri("docs/a.xml", dir)
+            == Ok(file_uri("/suite/tests/fn/accessor/docs/a.xml")),
+        "relative uri with a directory",
+    );
+    // … an absolute one is kept …
+    for absolute in [
+        "http://example.com/a.xml",
+        "file:///x/y.xml",
+        "urn:x-test:a",
+    ] {
+        check(
+            resolve_catalog_uri(absolute, dir) == Ok(absolute.to_string()),
+            absolute,
+        );
+    }
+    // … and anything that is not a plain relative path is refused, not guessed at.
+    for refused in [
+        "../x.xml",
+        "./x.xml",
+        "a//b.xml",
+        "/abs.xml",
+        "x.xml#f",
+        "x.xml?q",
+        "a%20b.xml",
+    ] {
+        check(resolve_catalog_uri(refused, dir).is_err(), refused);
+    }
+
+    // E-C11: the inline principal source is named after the test-set file; other inline sources
+    // keep distinct synthetic names inside the test-set directory; a `uri` wins over both.
+    let set = TestSet {
+        name: "accessor".into(),
+        file: dir.join("_accessor-test-set.xml"),
+        dir: dir.to_path_buf(),
+        rel_file: "tests/fn/accessor/_accessor-test-set.xml".into(),
+        description: String::new(),
+        dependencies: Vec::new(),
+        environments: HashMap::new(),
+        cases: Vec::new(),
+    };
+    let case = TestCase {
+        name: "probe".into(),
+        description: String::new(),
+        dependencies: Vec::new(),
+        environment: None,
+        test: TestSpec::default(),
+        result: Assertion::AllOf(Vec::new()),
+        line: 0,
+    };
+    let inline = |role: Option<&str>, uri: Option<&str>, content: &str| ResolvedSource {
+        role: role.map(str::to_string),
+        uri: uri.map(str::to_string),
+        path: None,
+        content: Some(content.to_string()),
+        validation: None,
+        xml_version: None,
+        streaming: false,
+        select: None,
+    };
+    let probe_run = |sources: Vec<ResolvedSource>| TestRun {
+        set: &set,
+        case: &case,
+        env: ResolvedEnvironment {
+            sources,
+            ..Default::default()
+        },
+        stylesheet: Some(dir.join("probe.xsl")),
+        base_dir: dir.to_path_buf(),
+        schema_aware: false,
+        strict_recoverable: false,
+    };
+    let run = probe_run(vec![
+        inline(Some("."), None, "<a/>"),
+        inline(None, None, "<b/>"),
+        inline(None, Some("doc.xml"), "<c/>"),
+    ]);
+    let job = Job::from(&run).expect("the probe job builds");
+    let set_uri = file_uri("/suite/tests/fn/accessor/_accessor-test-set.xml");
+    check(
+        job.source == Some((set_uri.clone(), "<a/>".to_string())),
+        "inline principal source",
+    );
+    check(
+        job.extra
+            == vec![
+                (
+                    format!("{}/#inline-source-1", file_uri("/suite/tests/fn/accessor")),
+                    "<b/>".to_string(),
+                ),
+                (
+                    file_uri("/suite/tests/fn/accessor/doc.xml"),
+                    "<c/>".to_string(),
+                ),
+            ],
+        "other inline sources",
+    );
+
+    // P1-1: the inline principal is the *base* of its document, not the resource at the test-set
+    // file's URI. The resolver the compiler and the transformation share must not serve it
+    // there (the probe's test-set file does not exist, so the honest answer is "unavailable"),
+    // while the other catalog sources stay reachable by their URIs.
+    let resolver = job.resolver();
+    check(
+        resolver.resolve_text(&set_uri).is_err() && !resolver.available(&set_uri),
+        "the resolver does not serve the inline principal under the test-set URI",
+    );
+    check(
+        resolver.resolve_text(&file_uri("/suite/tests/fn/accessor/doc.xml"))
+            == Ok("<c/>".to_string()),
+        "the resolver serves the other catalog sources",
+    );
+    // … end to end through the compiler: a module that includes its own test-set file reads
+    // that file (here: fails to load it, XTSE0165), never the inline `<a/>` (XTSE0150, "its
+    // document element a", which is what error-0150b/c/e used to report).
+    let names = NameTable::new();
+    let functions = XsltFunctions::new();
+    let including = r#"<xsl:stylesheet version="2.0"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+        <xsl:include href="_accessor-test-set.xml"/>
+    </xsl:stylesheet>"#;
+    let compiled = Compiler::new(&names, &functions)
+        .with_resolver(job.resolver())
+        .compile_str(including, &file_uri("/suite/tests/fn/accessor/probe.xsl"));
+    check(
+        matches!(&compiled, Err(e) if e.code == "XTSE0165" && !e.message.contains("element a")),
+        "xsl:include of the test-set file does not compile the inline principal",
+    );
+
+    // P2-3: a harness refusal is a harnessError, never an engine error that `<error
+    // code="*"/>` would accept.
+    let inputs = crate::compare::CaseInputs::default();
+    let cx = crate::compare::CompareContext {
+        set_dir: dir,
+        lenient_xml: false,
+        inputs: &inputs,
+        entity_results: false,
+    };
+    let any_error = Assertion::Error { code: "*".into() };
+    let refused = XsltEngine.run(&probe_run(vec![inline(
+        Some("."),
+        Some("../x.xml"),
+        "<x/>",
+    )]));
+    check(
+        refused.error.is_none()
+            && refused
+                .harness_error
+                .as_deref()
+                .is_some_and(|m| m.contains("not a plain relative path")),
+        "a refused catalog uri is a harness refusal, not an engine error",
+    );
+    check(
+        crate::compare::evaluate(&any_error, &refused, &cx).outcome
+            == crate::compare::Outcome::HarnessError,
+        "<error code=\"*\"/> is not satisfied by a harness refusal",
+    );
+
+    // P2-4: `source/@select` cannot be honoured through the public API, so the case is refused
+    // rather than run from the document node — whatever its assertions would have said.
+    let mut selected = inline(Some("."), None, "<doc/>");
+    selected.select = Some("/doc".into());
+    let refused = XsltEngine.run(&probe_run(vec![selected]));
+    check(
+        refused
+            .harness_error
+            .as_deref()
+            .is_some_and(|m| m.contains("source/@select")),
+        "source/@select is refused",
+    );
+    let trivially_true = Assertion::Assert {
+        xpath: "true()".into(),
+        ns: Vec::new(),
+    };
+    for a in [&trivially_true, &any_error] {
+        check(
+            crate::compare::evaluate(a, &refused, &cx).outcome
+                == crate::compare::Outcome::HarnessError,
+            "a case with source/@select is a harnessError",
+        );
+    }
+    checks
 }

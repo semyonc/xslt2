@@ -38,47 +38,52 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 | | |
 |---|---|
 | XSLT 2.0-applicable | 6,619 |
-| runnable (dependencies satisfied) | 5,751 |
-| pass | 4,299 |
-| fail / wrongError / harnessError | 141 / 10 / 5 |
-| not implemented (`XSLT2-NOTIMPL`, M2–M4) | 1,296 |
-| pass rate over runnable | 74.75% |
-| headline (basic profile, non-regex families) | 3,161 / 4,233 = **74.7%** |
+| excluded (documented in `tests/xslts/filter.rs`) | 26 |
+| runnable (dependencies satisfied) | 5,725 |
+| pass | 4,369 |
+| fail / wrongError / harnessError | 59 / 0 / 3 |
+| not implemented (`XSLT2-NOTIMPL`, M2–M4) | 1,294 |
+| pass rate over runnable | 76.31% |
+| headline (basic profile, non-regex families) | 3,228 / 4,215 = **76.6%** |
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the
 assertion says `ignore-prefixes="true"`. `--lenient-xml` switches that off for triage; a failure
-that exists only under the strict comparison starts with `assert-xml namespace mismatch:` (one case
-today, `attribute-0004`, which pins an invented prefix that §5.7.3 leaves implementation-dependent). Figures are from
-2026-09-19, after the M1 review fixes (`../../XSLT2_M1_REVIEW_FIXES.md`) and the M2a groundwork
+that exists only under the strict comparison starts with `assert-xml namespace mismatch:`
+(`attribute-0004`, which pins an invented prefix that §5.7.3 leaves implementation-dependent, is excluded). Figures
+were first taken on 2026-09-19, after the M1 review fixes (`../../XSLT2_M1_REVIEW_FIXES.md`) and the M2a groundwork
 (`../../XSLT2_M2A_REPORT.md`), which re-labelled 114 cases from "fail" to "not implemented": they
 need `format-number` / `format-date`, which are stubs until M3d. They are measured against the
 sibling `../xsd-schema` checkout with its current additive XPath fixes (navigation, `/` evaluation,
 operator errors, regex dialect, string literals, linear general comparison): 3,977 → 4,160; M2b
 (namespace correctness) and M2c (one table-driven static-checking pass, `src/compile/checks.rs`) then
 took it to 4,297, and two further upstream fixes (`fn:deep-equal` on namespace nodes, atomization of a
-namespace node) to 4,299.
+namespace node) to 4,299. The 0.2.1 release fixes, M2i (core defects in what M1 delivered,
+`../../XSLT2_M2I_REPORT.md`) and M2j (harness fixes and documented exclusions, `../../XSLT2_M2J_REPORT.md`)
+took it to 4,369 of 5,725 on 2026-10-04: 26 cases whose expectation is wrong for an XSLT 2.0 processor are
+excluded with the spec text that says so, and 3 are harness errors until the public API can start a
+transformation at a node other than the document.
 
 The sixteen test-sets M1 targets:
 
-| test-set | runnable | pass | fail | wrongErr | notImpl | rate |
-|---|---:|---:|---:|---:|---:|---:|
-| template | 6 | 6 | 0 | 0 | 0 | 100.0% |
-| built-in-templates | 4 | 4 | 0 | 0 | 0 | 100.0% |
-| choose | 54 | 53 | 1 | 0 | 0 | 98.1% |
-| call-template | 35 | 34 | 0 | 0 | 1 | 97.1% |
-| lre | 26 | 25 | 1 | 0 | 0 | 96.2% |
-| variable | 102 | 96 | 3 | 0 | 3 | 94.1% |
-| include | 14 | 13 | 1 | 0 | 0 | 92.9% |
-| apply-templates | 36 | 35 | 0 | 1 | 0 | 97.2% |
-| element | 19 | 17 | 2 | 0 | 0 | 89.5% |
-| version | 33 | 28 | 2 | 0 | 3 | 84.8% |
-| param | 26 | 22 | 0 | 0 | 4 | 84.6% |
-| attribute | 22 | 17 | 1 | 0 | 3 | 77.3% |
-| copy | 72 | 58 | 4 | 0 | 10 | 80.6% |
-| sequence | 88 | 70 | 11 | 0 | 7 | 79.5% |
-| message | 26 | 20 | 3 | 0 | 3 | 76.9% |
-| output | 140 | 9 | 24 | 0 | 107 | 6.4% |
+| test-set | runnable | pass | fail | wrongErr | harnessErr | notImpl | rate |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| template | 6 | 6 | 0 | 0 | 0 | 0 | 100.0% |
+| built-in-templates | 4 | 4 | 0 | 0 | 0 | 0 | 100.0% |
+| choose | 54 | 53 | 0 | 0 | 0 | 1 | 98.1% |
+| call-template | 35 | 33 | 0 | 0 | 1 | 1 | 94.3% |
+| lre | 26 | 26 | 0 | 0 | 0 | 0 | 100.0% |
+| variable | 101 | 98 | 0 | 0 | 0 | 3 | 97.0% |
+| include | 14 | 13 | 1 | 0 | 0 | 0 | 92.9% |
+| apply-templates | 36 | 36 | 0 | 0 | 0 | 0 | 100.0% |
+| element | 19 | 18 | 1 | 0 | 0 | 0 | 94.7% |
+| version | 33 | 30 | 0 | 0 | 0 | 3 | 90.9% |
+| param | 26 | 23 | 0 | 0 | 0 | 3 | 88.5% |
+| attribute | 21 | 18 | 0 | 0 | 0 | 3 | 85.7% |
+| copy | 72 | 60 | 2 | 0 | 0 | 10 | 83.3% |
+| sequence | 87 | 81 | 0 | 0 | 0 | 6 | 93.1% |
+| message | 26 | 21 | 2 | 0 | 0 | 3 | 80.8% |
+| output | 137 | 10 | 21 | 0 | 0 | 106 | 7.3% |
 
 `output` is dominated by the `html`, `xhtml`, `doctype-*` and character-map serialization
 parameters, which are M3.

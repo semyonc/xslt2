@@ -46,6 +46,11 @@ pub struct RunOutput {
     pub error: Option<XsltError>,
     /// The engine does not implement what the test needs (M0: everything).
     pub not_implemented: bool,
+    /// The harness could not run the case as the catalog specifies it (an unsupported catalog
+    /// construct, a catalog parameter it cannot evaluate, …). Never an engine error: an
+    /// `<error code="*"/>` assertion must not be satisfied by the harness refusing the case, so
+    /// `compare::evaluate` turns this into a `harnessError` before looking at any assertion.
+    pub harness_error: Option<String>,
 }
 
 pub trait Engine {
