@@ -281,6 +281,9 @@ pub struct Transformation<'a, 't> {
     /// What the call of each `id()` / `key()` pattern selects, per document
     /// (§5.5.2), computed on first use.
     id_key_selections: RefCell<patterns::IdKeySelections<'t>>,
+    /// The sibling sequences positional pattern predicates were evaluated
+    /// against, per predicate and parent (§5.5.3), remembered for the run.
+    placements: RefCell<patterns::PlacementCache>,
     messages: RefCell<Vec<Message>>,
     /// Where an XSLT error raised inside the XPath engine is parked: an
     /// `XPathError` has no "host error with a code" variant, so the evaluator
@@ -324,6 +327,7 @@ impl<'a> CompiledStylesheet<'a> {
             globals: RefCell::new(globals),
             keys: RefCell::new(HashMap::new()),
             id_key_selections: RefCell::new(HashMap::new()),
+            placements: RefCell::new(patterns::PlacementCache::default()),
             messages: RefCell::new(Vec::new()),
             parked_error: RefCell::new(None),
             params: RefCell::new(HashMap::new()),

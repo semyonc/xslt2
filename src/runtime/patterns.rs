@@ -12,7 +12,7 @@ use super::context::XsltContext;
 use super::{Frame, Transformation};
 use crate::error::XsltError;
 use crate::model::{ExprId, VarLocation};
-use crate::names::QName;
+use crate::names::{QName, FN_NS};
 use crate::pattern::{
     Anchor, Connector, IdKeyAnchor, NodeTest, PathPattern, Pattern, PatternAxis, PatternStep,
 };
@@ -297,6 +297,45 @@ impl<'a, 't> Transformation<'a, 't> {
         }
     }
 
+    /// Whether `node` satisfies one step: its axis, its node test, and every
+    /// predicate.
+    ///
+    /// §5.5.3 defines the step as part of `root(.)//(EE)`, so its predicates
+    /// apply, left to right, to the sequence the node test selects among the
+    /// node's siblings — XPath 2.0 §3.2.2: "In the case of multiple adjacent
+    /// predicates, the predicates are applied from left to right, and the
+    /// result of applying each predicate serves as the input sequence for the
+    /// following predicate." Call that input sequence of predicate *i* S*i*
+    /// (S0 is what the node test selects). The node matches the step if it is
+    /// still in the sequence the last predicate leaves.
+    ///
+    /// Each predicate is decided for **this node alone** (M2l), which gives
+    /// the same answer as filtering the whole of S*i* — the node is in
+    /// S*i+1* exactly when the predicate holds for it with its own focus in
+    /// S*i* — and needs S*i* only for that focus:
+    ///
+    /// - A predicate that reads neither `position()` nor `last()` in its own
+    ///   focus (`XPathExpr::uses_position` / `uses_last`, which do not count a
+    ///   `position()` inside a nested predicate or a later path step) has the
+    ///   same value whatever the position and size, so it is evaluated with
+    ///   the node as a singleton focus. If that value is not a singleton
+    ///   number, its effective boolean value decides and S*i* is never built.
+    ///   If it is one, §3.2.2's numeric-predicate rule compares it with the
+    ///   context position, and the node's position in S*i* is looked up
+    ///   ([`Transformation::placement`]).
+    /// - A predicate that does read `position()` or `last()` is evaluated once,
+    ///   for this node, with its position in S*i* and the size of S*i*.
+    ///
+    /// The difference from filtering S*i* whole is which errors are seen: an
+    /// error the predicate raises for *another* sibling is no longer raised
+    /// for this node. XPath 2.0 §2.3.4 permits it — "the processor is free to
+    /// stop examining further items in a sequence as soon as it can establish
+    /// that further items would not affect the result except possibly by
+    /// causing an error" — and §5.5.4 confines a pattern's errors to "the
+    /// evaluation of a pattern against a particular node" anyway. An error in
+    /// a predicate *before* a positional one still reaches every sibling whose
+    /// position depends on it, because building S*i* evaluates it for all of
+    /// them.
     fn step_matches(
         &self,
         step: &PatternStep,
@@ -306,40 +345,276 @@ impl<'a, 't> Transformation<'a, 't> {
         if !node_test_matches(&step.test, step.axis, node) {
             return Ok(false);
         }
-        if step.predicates.is_empty() {
-            return Ok(true);
-        }
-        // §5.5.3: the predicates apply successively to the sequence the node
-        // test selects among the candidate's siblings, with the focus
-        // recomputed after each one. A candidate with no parent is treated as
-        // a one-item sequence (`child-or-top` selects the context node).
-        let mut siblings = self.node_test_siblings(step, node);
-        for predicate in &step.predicates {
-            let size = siblings.len();
-            let mut kept = Vec::with_capacity(size);
-            for (index, candidate) in siblings.iter().enumerate() {
-                let mut cx = XsltContext::empty();
-                cx.item = Some(XmlItem::Node(candidate.clone()));
-                cx.position = index + 1;
-                cx.size = size;
-                // Not the candidate: `current()` inside a pattern is the node
-                // the pattern as a whole is being matched against (§16.6.1).
-                cx.current = Some(XmlItem::Node(current.clone()));
-                let value = self.eval_expr(*predicate, &Frame::default(), &cx)?;
-                if predicate_holds(&value, index + 1).map_err(|e| self.xpath_error(e))? {
-                    kept.push(candidate.clone());
+        // The sibling sequence built for this candidate, if one had to be.
+        let mut built = None;
+        for (level, &predicate) in step.predicates.iter().enumerate() {
+            let expr = &self.sheet.expr(predicate).expr;
+            let holds = if expr.uses_position() || expr.uses_last() {
+                match self.placement(step, level, node, current, &mut built)? {
+                    Some((position, size)) => {
+                        let value =
+                            self.eval_predicate(predicate, node, position, size, current)?;
+                        predicate_holds(&value, position).map_err(|e| self.xpath_error(e))?
+                    }
+                    None => false,
                 }
+            } else {
+                // The position and size handed in cannot be observed: the
+                // flags miss only what a custom function reads, and none of
+                // this crate's does — the §16 functions read the context item
+                // and `current()`, never the position or size, and a
+                // stylesheet function's body has no focus (§10.3).
+                let value = self.eval_predicate(predicate, node, 1, 1, current)?;
+                if numeric_predicate(&value).is_some() {
+                    match self.placement(step, level, node, current, &mut built)? {
+                        Some((position, _)) => {
+                            predicate_holds(&value, position).map_err(|e| self.xpath_error(e))?
+                        }
+                        None => false,
+                    }
+                } else {
+                    effective_boolean_value(&value).map_err(|e| self.xpath_error(e))?
+                }
+            };
+            if !holds {
+                return Ok(false);
             }
-            siblings = kept;
         }
-        Ok(siblings.iter().any(|n| n.is_same_position(node)))
+        Ok(true)
     }
 
-    fn node_test_siblings(&self, step: &PatternStep, node: &Nav<'t>) -> Vec<Nav<'t>> {
+    /// Evaluates one pattern predicate with `item` as the context item at
+    /// `position` of `size`.
+    ///
+    /// `current` is not `item`: `current()` inside a pattern is the node the
+    /// pattern as a whole is being matched against (§16.6.1).
+    fn eval_predicate(
+        &self,
+        predicate: ExprId,
+        item: &Nav<'t>,
+        position: usize,
+        size: usize,
+        current: &Nav<'t>,
+    ) -> Result<XPathValue<Nav<'t>>, XsltError> {
+        let mut cx = XsltContext::empty();
+        cx.item = Some(XmlItem::Node(item.clone()));
+        cx.position = position;
+        cx.size = size;
+        cx.current = Some(XmlItem::Node(current.clone()));
+        self.eval_expr(predicate, &Frame::default(), &cx)
+    }
+
+    /// The position of `node` in S`level` — the sequence predicate `level` of
+    /// `step` is applied to — and the size of that sequence, or `None` if the
+    /// node is not in it.
+    ///
+    /// S`level` is S0 filtered by the predicates before `level`, each applied
+    /// to the whole sequence exactly as §3.2.2 describes, every member with its
+    /// own focus. A node with no parent is its own S0 (`child-or-top` /
+    /// `attribute-or-top` select the context node itself, §5.5.3).
+    ///
+    /// For a node with a parent the result is remembered for the run, per
+    /// (predicate, parent), when nothing the earlier predicates read can differ
+    /// between two siblings' matches — see `candidate_independent` and
+    /// [`PlacementCache`]. Then every sibling after the first finds its
+    /// position in constant time, and `item[1]` or `item[@a][2]` costs one pass
+    /// over the siblings per parent instead of one per sibling.
+    ///
+    /// When it cannot be remembered, the sequence is built for this candidate
+    /// and kept in `built` (the level it is for, and its members) for the
+    /// step's later predicates, which continue from it instead of starting
+    /// again from S0 — so a step with several positional predicates still
+    /// filters the siblings once per candidate, as before M2l.
+    fn placement(
+        &self,
+        step: &PatternStep,
+        level: usize,
+        node: &Nav<'t>,
+        current: &Nav<'t>,
+        built: &mut Option<(usize, Vec<Nav<'t>>)>,
+    ) -> Result<Option<(usize, usize)>, XsltError> {
         let mut parent = node.clone();
         if !parent.move_to_parent() {
-            return vec![node.clone()];
+            let members =
+                self.apply_predicates(&step.predicates[..level], vec![node.clone()], current)?;
+            return Ok(locate(&members, node));
         }
+        let predicate = step.predicates[level];
+        let slot = (parent.document().serial(), parent.current_ref());
+        // No borrow of the cache is held while predicates are evaluated: a
+        // predicate may call `key()`, whose index build matches patterns of
+        // its own.
+        match self.cached_placement(step, level, slot) {
+            Lookup::Hit(placement) => Ok(placement.locate(node)),
+            Lookup::Miss => {
+                let members = self.apply_predicates(
+                    &step.predicates[..level],
+                    self.node_test_siblings(step, &parent, node),
+                    current,
+                )?;
+                let placement = Rc::new(Placement::new(&members));
+                let found = placement.locate(node);
+                self.remember_placement(predicate, slot, placement);
+                Ok(found)
+            }
+            Lookup::Uncacheable => {
+                // The levels only increase within one step, so a sequence
+                // built for an earlier predicate is a prefix of this work.
+                let (from, members) = match built.take() {
+                    Some((from, members)) if from <= level => (from, members),
+                    _ => (0, self.node_test_siblings(step, &parent, node)),
+                };
+                let members =
+                    self.apply_predicates(&step.predicates[from..level], members, current)?;
+                let found = locate(&members, node);
+                *built = Some((level, members));
+                Ok(found)
+            }
+        }
+    }
+
+    /// Filters `members` by `predicates`, left to right, each over the whole
+    /// sequence the previous one left (§3.2.2).
+    fn apply_predicates(
+        &self,
+        predicates: &[ExprId],
+        mut members: Vec<Nav<'t>>,
+        current: &Nav<'t>,
+    ) -> Result<Vec<Nav<'t>>, XsltError> {
+        for &predicate in predicates {
+            let size = members.len();
+            let mut kept = Vec::with_capacity(size);
+            for (index, member) in members.iter().enumerate() {
+                let value = self.eval_predicate(predicate, member, index + 1, size, current)?;
+                if predicate_holds(&value, index + 1).map_err(|e| self.xpath_error(e))? {
+                    kept.push(member.clone());
+                }
+            }
+            members = kept;
+        }
+        Ok(members)
+    }
+
+    /// Looks S`level` of `step` up for the parent `slot`.
+    fn cached_placement(&self, step: &PatternStep, level: usize, slot: ParentSlot) -> Lookup {
+        let predicate = step.predicates[level];
+        let mut cache = self.placements.borrow_mut();
+        let PlacementCache { steps, clock, .. } = &mut *cache;
+        let entry = steps.entry(predicate).or_insert_with(|| StepPlacements {
+            axis: step.axis,
+            test: step.test.clone(),
+            before: step.predicates[..level].to_vec(),
+            by_parent: self
+                .candidate_independent(&step.predicates[..level])
+                .then(HashMap::new),
+        });
+        // A compiled stylesheet hands every predicate to exactly one step, so
+        // this holds; it is checked because `matches` takes any `Pattern`.
+        if entry.axis != step.axis
+            || entry.test != step.test
+            || entry.before[..] != step.predicates[..level]
+        {
+            return Lookup::Uncacheable;
+        }
+        match &mut entry.by_parent {
+            None => Lookup::Uncacheable,
+            Some(by_parent) => match by_parent.get_mut(&slot) {
+                Some(remembered) => {
+                    *clock += 1;
+                    remembered.used = *clock;
+                    Lookup::Hit(Rc::clone(&remembered.placement))
+                }
+                None => Lookup::Miss,
+            },
+        }
+    }
+
+    /// Remembers S`level` of the step `predicate` belongs to for the parent
+    /// `slot`; at [`PLACEMENT_CACHE_LIMIT`] sequences, first forgets the less
+    /// recently used half of them.
+    fn remember_placement(&self, predicate: ExprId, slot: ParentSlot, placement: Rc<Placement>) {
+        let mut cache = self.placements.borrow_mut();
+        let PlacementCache {
+            steps,
+            entries,
+            clock,
+        } = &mut *cache;
+        if *entries >= PLACEMENT_CACHE_LIMIT {
+            let mut used: Vec<u64> = steps
+                .values()
+                .filter_map(|step| step.by_parent.as_ref())
+                .flat_map(|by_parent| by_parent.values().map(|remembered| remembered.used))
+                .collect();
+            if !used.is_empty() {
+                // The stamps are distinct, so this keeps exactly half.
+                let middle = used.len() / 2;
+                let (_, &mut cutoff, _) = used.select_nth_unstable(middle);
+                *entries = 0;
+                for by_parent in steps
+                    .values_mut()
+                    .filter_map(|step| step.by_parent.as_mut())
+                {
+                    by_parent.retain(|_, remembered| remembered.used >= cutoff);
+                    *entries += by_parent.len();
+                }
+            }
+        }
+        if let Some(by_parent) = steps
+            .get_mut(&predicate)
+            .and_then(|step| step.by_parent.as_mut())
+        {
+            *clock += 1;
+            let remembered = Remembered {
+                placement,
+                used: *clock,
+            };
+            if by_parent.insert(slot, remembered).is_none() {
+                *entries += 1;
+            }
+        }
+    }
+
+    /// Whether the sequence the predicates `before` leave among a parent's
+    /// children is the same whichever of those children is being matched.
+    ///
+    /// Everything a pattern predicate sees is fixed by the matcher except two
+    /// inputs: the member's own focus, which is the same in every computation
+    /// of the sequence, and the node the whole pattern is matched against,
+    /// which `current()` returns (§16.6.1) and which differs from match to
+    /// match. Local variables would be a third (no pattern site binds any
+    /// today, `Frame::default()`; a pattern of a later instruction might).
+    /// So the sequence is candidate-independent when every predicate
+    ///
+    /// - reads only global variables and parameters, whose values are fixed
+    ///   for the run (§9.5); and
+    /// - calls only functions in the standard function namespace other than
+    ///   `current()`. The others there — the F&O functions and §16's — depend
+    ///   on their arguments, the focus and state that is stable for the run.
+    ///   A stylesheet function (never in that namespace, §10.3 XTSE0740) is
+    ///   refused, conservatively: its body cannot see the focus or `current()`
+    ///   (§10.3 "Within the body of a stylesheet function, the focus is
+    ///   initially undefined"), but each call may construct new nodes.
+    fn candidate_independent(&self, before: &[ExprId]) -> bool {
+        before.iter().all(|&id| {
+            self.reads_only_globals(id)
+                && self
+                    .sheet
+                    .expr(id)
+                    .expr
+                    .function_calls()
+                    .iter()
+                    .all(|call| call.namespace == FN_NS && call.local_name != "current")
+        })
+    }
+
+    /// S0 of `node`, whose parent is `parent`: the nodes `step`'s axis and
+    /// node test select from `parent`, in document order.
+    fn node_test_siblings(
+        &self,
+        step: &PatternStep,
+        parent: &Nav<'t>,
+        node: &Nav<'t>,
+    ) -> Vec<Nav<'t>> {
         let mut out = Vec::new();
         match step.axis {
             PatternAxis::Attribute => {
@@ -498,22 +773,140 @@ fn principal_kind(axis: PatternAxis) -> DomNodeType {
     }
 }
 
-/// A predicate whose value is a singleton number is positional; anything else
-/// is taken by its effective boolean value.
+/// The predicate truth value of `value` at context position `position`.
+///
+/// XPath 2.0 §3.2.2: "If the value of the predicate expression is a singleton
+/// atomic value of a numeric type or derived from a numeric type, the
+/// predicate truth value is true if the value of the predicate expression is
+/// equal (by the eq operator) to the context position, and is false otherwise.
+/// … Otherwise, the predicate truth value is the effective boolean value of
+/// the predicate expression."
 fn predicate_holds(value: &XPathValue<Nav<'_>>, position: usize) -> Result<bool, XPathError> {
+    match numeric_predicate(value) {
+        Some(number) => Ok(number == position as f64),
+        None => effective_boolean_value(value),
+    }
+}
+
+/// The number a numeric predicate compares with the context position, if
+/// `value` is one — a singleton atomic value of a numeric type (§3.2.2) — and
+/// `None` if its effective boolean value decides instead.
+///
+/// A sequence of several numbers is not a numeric predicate: `item[(1, 2)]`
+/// takes the effective boolean value, which is FORG0006 for a sequence of
+/// more than one atomic value.
+fn numeric_predicate(value: &XPathValue<Nav<'_>>) -> Option<f64> {
     let single = match value {
         XPathValue::Item(item) => Some(item),
         XPathValue::Sequence(items) if items.len() == 1 => Some(&items[0]),
         _ => None,
     };
-    if let Some(XmlItem::Atomic(atomic)) = single {
-        if atomic.type_code.is_numeric() {
-            if let Some(number) = atomic.as_double() {
-                return Ok(number == position as f64);
-            }
+    match single {
+        Some(XmlItem::Atomic(atomic)) if atomic.type_code.is_numeric() => atomic.as_double(),
+        _ => None,
+    }
+}
+
+/// The position of `node` in `members` and the size of `members`.
+fn locate(members: &[Nav<'_>], node: &Nav<'_>) -> Option<(usize, usize)> {
+    members
+        .iter()
+        .position(|member| member.is_same_position(node))
+        .map(|index| (index + 1, members.len()))
+}
+
+// ── The placement cache ──────────────────────────────────────────────────
+
+/// A parent node: the serial of its document and its index there.
+type ParentSlot = (u64, u32);
+
+/// How many (predicate, parent) sequences [`PlacementCache`] holds before it
+/// forgets the less recently used half. Siblings are matched close together —
+/// template rules for one `xsl:apply-templates` selection, a key index built
+/// in document order — so a small cache serves them; the limit only stops a
+/// long run from keeping every parent it ever visited. Forgetting by recency
+/// rather than all at once keeps the parents still being worked through: in a
+/// table of a million rows matched against `row[1]` and `cell[1]`, the table's
+/// sequence is used for every row and must not be rebuilt every 4,096 rows.
+const PLACEMENT_CACHE_LIMIT: usize = 4096;
+
+/// The sequences positional predicates were applied to, remembered for the
+/// run (`Transformation::placement`).
+///
+/// An entry is S*i* — the input sequence of predicate *i* of one step — among
+/// the children (or attributes) of one parent, as the position of each member
+/// and the size. It is only made when S*i* is the same for every candidate
+/// (`candidate_independent`), and then it stays right for the whole run: a
+/// tree never changes once built, documents are told apart by their
+/// process-wide serial, global variables keep their first value, and nothing
+/// else enters the computation. That last point is load-bearing: if globals are
+/// ever re-evaluated within one `Transformation` (e.g. reset per run), this cache
+/// and `id_key_selections` must be cleared with them. Errors are not remembered: a candidate whose
+/// sequence cannot be built gets the error again (its cost is then a pass per
+/// candidate, as before M2l).
+#[derive(Default)]
+pub(super) struct PlacementCache {
+    /// By the predicate whose input sequence the entries are.
+    steps: HashMap<ExprId, StepPlacements>,
+    /// How many sequences are held across all steps.
+    entries: usize,
+    /// Ticks on every use; stamps [`Remembered::used`].
+    clock: u64,
+}
+
+/// The remembered sequences of one predicate.
+struct StepPlacements {
+    /// The step the predicate belongs to, checked on every lookup.
+    axis: PatternAxis,
+    test: NodeTest,
+    /// The predicates before this one in the step.
+    before: Vec<ExprId>,
+    /// By parent; `None` if the sequence depends on the candidate and is never
+    /// remembered.
+    by_parent: Option<HashMap<ParentSlot, Remembered>>,
+}
+
+/// One remembered sequence and when it was last used.
+struct Remembered {
+    placement: Rc<Placement>,
+    used: u64,
+}
+
+/// One remembered sequence.
+struct Placement {
+    /// 1-based position by node index (`current_ref`) — unique within the
+    /// document for every node a step selects: the members are children or
+    /// attributes, never namespace nodes.
+    positions: HashMap<u32, u32>,
+    size: usize,
+}
+
+impl Placement {
+    fn new(members: &[Nav<'_>]) -> Self {
+        Placement {
+            positions: members
+                .iter()
+                .enumerate()
+                .map(|(index, member)| (member.current_ref(), index as u32 + 1))
+                .collect(),
+            size: members.len(),
         }
     }
-    effective_boolean_value(value)
+
+    fn locate(&self, node: &Nav<'_>) -> Option<(usize, usize)> {
+        self.positions
+            .get(&node.current_ref())
+            .map(|&position| (position as usize, self.size))
+    }
+}
+
+/// What [`Transformation::cached_placement`] found.
+enum Lookup {
+    Hit(Rc<Placement>),
+    /// Not there yet, but may be remembered.
+    Miss,
+    /// Never remembered for this step.
+    Uncacheable,
 }
 
 #[cfg(test)]
