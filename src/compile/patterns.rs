@@ -5,6 +5,7 @@ use xsd_schema::xpath::XPathExpr;
 use super::Builder;
 use crate::error::{codes, XsltError};
 use crate::model::*;
+use crate::names::FN_NS;
 use crate::pattern::{self, PatternSink};
 use crate::stylesheet::StaticContextId;
 
@@ -37,15 +38,20 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         // compiles and raises XTDE1425 only if it is evaluated.
         let visible = self.visible_vars(ctx);
         let names: Vec<&str> = visible.iter().map(|(n, _)| n.as_str()).collect();
-        if let Err(e) = XPathExpr::compile_with_vars(source, self.compile_context(ctx), &names) {
-            return Err(match e.error_code() {
-                Some(code @ ("XPST0008" | "XPST0017" | "XPST0051" | "XPST0081"))
-                    if has_pattern_shape(source) =>
-                {
-                    XsltError::new(code, format!("cannot compile the pattern {source:?}: {e}"))
-                }
-                _ => XsltError::new(codes::XTSE0340, format!("{source:?} is not a pattern: {e}")),
-            });
+        match XPathExpr::compile_with_vars(source, self.compile_context(ctx), &names) {
+            Err(e) => {
+                return Err(match e.error_code() {
+                    Some(code @ ("XPST0008" | "XPST0017" | "XPST0051" | "XPST0081"))
+                        if has_pattern_shape(source) =>
+                    {
+                        XsltError::new(code, format!("cannot compile the pattern {source:?}: {e}"))
+                    }
+                    _ => {
+                        XsltError::new(codes::XTSE0340, format!("{source:?} is not a pattern: {e}"))
+                    }
+                });
+            }
+            Ok(whole) => reject_grouping_functions(&whole, source)?,
         }
 
         let sc = self.static_contexts.get(ctx).clone();
@@ -58,6 +64,62 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         self.patterns.push(pattern);
         Ok(PatternId(self.patterns.len() as u32 - 1))
     }
+}
+
+impl<'a, 'm, 't> Builder<'a, 'm, 't> {
+    /// XTSE1060 / XTSE1070 for a pattern this processor does not compile yet —
+    /// the `count` and `from` patterns of `xsl:number`, whose instruction is
+    /// M3c's (see [`reject_grouping_functions`]).
+    ///
+    /// Only these two rules are checked: a source that does not even compile
+    /// as an expression is left to the instruction's own compiler, which will
+    /// report the pattern's other static errors with it.
+    pub(super) fn reject_grouping_functions_in(
+        &mut self,
+        source: &str,
+        ctx: StaticContextId,
+    ) -> Result<(), XsltError> {
+        let visible = self.visible_vars(ctx);
+        let names: Vec<&str> = visible.iter().map(|(n, _)| n.as_str()).collect();
+        match XPathExpr::compile_with_vars(source, self.compile_context(ctx), &names) {
+            Ok(whole) => reject_grouping_functions(&whole, source),
+            Err(_) => Ok(()),
+        }
+    }
+}
+
+/// The two §14 functions that have no meaning in a pattern.
+///
+/// > \[§14.1\] \[ERR XTSE1060\] It is a static error if the current-group
+/// > function is used within a pattern.
+///
+/// > \[§14.2\] \[ERR XTSE1070\] It is a static error if the
+/// > current-grouping-key function is used within a pattern.
+///
+/// `whole` is the pattern compiled as one expression; its function calls are
+/// every call anywhere in the pattern (`XPathExpr::function_calls`), in the
+/// predicates of any step and in the argument of an `id()` / `key()` anchor.
+/// A call inside the body of a stylesheet function the pattern calls is not
+/// "used within a pattern": it is in the function's body.
+fn reject_grouping_functions(whole: &XPathExpr, source: &str) -> Result<(), XsltError> {
+    for call in whole.function_calls() {
+        if call.namespace != FN_NS {
+            continue;
+        }
+        let code = match call.local_name.as_str() {
+            "current-group" => codes::XTSE1060,
+            "current-grouping-key" => codes::XTSE1070,
+            _ => continue,
+        };
+        return Err(XsltError::new(
+            code,
+            format!(
+                "{}() is not allowed in the pattern {source:?}",
+                call.local_name
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether `source` matches the production Pattern, judged on its shape alone.

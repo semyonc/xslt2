@@ -11,9 +11,22 @@
 //! `DocumentStore` maps to its `DocId`, which every tree has whether or not the
 //! store registered it.
 //!
+//! An index of a key whose specifier may observe the current group
+//! (`Key::observes_group`) also belongs to **one current group**: the
+//! specifier is evaluated with the current group and grouping key of the
+//! `key()` call (§16.3.1 changes only the focus: "The expression will be
+//! evaluated with the node that matches the pattern as the context node";
+//! §5.4.4 clears the current group for "calls on stylesheet functions" and
+//! nothing else), so the same key over the same document has different values
+//! in two groups. Such indexes are kept per group, under the group's serial
+//! number ([`KeyIndexes`]), and dropped when the group's evaluation ends. Every
+//! other key is evaluated with no current group — it cannot tell — and keeps
+//! one index per document for the run.
+//!
 //! Building an index evaluates the key's patterns and key specifiers, which
-//! may call `key()` again. A call for a *different* (key, document) pair just
-//! builds that index first; a call for the pair being built is a circularity
+//! may call `key()` again. A call for a *different* (key, document) pair — or,
+//! for a key that observes the group, (key, document, group) — just builds
+//! that index first; a call for the one being built is a circularity
 //! (§9.8: "A circularity is said to exist if a construct such as a global
 //! variable, an attribute set, or a key is defined in terms of itself"), which
 //! the [`KeyState::Building`] marker detects. The table is never borrowed
@@ -37,7 +50,7 @@ use xsd_schema::xpath::functions::{atomize_sequence, XPathValue};
 use xsd_schema::xpath::operators::{eval_binary, value_eq};
 use xsd_schema::xpath::XmlItem;
 
-use super::context::XsltContext;
+use super::context::{CurrentGroup, XsltContext};
 use super::{Frame, Transformation};
 use crate::collation::{Collation, CollationResolver, CODEPOINT_COLLATION_URI};
 use crate::error::{codes, XsltError};
@@ -49,14 +62,75 @@ use crate::receiver::{Nav, SequenceCollector};
 pub(super) enum KeyState<'t> {
     Building,
     Built(Rc<KeyIndex<'t>>),
-    /// The build failed with this error, which every later use of the index in
-    /// this run raises again instead of building it again (see
-    /// [`Transformation::key_index`]).
+    /// The build failed with this error, which every later use of the index
+    /// raises again, for as long as the index is kept, instead of building it
+    /// again (see [`Transformation::key_index`]).
     Failed(XsltError),
 }
 
-/// Every index of a run, by key and document serial.
-pub(super) type KeyIndexes<'t> = HashMap<(KeyId, u64), KeyState<'t>>;
+/// Where one index is kept: the key, the serial number of the document, and
+/// the serial number of the current group it was built for
+/// (`CurrentGroup::serial`) — 0 for a call made outside any group, and for
+/// every key that cannot observe the group.
+#[derive(Clone, Copy)]
+struct IndexSlot {
+    key: KeyId,
+    document: u64,
+    group: u64,
+}
+
+/// Every index of a run.
+///
+/// The indexes built with no current group live for the run. Those built for
+/// one group are kept in a table of that group's own, which
+/// [`forget_group`](Self::forget_group) drops when the group's evaluation is
+/// over: the group can never be current again, and without that a
+/// group-dependent key used in each of many groups would keep an index per
+/// group to the end of the run. At any moment only the groups being evaluated
+/// — the nested `xsl:for-each-group` bodies in progress, and the groups whose
+/// sort keys have been computed but whose body has not run yet — hold any.
+#[derive(Default)]
+pub(super) struct KeyIndexes<'t> {
+    run: HashMap<(KeyId, u64), KeyState<'t>>,
+    groups: HashMap<u64, HashMap<(KeyId, u64), KeyState<'t>>>,
+}
+
+impl<'t> KeyIndexes<'t> {
+    fn get(&self, slot: IndexSlot) -> Option<&KeyState<'t>> {
+        let table = if slot.group == 0 {
+            Some(&self.run)
+        } else {
+            self.groups.get(&slot.group)
+        };
+        table.and_then(|table| table.get(&(slot.key, slot.document)))
+    }
+
+    fn insert(&mut self, slot: IndexSlot, state: KeyState<'t>) {
+        let table = if slot.group == 0 {
+            &mut self.run
+        } else {
+            self.groups.entry(slot.group).or_default()
+        };
+        table.insert((slot.key, slot.document), state);
+    }
+
+    fn remove(&mut self, slot: IndexSlot) {
+        if slot.group == 0 {
+            self.run.remove(&(slot.key, slot.document));
+        } else if let Some(table) = self.groups.get_mut(&slot.group) {
+            table.remove(&(slot.key, slot.document));
+        }
+    }
+
+    /// Drops every index built for the group with this serial number.
+    pub(super) fn forget_group(&mut self, serial: u64) {
+        // The usual case — no key of the stylesheet observes the group — costs
+        // no hashing per group.
+        if !self.groups.is_empty() {
+            self.groups.remove(&serial);
+        }
+    }
+}
 
 /// One key's index over one document.
 ///
@@ -91,7 +165,7 @@ pub(super) struct KeyIndex<'t> {
 /// candidate is confirmed by [`key_values_equal`] — so a collision only costs a
 /// comparison.
 #[derive(Hash, PartialEq, Eq)]
-enum Slot {
+pub(super) enum Slot {
     /// A string-like value (`xs:string` and its derivatives, `xs:anyURI`,
     /// `xs:untypedAtomic`): its codepoints, or the collation's sort key, whose
     /// "equality and order agree with `compare`".
@@ -139,7 +213,7 @@ enum Slot {
 /// The three date/time families `eq` compares within (`xs:dateTime` and
 /// `xs:dateTimeStamp` are one family).
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
-enum Temporal {
+pub(super) enum Temporal {
     DateTime,
     Date,
     Time,
@@ -164,11 +238,11 @@ struct Seconds {
 /// sought value whose own home is `Unhashed` is compared with every value of
 /// the index. That is what keeps a value no hash could be computed for
 /// findable.
-struct Placement {
-    home: Slot,
+pub(super) struct Placement {
+    pub(super) home: Slot,
     /// Only for a date/time value: the slot of the values on the other side of
     /// the timezone line (a value with a timezone can equal one without).
-    also: Option<Slot>,
+    pub(super) also: Option<Slot>,
 }
 
 impl Placement {
@@ -177,8 +251,9 @@ impl Placement {
     }
 }
 
-/// The collation a key compares strings with.
-enum KeyCollation {
+/// The collation a key — or a grouping instruction (`runtime/grouping.rs`) —
+/// compares strings with.
+pub(super) enum KeyCollation {
     Codepoint,
     Other(Rc<dyn Collation>),
 }
@@ -197,19 +272,23 @@ impl<'a, 't> Transformation<'a, 't> {
     /// `root` that are matched by a declaration of `key` and have a key value
     /// equal to one of `sought`, restricted to the subtree of `top` when the
     /// call had a third argument — in document order, without duplicates.
+    ///
+    /// `group` is the current group of the call (`XsltContext::group`), with
+    /// which the key specifier is evaluated.
     pub(super) fn key_lookup(
         &self,
         key: KeyId,
         sought: Vec<XmlValue>,
         root: &Nav<'t>,
         top: Option<&Nav<'t>>,
+        group: Option<&Rc<CurrentGroup<'t>>>,
     ) -> Result<Vec<Nav<'t>>, XsltError> {
         // "If the second argument is an empty sequence, the result of the
         // function will be an empty sequence."
         if sought.is_empty() {
             return Ok(Vec::new());
         }
-        let index = self.key_index(key, root)?;
+        let index = self.key_index(key, root, group)?;
         let definition = self.sheet.key(key);
         let collation = self.key_collation(definition)?;
         let mut hits: Vec<u32> = Vec::new();
@@ -253,23 +332,38 @@ impl<'a, 't> Transformation<'a, 't> {
         })
     }
 
-    /// The index of `key` over the document whose root is `root`, built on
+    /// The index of `key` over the document whose root is `root` — for a key
+    /// that may observe the current group, the one for `group` — built on
     /// first use.
     ///
-    /// A build that fails is not attempted again in this run: its error is
-    /// remembered and raised by every later use. The build sees only the
-    /// nodes of the document, the global variables and the key's own
-    /// declarations (DESIGN §9.1's row: singleton focus, default mode, no
-    /// tunnel parameters, no current template rule), all fixed for the run, so
-    /// it would fail the same way each time — while a pattern that calls
-    /// `key()` would otherwise repeat it for every candidate, §5.5.4 turning
-    /// each failure into a non-match. The one exception is an
-    /// `XSLT2-INTERNAL` error: the stack and recursion guards report through
-    /// it, and whether they trip depends on where the build was started, so
-    /// such a failure is forgotten and the next use builds again.
-    fn key_index(&self, key: KeyId, root: &Nav<'t>) -> Result<Rc<KeyIndex<'t>>, XsltError> {
-        let slot = (key, root.document().serial());
-        match self.keys.borrow().get(&slot) {
+    /// A build that fails is not attempted again while its index could be
+    /// asked for: its error is remembered and raised by every later use. The
+    /// build sees only the nodes of the document, the global variables, the
+    /// key's own declarations (DESIGN §9.1's row: singleton focus, default
+    /// mode, no tunnel parameters, no current template rule) and, for a key
+    /// that may observe it, the current group — all fixed for as long as the
+    /// index is kept, so it would fail the same way each time — while a
+    /// pattern that calls `key()` would otherwise repeat it for every
+    /// candidate, §5.5.4 turning each failure into a non-match. The one
+    /// exception is an `XSLT2-INTERNAL` error: the stack and recursion guards
+    /// report through it, and whether they trip depends on where the build
+    /// was started, so such a failure is forgotten and the next use builds
+    /// again.
+    fn key_index(
+        &self,
+        key: KeyId,
+        root: &Nav<'t>,
+        group: Option<&Rc<CurrentGroup<'t>>>,
+    ) -> Result<Rc<KeyIndex<'t>>, XsltError> {
+        // A key that cannot observe the group is built with none, so that one
+        // index answers every call over the document, in a group or not.
+        let group = group.filter(|_| self.sheet.key(key).observes_group);
+        let slot = IndexSlot {
+            key,
+            document: root.document().serial(),
+            group: group.map_or(0, |group| group.serial),
+        };
+        match self.keys.borrow().get(slot) {
             Some(KeyState::Built(index)) => return Ok(Rc::clone(index)),
             Some(KeyState::Failed(error)) => return Err(error.clone()),
             // §9.8: "[ERR XTDE0640] In general, a circularity in a stylesheet
@@ -297,7 +391,7 @@ impl<'a, 't> Transformation<'a, 't> {
         // behind.
         self.check_stack()?;
         self.keys.borrow_mut().insert(slot, KeyState::Building);
-        let built = self.build_key_index(key, root);
+        let built = self.build_key_index(key, root, group);
         let mut keys = self.keys.borrow_mut();
         match built {
             Ok(index) => {
@@ -306,7 +400,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 Ok(index)
             }
             Err(e) if e.is_internal() => {
-                keys.remove(&slot);
+                keys.remove(slot);
                 Err(e)
             }
             Err(e) => {
@@ -323,7 +417,12 @@ impl<'a, 't> Transformation<'a, 't> {
     /// evaluated with a singleton focus based on $N, the atomized value of the
     /// resulting sequence includes a value that compares equal to at least one
     /// item in the atomized value of the sequence supplied as $key-value".
-    fn build_key_index(&self, key: KeyId, root: &Nav<'t>) -> Result<KeyIndex<'t>, XsltError> {
+    fn build_key_index(
+        &self,
+        key: KeyId,
+        root: &Nav<'t>,
+        group: Option<&Rc<CurrentGroup<'t>>>,
+    ) -> Result<KeyIndex<'t>, XsltError> {
         let definition = self.sheet.key(key);
         let collation = self.key_collation(definition)?;
         let mut index = KeyIndex::default();
@@ -335,7 +434,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 if !self.matches(self.sheet.pattern(declaration.pattern), node)? {
                     continue;
                 }
-                for value in self.key_specifier_values(declaration, node)? {
+                for value in self.key_specifier_values(declaration, node, group)? {
                     let value = self.key_value(value, definition.compat);
                     let Some(placement) = placement_of(&value, &collation) else {
                         continue;
@@ -368,10 +467,20 @@ impl<'a, 't> Transformation<'a, 't> {
     /// constructor contained in xsl:key or xsl:sort, the current mode is set to
     /// the default mode"); no tunnel parameters; and a frame of its own, in
     /// which only the globals and the constructor's own locals are visible.
+    ///
+    /// The current group and grouping key are `group`'s: those of the `key()`
+    /// call for a key that may observe them, none for any other (see
+    /// `key_index`). §16.3.1 changes the focus only, and §5.4.4's table
+    /// clears the current group and grouping key for "calls on stylesheet
+    /// functions" alone — unlike the current template rule and mode, which it
+    /// clears for "the sequence constructors contained in xsl:key" — so §14.1
+    /// applies: "While an xsl:for-each-group instruction is being evaluated,
+    /// the current group will be non-empty."
     fn key_specifier_values(
         &self,
         declaration: &KeyDefinition,
         node: &Nav<'t>,
+        group: Option<&Rc<CurrentGroup<'t>>>,
     ) -> Result<Vec<XmlValue>, XsltError> {
         let item = XmlItem::Node(node.clone());
         let mut cx = XsltContext::empty();
@@ -379,6 +488,7 @@ impl<'a, 't> Transformation<'a, 't> {
         cx.position = 1;
         cx.size = 1;
         cx.current = Some(item);
+        cx.group = group.cloned();
         let mut frame = Frame::with_slots(declaration.frame_size);
         let value = match &declaration.specifier {
             ValueSource::Select(id) => self.eval_expr(*id, &frame, &cx),
@@ -467,7 +577,7 @@ fn unwrapped(value: &XmlValue) -> &XmlValue {
 /// is hashed on exactly the form `eq` compares it by, and anything this
 /// function cannot hash on that form is [`Slot::Unhashed`] rather than
 /// guessed.
-fn placement_of(value: &XmlValue, collation: &KeyCollation) -> Option<Placement> {
+pub(super) fn placement_of(value: &XmlValue, collation: &KeyCollation) -> Option<Placement> {
     let value = unwrapped(value);
     if is_string_like(value) {
         let text = value.to_string_value();
@@ -721,7 +831,7 @@ fn hash_of<T: Hash + ?Sized>(value: &T) -> u64 {
 /// declaration when comparing strings. No error is reported if two values are
 /// encountered that are not comparable; they are regarded for the purposes of
 /// this function as being not equal."
-fn key_values_equal(a: &XmlValue, b: &XmlValue, collation: &KeyCollation) -> bool {
+pub(super) fn key_values_equal(a: &XmlValue, b: &XmlValue, collation: &KeyCollation) -> bool {
     let (a, b) = (unwrapped(a), unwrapped(b));
     if is_string_like(a) && is_string_like(b) {
         return collation.equals(&a.to_string_value(), &b.to_string_value());

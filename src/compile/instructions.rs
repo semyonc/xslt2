@@ -421,15 +421,29 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 "xsl:key is a declaration and is only allowed as a top-level element",
             )
             .with_location(loc)),
-            "number" | "for-each-group" | "analyze-string" | "result-document" => {
+            "for-each-group" => self.for_each_group(nav, module_id, ctx, &loc),
+            "number" => {
+                // xsl:number is M3c's; its `count` and `from` patterns are
+                // patterns all the same, so the two §14 rules that hold for
+                // every pattern (XTSE1060, XTSE1070) are checked here already.
+                for attribute in ["count", "from"] {
+                    if let Some(text) = attr_local(nav, attribute) {
+                        self.reject_grouping_functions_in(&text, ctx)
+                            .map_err(|e| e.with_location(loc.clone()))?;
+                    }
+                }
+                Ok(InstructionKind::NotImplemented {
+                    feature: "xsl:number".to_string(),
+                    milestone: "M3c",
+                })
+            }
+            "analyze-string" | "result-document" => {
                 Ok(InstructionKind::NotImplemented {
                     feature: format!("xsl:{local}"),
                     // The owner of each, per the roadmap's §4.
                     milestone: match local.as_str() {
-                        "for-each-group" => "M2g",
                         "analyze-string" => "M2h",
                         "result-document" => "M3b",
-                        "number" => "M3c",
                         _ => unreachable!("the arm above lists exactly these elements"),
                     },
                 })
@@ -632,7 +646,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     /// The element table has already checked that the `xsl:sort` children come
     /// first (§13: "xsl:sort elements must occur before any other children"),
     /// so every `xsl:sort` child is part of the one specification.
-    fn sort_keys(
+    pub(super) fn sort_keys(
         &mut self,
         parent: &Nav<'t>,
         module_id: ModuleId,

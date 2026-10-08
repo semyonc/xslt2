@@ -1408,11 +1408,12 @@ fn body_of(value: &VarValue) -> Option<&Body> {
 }
 
 /// Calls `f` on every instruction of `body`, depth first.
-fn visit(body: &Body, f: &mut impl FnMut(&Instruction)) {
+pub(super) fn visit(body: &Body, f: &mut impl FnMut(&Instruction)) {
     for instruction in &body.0 {
         f(instruction);
         match &instruction.kind {
             InstructionKind::ForEach { body, sort, .. }
+            | InstructionKind::ForEachGroup { body, sort, .. }
             | InstructionKind::PerformSort { body, sort, .. } => {
                 visit_sort_keys(sort, f);
                 visit(body, f);

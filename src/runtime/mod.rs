@@ -19,6 +19,7 @@ mod documents;
 mod eval;
 mod expressions;
 mod functions;
+mod grouping;
 mod keys;
 mod patterns;
 mod serialize;
@@ -80,7 +81,8 @@ pub struct TransformOptions {
     /// [`Self::stack_limit`] does, and the run stops at whichever limit is
     /// reached first. Key index builds, global variables and attribute sets,
     /// which can also nest, are not counted — each is entered at most once per
-    /// declaration (a key once per document) on any one chain — and only
+    /// declaration (a key once per document and current group) on any one
+    /// chain — and only
     /// [`Self::stack_limit`] bounds them.
     pub max_recursion_depth: usize,
     /// How many bytes of host stack the run may use, measured from the point
@@ -275,9 +277,13 @@ pub struct Transformation<'a, 't> {
     sheet: &'a CompiledStylesheet<'a>,
     store: RefCell<DocumentStore<'t>>,
     globals: RefCell<Vec<GlobalSlot<'t>>>,
-    /// The key indexes (§16.3, DESIGN §9.7), one per key and document, built
-    /// on first use.
+    /// The key indexes (§16.3, DESIGN §9.7), one per key and document — and,
+    /// for a key whose specifier may observe it, current group — built on
+    /// first use.
     keys: RefCell<keys::KeyIndexes<'t>>,
+    /// The serial number of the last current group created
+    /// (`CurrentGroup::serial`); 0 before the first.
+    group_serials: std::cell::Cell<u64>,
     /// What the call of each `id()` / `key()` pattern selects, per document
     /// (§5.5.2), computed on first use.
     id_key_selections: RefCell<patterns::IdKeySelections<'t>>,
@@ -325,7 +331,8 @@ impl<'a> CompiledStylesheet<'a> {
             sheet: self,
             store: RefCell::new(DocumentStore::new(arena, self.names())),
             globals: RefCell::new(globals),
-            keys: RefCell::new(HashMap::new()),
+            keys: RefCell::new(keys::KeyIndexes::default()),
+            group_serials: std::cell::Cell::new(0),
             id_key_selections: RefCell::new(HashMap::new()),
             placements: RefCell::new(patterns::PlacementCache::default()),
             messages: RefCell::new(Vec::new()),

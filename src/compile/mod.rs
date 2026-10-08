@@ -12,6 +12,7 @@ pub(crate) mod checks;
 mod declarations;
 mod expressions;
 mod functions;
+mod grouping;
 mod instructions;
 mod keys;
 mod literal;
@@ -253,6 +254,8 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         // their winners settled, before the first expression is compiled.
         self.collect_functions()?;
         self.build_declarations()?;
+        // Needs every key: a `key()` call may reach any of them.
+        self.settle_key_group_dependence();
         // §10.1.1's XTSE0680 needs the declaration tables, so it runs over the
         // compiled tree rather than over the stylesheet tree.
         checks::check_call_template_params(self)?;

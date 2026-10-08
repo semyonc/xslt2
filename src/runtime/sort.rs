@@ -1,5 +1,6 @@
 //! Sorting (§13): the sort key specification of `xsl:apply-templates`,
-//! `xsl:for-each` and `xsl:perform-sort` applied to an initial sequence.
+//! `xsl:for-each` and `xsl:perform-sort` applied to an initial sequence, and
+//! of `xsl:for-each-group` applied to its groups (§14.3).
 //!
 //! The steps follow §13.1.1–§13.1.3:
 //!
@@ -59,6 +60,24 @@ impl KeyCollation {
     }
 }
 
+/// What the rows being sorted are, for the messages that name one.
+#[derive(Clone, Copy)]
+pub(super) enum SortRows {
+    /// The items of an initial sequence (§13.1.1).
+    Items,
+    /// The groups of `xsl:for-each-group` (§14.3).
+    Groups,
+}
+
+impl SortRows {
+    fn noun(self) -> &'static str {
+        match self {
+            SortRows::Items => "item",
+            SortRows::Groups => "group",
+        }
+    }
+}
+
 /// The effective values of one `xsl:sort` element's attributes.
 struct KeyRules {
     order: SortOrder,
@@ -82,6 +101,45 @@ impl<'a, 't> Transformation<'a, 't> {
         if keys.is_empty() {
             return Ok(items);
         }
+        // §13.1.1: "The context item is the item in the initial sequence whose
+        // sort key value is being computed. The context position is the
+        // position of that item in the initial sequence. The context size is
+        // the size of the initial sequence."
+        let size = items.len();
+        let order = self.sort_order(
+            keys,
+            SortRows::Items,
+            size,
+            |index| cx.with_focus(items[index].clone(), index + 1, size),
+            frame,
+            cx,
+        )?;
+        let mut slots: Vec<Option<XmlItem<Nav<'t>>>> = items.into_iter().map(Some).collect();
+        Ok(order
+            .into_iter()
+            .map(|index| slots[index].take().expect("each index occurs once"))
+            .collect())
+    }
+
+    /// The order in which `size` rows sort by the sort key specification
+    /// `keys` (non-empty): a permutation of `0..size`. `rows` says what the
+    /// rows are, for the messages of the errors that name one.
+    ///
+    /// `focus(i)` is the dynamic context row `i`'s sort key values are
+    /// computed in — its focus and, for the groups of `xsl:for-each-group`, its
+    /// current group (§14.3); the current template rule and mode are then
+    /// cleared for it (`sort_key_value`). `cx` is the context of the
+    /// containing instruction, in which the attribute value templates of the
+    /// `xsl:sort` elements are evaluated (§13.1).
+    pub(super) fn sort_order(
+        &self,
+        keys: &[SortKey],
+        rows: SortRows,
+        size: usize,
+        focus: impl Fn(usize) -> XsltContext<'t>,
+        frame: &mut Frame<'t>,
+        cx: &XsltContext<'t>,
+    ) -> Result<Vec<usize>, XsltError> {
         // §13.1: "Those attributes of the xsl:sort elements whose values are
         // attribute value templates are evaluated using the same focus as is
         // used to evaluate the select attribute of the containing instruction".
@@ -96,19 +154,18 @@ impl<'a, 't> Transformation<'a, 't> {
                     .map_err(|e| e.or_location(&key.loc))
             })
             .collect::<Result<_, _>>()?;
-        if items.is_empty() {
-            return Ok(items);
+        if size == 0 {
+            return Ok(Vec::new());
         }
 
-        // columns[k][i]: the k-th sort key of the i-th item.
-        let size = items.len();
+        // columns[k][i]: the k-th sort key of the i-th row.
         let mut columns: Vec<Vec<ColumnKey>> = Vec::with_capacity(keys.len());
         for (key, rule) in keys.iter().zip(&rules) {
             // `None` is the empty sequence (§13.1.2's "empty values").
             let mut values: Vec<Option<XmlValue>> = Vec::with_capacity(size);
-            for (index, item) in items.iter().enumerate() {
+            for index in 0..size {
                 let value = self
-                    .sort_key_value(key, rule, item, index + 1, size, frame, cx)
+                    .sort_key_value(key, rule, rows, focus(index), frame)
                     .map_err(|e| e.or_location(&key.loc))?;
                 values.push(value);
             }
@@ -139,11 +196,7 @@ impl<'a, 't> Transformation<'a, 't> {
             }
             Ordering::Equal
         });
-        let mut slots: Vec<Option<XmlItem<Nav<'t>>>> = items.into_iter().map(Some).collect();
-        Ok(order
-            .into_iter()
-            .map(|index| slots[index].take().expect("each index occurs once"))
-            .collect())
+        Ok(order)
     }
 
     /// The effective values of one `xsl:sort` element's attributes (§13.1).
@@ -274,11 +327,18 @@ impl<'a, 't> Transformation<'a, 't> {
 
     /// One sort key value (§13.1.1, §13.1.2): `None` for the empty sequence.
     ///
+    /// `inner` carries the focus the key is computed with — for an initial
+    /// sequence:
+    ///
     /// > This evaluation is done with the focus set as follows: The context
     /// > item is the item in the initial sequence whose sort key value is being
     /// > computed. The context position is the position of that item in the
     /// > initial sequence. The context size is the size of the initial
     /// > sequence.
+    ///
+    /// and for the groups of `xsl:for-each-group` the initial item of the group,
+    /// its position among the initial items and the number of groups, with the
+    /// group as the current group (§14.3).
     ///
     /// `current()` is that item too (the §13.1.1 Note). §6.7: "when evaluating
     /// a sequence constructor contained in an xsl:sort or xsl:key element … the
@@ -287,18 +347,15 @@ impl<'a, 't> Transformation<'a, 't> {
     /// parameters, and the sequence constructor contained in xsl:key or
     /// xsl:sort, the current mode is set to the default mode." A `select`
     /// expression cannot observe either, so both are cleared for every key.
-    #[allow(clippy::too_many_arguments)]
     fn sort_key_value(
         &self,
         key: &SortKey,
         rule: &KeyRules,
-        item: &XmlItem<Nav<'t>>,
-        position: usize,
-        size: usize,
+        rows: SortRows,
+        mut inner: XsltContext<'t>,
         frame: &mut Frame<'t>,
-        cx: &XsltContext<'t>,
     ) -> Result<Option<XmlValue>, XsltError> {
-        let mut inner = cx.with_focus(item.clone(), position, size);
+        let position = inner.position;
         inner.current_rule = None;
         inner.mode = ModeKey::Default;
         let value = match &key.value {
@@ -322,7 +379,8 @@ impl<'a, 't> Transformation<'a, 't> {
                 return Err(XsltError::new(
                     codes::XTTE1020,
                     format!(
-                        "the sort key value of item {position} is a sequence of {} items",
+                        "the sort key value of {} {position} is a sequence of {} items",
+                        rows.noun(),
                         atoms.len()
                     ),
                 ));

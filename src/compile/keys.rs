@@ -1,10 +1,12 @@
 //! `xsl:key` (§16.3.1): one declaration at a time, merged by name into the
 //! key table.
 
+use super::checks::visit;
 use super::Builder;
 use crate::collation::{UCA_COLLATION_PREFIX, UCA_MILESTONE};
 use crate::error::{codes, XsltError};
 use crate::model::*;
+use crate::names::FN_NS;
 use crate::receiver::Nav;
 use crate::stylesheet::{attr_local, ModuleId, StaticContextId};
 use crate::whitespace;
@@ -64,15 +66,20 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         self.frame_size = 0;
         let scope_mark = self.scope.len();
         let pattern = self.compile_pattern(&match_text, ctx)?;
+        // Every expression of the key specifier is compiled from here on, and
+        // only those: expressions are numbered in the order they are compiled.
+        let first_expr = self.exprs.len();
         let specifier = match use_text {
             Some(text) => ValueSource::Select(self.compile_expr(&text, ctx)?),
             None => ValueSource::Content(self.sequence_constructor(nav, module_id)?),
         };
         self.scope.truncate(scope_mark);
+        let group_reach = self.group_reach(&specifier, first_expr);
         let definition = KeyDefinition {
             pattern,
             specifier,
             frame_size: self.frame_size,
+            group_reach,
             loc: loc.clone(),
         };
         let compat = self.static_contexts.get(ctx).compat.is_backwards();
@@ -107,10 +114,78 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     definitions: vec![definition],
                     collation,
                     compat,
+                    // Settled by `settle_key_group_dependence` once every
+                    // key is known.
+                    observes_group: false,
                 });
             }
         }
         Ok(())
+    }
+
+    /// What the key specifier just compiled may observe of the current group
+    /// of the `key()` call it is evaluated for (see [`GroupReach`]).
+    ///
+    /// `first_expr` is the number of the specifier's first expression: every
+    /// expression from there to the last one compiled belongs to it — the
+    /// `use` attribute, or every expression, attribute value template, sort
+    /// key and type of its sequence constructor, at any depth. A function call
+    /// is seen by its expanded name (`XPathExpr::function_calls`, the name the
+    /// call was bound to): `current-group()` and `current-grouping-key()`
+    /// read the group; `key()` evaluates another specifier with it. A call to
+    /// a stylesheet function is neither: §14.3 "During the evaluation of a
+    /// stylesheet function, the current group and current grouping key are set
+    /// to the empty sequence".
+    ///
+    /// The instructions of a sequence constructor that run other code with the
+    /// caller's current group are the template invocations and the attribute
+    /// sets (`instruction_reaches_group`); a template called from a key
+    /// specifier may read the group, so such a specifier counts as reading
+    /// it. Global variables do not: they are evaluated with no group.
+    fn group_reach(&self, specifier: &ValueSource, first_expr: usize) -> GroupReach {
+        let mut reach = GroupReach::default();
+        for compiled in &self.exprs[first_expr..] {
+            for call in compiled.expr.function_calls() {
+                if call.namespace != FN_NS {
+                    continue;
+                }
+                match call.local_name.as_str() {
+                    "current-group" | "current-grouping-key" => reach.reads_group = true,
+                    "key" => reach.calls_key = true,
+                    _ => {}
+                }
+            }
+        }
+        if let ValueSource::Content(body) = specifier {
+            visit(body, &mut |instruction| {
+                if instruction_reaches_group(&instruction.kind) {
+                    reach.reads_group = true;
+                }
+            });
+        }
+        reach
+    }
+
+    /// Decides, once every `xsl:key` declaration is compiled, which keys may
+    /// observe the current group of the `key()` call ([`Key::observes_group`]).
+    ///
+    /// A key does if one of its declarations reads the group itself, or calls
+    /// `key()` while some key of the stylesheet reads the group: the name a
+    /// `key()` call asks for is an expression, so any key may be reached, and
+    /// through any chain of `key()` calls — every chain that reaches the group
+    /// ends at a key that reads it.
+    pub(super) fn settle_key_group_dependence(&mut self) {
+        let any_reads = self
+            .keys
+            .iter()
+            .flat_map(|key| &key.definitions)
+            .any(|definition| definition.group_reach.reads_group);
+        for key in &mut self.keys {
+            key.observes_group = key.definitions.iter().any(|definition| {
+                definition.group_reach.reads_group
+                    || (any_reads && definition.group_reach.calls_key)
+            });
+        }
     }
 
     /// The effective collation of one `xsl:key` declaration (§16.3.1).
@@ -149,5 +224,44 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             format!("xsl:key names the collation {uri:?}, which this processor does not recognize"),
         )
         .with_location(loc.clone()))
+    }
+}
+
+/// Whether `kind` runs code other than its own expressions and sequence
+/// constructors with the caller's current group: a template invocation (§5.4.4
+/// clears the current group for "calls on stylesheet functions" only, so a
+/// template sees it), or the expansion of attribute sets (evaluated in the
+/// caller's context, `runtime/eval.rs`). Everything else an instruction
+/// evaluates is an expression or a sequence constructor of its own, which
+/// [`Builder::group_reach`] sees anyway.
+///
+/// Exhaustive on purpose: a new instruction has to be classified here.
+fn instruction_reaches_group(kind: &InstructionKind) -> bool {
+    match kind {
+        InstructionKind::ApplyTemplates { .. }
+        | InstructionKind::ApplyImports { .. }
+        | InstructionKind::NextMatch { .. }
+        | InstructionKind::CallTemplate { .. } => true,
+        InstructionKind::LiteralElement { attr_sets, .. }
+        | InstructionKind::Element { attr_sets, .. }
+        | InstructionKind::Copy { attr_sets, .. } => !attr_sets.is_empty(),
+        InstructionKind::ForEach { .. }
+        | InstructionKind::ForEachGroup { .. }
+        | InstructionKind::PerformSort { .. }
+        | InstructionKind::If { .. }
+        | InstructionKind::Choose { .. }
+        | InstructionKind::ValueOf { .. }
+        | InstructionKind::Text { .. }
+        | InstructionKind::Sequence { .. }
+        | InstructionKind::Attribute { .. }
+        | InstructionKind::Namespace { .. }
+        | InstructionKind::Comment { .. }
+        | InstructionKind::ProcessingInstruction { .. }
+        | InstructionKind::Document { .. }
+        | InstructionKind::CopyOf { .. }
+        | InstructionKind::Variable { .. }
+        | InstructionKind::Message { .. }
+        | InstructionKind::Fallback
+        | InstructionKind::NotImplemented { .. } => false,
     }
 }

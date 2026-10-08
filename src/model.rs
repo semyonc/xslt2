@@ -270,6 +270,21 @@ pub fn is_valid_lang(value: &str) -> bool {
     })
 }
 
+/// How `xsl:for-each-group` allocates its population to groups: exactly one of
+/// its four grouping attributes (§14.3, XTSE1080).
+pub enum Grouping {
+    /// `group-by`: a group per distinct grouping key; an item may be in
+    /// several groups, or in none.
+    By(ExprId),
+    /// `group-adjacent`: runs of adjacent items with equal keys; each item has
+    /// exactly one key (XTTE1100).
+    Adjacent(ExprId),
+    /// `group-starting-with`: a new group at each node that matches.
+    StartingWith(PatternId),
+    /// `group-ending-with`: a new group after each node that matches.
+    EndingWith(PatternId),
+}
+
 /// The value of a variable-binding element (§9.2).
 pub enum VarValue {
     /// `select="…"` — the value is the expression's result.
@@ -396,6 +411,22 @@ pub enum InstructionKind {
     ForEach {
         select: ExprId,
         /// The sort key specification (§13); empty when there is none.
+        sort: Vec<SortKey>,
+        body: Body,
+    },
+    /// `xsl:for-each-group` (§14.3).
+    ForEachGroup {
+        /// The population: "the sequence of items to be grouped".
+        select: ExprId,
+        grouping: Grouping,
+        /// `collation` (an attribute value template), allowed only with
+        /// `group-by` or `group-adjacent` (XTSE1090). Without it, the default
+        /// collation of the instruction's static context applies (§14.3: "If
+        /// there is no collation attribute then the default collation is
+        /// used").
+        collation: Option<Avt>,
+        /// The sort key specification that orders the groups (§14.3); empty
+        /// for the order of first appearance.
         sort: Vec<SortKey>,
         body: Body,
     },
@@ -601,6 +632,14 @@ pub struct Key {
     /// compatible behavior" — then every value is compared as a string
     /// (DESIGN §9.10 row 10).
     pub compat: bool,
+    /// Whether the key specifier of some declaration may observe the current
+    /// group or the current grouping key (§14.1, §14.2) of the `key()` call it
+    /// is evaluated for: one declaration's [`GroupReach::reads_group`], or a
+    /// [`GroupReach::calls_key`] while some key of the stylesheet reads the
+    /// group. Settled when the whole stylesheet has been compiled. Such a key
+    /// has an index per document **and current group**; any other key, one
+    /// per document for the run.
+    pub observes_group: bool,
 }
 
 /// One `xsl:key` declaration (§16.3.1).
@@ -611,7 +650,32 @@ pub struct KeyDefinition {
     pub specifier: ValueSource,
     /// Slots the sequence constructor's local variables need.
     pub frame_size: usize,
+    /// What the key specifier may observe of the current group of the `key()`
+    /// call it is evaluated for.
+    pub group_reach: GroupReach,
     pub loc: Location,
+}
+
+/// What a key specifier may observe of the current group and the current
+/// grouping key (§14.1, §14.2) of the `key()` call it is evaluated for, as far
+/// as the compiler can tell — conservatively: `true` means "may".
+///
+/// §16.3.1 changes only the focus ("The expression will be evaluated with the
+/// node that matches the pattern as the context node"), and §5.4.4 clears the
+/// current group and grouping key only for "calls on stylesheet functions", so
+/// the specifier evaluated for a call made inside an `xsl:for-each-group`
+/// sees that group.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GroupReach {
+    /// The specifier calls `current-group()` or `current-grouping-key()`, or
+    /// its sequence constructor invokes a template (`xsl:call-template`,
+    /// `xsl:apply-templates`, `xsl:apply-imports`, `xsl:next-match`) or
+    /// expands an attribute set — both run with the caller's current group.
+    /// A call to a stylesheet function does not count: its body has none.
+    pub reads_group: bool,
+    /// The specifier calls `key()`, whose own specifier is then evaluated with
+    /// the same current group.
+    pub calls_key: bool,
 }
 
 /// A global `xsl:variable` or `xsl:param` (§9.5).

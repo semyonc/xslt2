@@ -3,13 +3,13 @@
 Schema-aware XSLT 2.0 processor in Rust, built on the
 [`xsd-schema`](../xsd-schema) validator and its XPath 2.0 engine.
 
-Status: **M2 — full language, in progress** (M1, M2a–M2f, M2i, M2j done). Stylesheets are loaded,
+Status: **M2 — full language, in progress** (M1, M2a–M2g, M2i, M2j, M2l done). Stylesheets are loaded,
 compiled and run: the module graph with import precedence, the lexical static contexts of §5.4.1,
 template rules with the §6.4 priorities and conflict resolution, the built-in rules,
 `xsl:apply-imports` and `xsl:next-match`, variables and parameters (tunnel included), attribute
 value templates, attribute sets, the node constructors, `xsl:copy`/`xsl:copy-of`, `xsl:message`,
 `xsl:sort` / `xsl:perform-sort` with collations, `xsl:function`, `xsl:key` with `key()` and the `id()` /
-`key()` patterns, and the XML and text output methods. `xsl:for-each-group`, `xsl:analyze-string`, `xsl:number`, `format-number` and
+`key()` patterns, `xsl:for-each-group`, and the XML and text output methods. `xsl:analyze-string`, `xsl:number`, `format-number` and
 the HTML/XHTML output methods belong to later milestones and report the internal `XSLT2-NOTIMPL`
 code rather than a wrong answer.
 
@@ -48,13 +48,13 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 | | |
 |---|---|
 | XSLT 2.0-applicable | 6,619 |
-| excluded (documented in `tests/xslts/filter.rs`) | 30 |
-| runnable (dependencies satisfied) | 5,721 |
-| pass | 4,786 |
-| fail / wrongError / harnessError | 64 / 0 / 3 |
-| not implemented (`XSLT2-NOTIMPL`, M2–M4) | 868 |
-| pass rate over runnable | 83.66% |
-| headline (basic profile, non-regex families) | 3,639 / 4,211 = **86.4%** |
+| excluded (documented in `tests/xslts/filter.rs`) | 32 |
+| runnable (dependencies satisfied) | 5,719 |
+| pass | 4,864 |
+| fail / wrongError / harnessError | 68 / 0 / 3 |
+| not implemented (`XSLT2-NOTIMPL`, M2–M4) | 784 |
+| pass rate over runnable | 85.05% |
+| headline (basic profile, non-regex families) | 3,717 / 4,210 = **88.3%** |
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the
@@ -75,7 +75,9 @@ excluded with the spec text that says so, and 3 are harness errors until the pub
 transformation at a node other than the document. M2d (sorting: `xsl:sort`, `xsl:perform-sort` and the collation
 registry, `../../XSLT2_M2D_REPORT.md`) took it to 4,522, and M2e (`xsl:function`, `../../XSLT2_M2E_REPORT.md`; four
 more documented exclusions) to 4,628, and M2f (`xsl:key`, `key()`, `id()` / `key()` patterns,
-`../../XSLT2_M2F_REPORT.md`) to 4,786 of 5,721 on 2026-10-04.
+`../../XSLT2_M2F_REPORT.md`) to 4,786 of 5,721 on 2026-10-04; M2l (pattern predicates decided per candidate, a
+performance change) kept it there, and M2g (`xsl:for-each-group`, `../../XSLT2_M2G_REPORT.md`; two more documented
+exclusions) took it to 4,864 of 5,719 on 2026-10-08.
 
 The sixteen test-sets M1 targets:
 
@@ -86,16 +88,16 @@ The sixteen test-sets M1 targets:
 | choose | 54 | 53 | 0 | 0 | 0 | 1 | 98.1% |
 | call-template | 35 | 33 | 0 | 0 | 1 | 1 | 94.3% |
 | lre | 26 | 26 | 0 | 0 | 0 | 0 | 100.0% |
-| variable | 101 | 100 | 0 | 0 | 0 | 1 | 99.0% |
+| variable | 101 | 101 | 0 | 0 | 0 | 0 | 100.0% |
 | include | 14 | 13 | 1 | 0 | 0 | 0 | 92.9% |
 | apply-templates | 36 | 36 | 0 | 0 | 0 | 0 | 100.0% |
 | element | 19 | 18 | 1 | 0 | 0 | 0 | 94.7% |
-| version | 33 | 30 | 0 | 0 | 0 | 3 | 90.9% |
+| version | 33 | 33 | 0 | 0 | 0 | 0 | 100.0% |
 | param | 25 | 25 | 0 | 0 | 0 | 0 | 100.0% |
 | attribute | 21 | 19 | 0 | 0 | 0 | 2 | 90.5% |
 | copy | 70 | 67 | 2 | 0 | 0 | 1 | 95.7% |
 | sequence | 87 | 86 | 0 | 0 | 0 | 1 | 98.9% |
-| message | 26 | 23 | 2 | 0 | 0 | 1 | 88.5% |
+| message | 26 | 24 | 2 | 0 | 0 | 0 | 92.3% |
 | output | 137 | 10 | 21 | 0 | 0 | 106 | 7.3% |
 
 `output` is dominated by the `html`, `xhtml`, `doctype-*` and character-map serialization

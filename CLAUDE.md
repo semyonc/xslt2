@@ -30,8 +30,8 @@ PSVI, `BufferDocument`). Separate git repository.
 | `src/model.rs` | The `Instruction` tree (§7.4), declaration tables (§7.3), `CompiledStylesheet` |
 | `src/pattern.rs` | Pattern grammar (§5.5.2), the §6.4 default priorities, the dispatch-index key |
 | `src/compile/checks.rs` | The **static-checking table**: one `ElementSpec` row per XSLT 2.0 element (category, required/optional attributes, AVTs, content model) transcribed from the spec's syntax summaries, and the single pass that validates a module against it before compilation. A new element = a new row here |
-| `src/compile/` | `Compiler`: modules → declarations and instructions. `mod.rs` (builder core), `declarations`, `instructions`, `literal`, `expressions`, `avt`, `patterns`, `modes`, `attributes`, `tree`. Walk stylesheet children **only** through `Module::children()` / `Builder::children()` — it applies §3.12 `use-when` exclusion by construction |
-| `src/runtime/` | `Transformation`: `mod.rs` (entry points), `context` (§5.4), `dispatch` (§6), `patterns`, `eval` (instructions), `content`, `variables`, `documents` (loading, §4.4 admission), `functions` (the §16 evaluator), `expressions`, `serialize` |
+| `src/compile/` | `Compiler`: modules → declarations and instructions. `mod.rs` (builder core), `declarations`, `instructions`, `literal`, `expressions`, `avt`, `patterns`, `modes`, `attributes`, `tree`, `functions` (`xsl:function`), `keys` (`xsl:key`), `grouping` (`xsl:for-each-group`). Walk stylesheet children **only** through `Module::children()` / `Builder::children()` — it applies §3.12 `use-when` exclusion by construction |
+| `src/runtime/` | `Transformation`: `mod.rs` (entry points), `context` (§5.4), `dispatch` (§6), `patterns`, `eval` (instructions), `content`, `variables`, `documents` (loading, §4.4 admission), `functions` (the §16 evaluator), `expressions`, `serialize`, `sort` (`xsl:sort`, `xsl:perform-sort`), `calls` (stylesheet functions), `keys` (key indexes), `grouping` (`xsl:for-each-group`) |
 | `src/receiver.rs` | `Receiver`, `ComplexContentNormalizer` (§5.7.1), `ResultBuilder`, `SequenceCollector` |
 | `src/store.rs` | `DocumentStore`: arena-allocated documents, URI identity, `generate-id()` |
 | `src/output.rs` | `xsl:output` merged by import precedence → `SerializeOptions` |
@@ -42,7 +42,7 @@ PSVI, `BufferDocument`). Separate git repository.
 ```bash
 cargo build
 cargo clippy --all-targets         # 0 warnings expected
-cargo test                         # unit + m0b_invariants + m1_context + m1_smoke + m1_review + m2a_groundwork + m2a_review
+cargo test                         # unit tests + every tests/*.rs except the W3C harness (it skips itself in debug): m0b…m2a, m2c, m2d_sorting, m2e_functions, m2f_keys, m2g_grouping, m2g_review, m2i_core_defects, m2l_pattern_predicates, q33_depth, …
                                    # + fn_error + m2b_namespaces + m2c_static_checks
                                    # (the W3C harness skips itself in a debug build)
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps   # must exit 0; the local regexml fork's own

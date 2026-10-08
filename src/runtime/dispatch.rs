@@ -8,6 +8,7 @@ use xsd_schema::xpath::functions::XPathValue;
 use xsd_schema::xpath::XmlItem;
 
 use super::context::XsltContext;
+use super::patterns::MatchEnv;
 use super::{Frame, Invocation, Transformation};
 use crate::error::{codes, XsltError};
 use crate::model::*;
@@ -157,7 +158,13 @@ impl<'a, 't> Transformation<'a, 't> {
         let Some(alternative) = pattern.alternatives.get(id.alternative as usize) else {
             return Ok(false);
         };
-        self.guard_recoverable(self.matches_alternative(alternative, nav, nav))
+        let empty = Frame::default();
+        self.guard_recoverable(self.matches_alternative(
+            alternative,
+            nav,
+            nav,
+            MatchEnv::top_level(&empty),
+        ))
     }
 
     /// The rules of `mode` that could match `nav`, in conflict-resolution

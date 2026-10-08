@@ -1,6 +1,7 @@
 //! Matching a node against a pattern (§5.5.3), walking the pattern right to
 //! left from the candidate node.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -75,13 +76,48 @@ impl<'a, 't> Transformation<'a, 't> {
     /// optional recovery action is to treat the pattern as not matching".
     /// `TransformOptions::strict_recoverable` signals it instead.
     pub fn matches(&self, pattern: &Pattern, node: &Nav<'t>) -> Result<bool, XsltError> {
+        let empty = Frame::default();
+        self.matches_with(pattern, node, MatchEnv::top_level(&empty))
+    }
+
+    /// [`matches`](Self::matches) for a pattern of an instruction, within one
+    /// evaluation of that instruction: the local variables of the scope's
+    /// frame are in scope for the pattern's predicates, and the matcher may
+    /// remember for the rest of the evaluation what depends on them
+    /// ([`EvaluationScope`]).
+    ///
+    /// A `match` pattern of `xsl:template` or `xsl:key` is a top-level
+    /// attribute and sees the global variables only (DESIGN §9.1), so its
+    /// frame is empty; a `group-starting-with` / `group-ending-with` pattern
+    /// is an attribute of an instruction and sees every variable in scope
+    /// there (§9.7: "the scope of a local variable … is all following
+    /// siblings of the variable-binding element, and their descendants") —
+    /// which is the frame the instruction runs in (`for-each-group-071`
+    /// refers to a function parameter). The `count` / `from` patterns of
+    /// `xsl:number` (M3c) are the same kind of pattern and are meant to come
+    /// through here too, with a scope per evaluation of the instruction.
+    pub(super) fn matches_in(
+        &self,
+        pattern: &Pattern,
+        node: &Nav<'t>,
+        scope: &EvaluationScope<'_, 't>,
+    ) -> Result<bool, XsltError> {
+        self.matches_with(pattern, node, scope.env())
+    }
+
+    fn matches_with(
+        &self,
+        pattern: &Pattern,
+        node: &Nav<'t>,
+        env: MatchEnv<'_, 't>,
+    ) -> Result<bool, XsltError> {
         // A pattern's predicates may call stylesheet functions, so a direct
         // call measures the stack it uses from here, as a run does (Q33).
         let _stack = self.stack_scope(super::stack_position());
         for alternative in &pattern.alternatives {
             // The node handed in is both the candidate and, per §16.6.1, the
             // node `current()` reports throughout the match.
-            match self.guard_recoverable(self.matches_alternative(alternative, node, node)) {
+            match self.guard_recoverable(self.matches_alternative(alternative, node, node, env)) {
                 Ok(true) => return Ok(true),
                 Ok(false) => {}
                 Err(e) => return Err(e),
@@ -143,6 +179,7 @@ impl<'a, 't> Transformation<'a, 't> {
         alternative: &PathPattern,
         node: &Nav<'t>,
         current: &Nav<'t>,
+        env: MatchEnv<'_, 't>,
     ) -> Result<bool, XsltError> {
         if let Anchor::IdKey(anchor) = alternative.anchor {
             // §5.5.2: "These patterns will never match a node in a tree whose
@@ -156,13 +193,15 @@ impl<'a, 't> Transformation<'a, 't> {
             }
             if alternative.steps.is_empty() {
                 // The call alone: the node must be one it selects.
-                return Ok(self.id_key_selection(anchor, node, current)?.contains(node));
+                return Ok(self
+                    .id_key_selection(anchor, node, current, env)?
+                    .contains(node));
             }
         } else if alternative.steps.is_empty() {
             // The pattern `/`.
             return Ok(node.node_type() == DomNodeType::Root);
         }
-        self.matches_from(alternative, 0, node, current)
+        self.matches_from(alternative, 0, node, current, env)
     }
 
     /// The nodes the `id(…)` / `key(…)` call of an IdKeyPattern selects in the
@@ -181,21 +220,33 @@ impl<'a, 't> Transformation<'a, 't> {
     /// context node". So it is computed once per (call, document) and kept for
     /// the run as a set — as long as every variable the call reads is global
     /// (a global's value is fixed for the run). A call that reads a local
-    /// variable is evaluated per candidate, as before; no pattern site
-    /// compiles one today (template and key patterns see only globals), but a
-    /// pattern of a later instruction might. An error is not kept: it is
-    /// raised for this candidate (and a key whose index build failed
-    /// remembers that itself, `runtime/keys.rs`).
+    /// variable — possible only in a pattern of an instruction, since
+    /// template and key patterns see only globals — is kept for one
+    /// evaluation of the instruction instead ([`EvaluationScope`]), and
+    /// evaluated per candidate when the pattern is matched outside one. An
+    /// error is not kept: it is raised for this candidate (and a key whose
+    /// index build failed remembers that itself, `runtime/keys.rs`).
     fn id_key_selection(
         &self,
         anchor: IdKeyAnchor,
         node: &Nav<'t>,
         current: &Nav<'t>,
+        env: MatchEnv<'_, 't>,
     ) -> Result<Rc<SelectedNodes<'t>>, XsltError> {
-        let fixed = self.reads_only_globals(anchor.call);
         let slot = (anchor.call, node.document().serial());
-        if fixed {
-            if let Some(selected) = self.id_key_selections.borrow().get(&slot) {
+        // The grammar (§5.5.2) leaves the call nothing to read but a variable,
+        // so `standard_functions_only` holds for every compiled one; it is
+        // checked so that the scope admits a call by the rule it applies to
+        // predicates.
+        let table = if self.reads_only_globals(anchor.call) {
+            Some(&self.id_key_selections)
+        } else {
+            env.scope
+                .filter(|_| self.standard_functions_only(anchor.call))
+                .map(|scope| &scope.selections)
+        };
+        if let Some(table) = table {
+            if let Some(selected) = table.borrow().get(&slot) {
                 return Ok(Rc::clone(selected));
             }
         }
@@ -206,17 +257,15 @@ impl<'a, 't> Transformation<'a, 't> {
         cx.current = Some(XmlItem::Node(current.clone()));
         // The table is not borrowed here: the call may build a key index,
         // whose patterns may match other IdKeyPatterns.
-        let value = self.eval_expr(anchor.call, &Frame::default(), &cx)?;
+        let value = self.eval_expr(anchor.call, env.frame, &cx)?;
         let selected = Rc::new(SelectedNodes::new(value.into_vec().into_iter().filter_map(
             |item| match item {
                 XmlItem::Node(nav) => Some(nav),
                 XmlItem::Atomic(_) => None,
             },
         )));
-        if fixed {
-            self.id_key_selections
-                .borrow_mut()
-                .insert(slot, Rc::clone(&selected));
+        if let Some(table) = table {
+            table.borrow_mut().insert(slot, Rc::clone(&selected));
         }
         Ok(selected)
     }
@@ -237,9 +286,10 @@ impl<'a, 't> Transformation<'a, 't> {
         index: usize,
         node: &Nav<'t>,
         current: &Nav<'t>,
+        env: MatchEnv<'_, 't>,
     ) -> Result<bool, XsltError> {
         let step = &alternative.steps[index];
-        if !self.step_matches(step, node, current)? {
+        if !self.step_matches(step, node, current, env)? {
             return Ok(false);
         }
         if index + 1 == alternative.steps.len() {
@@ -261,7 +311,7 @@ impl<'a, 't> Transformation<'a, 't> {
                     if !ancestor.move_to_parent() {
                         return Ok(false);
                     }
-                    let selected = self.id_key_selection(anchor, node, current)?;
+                    let selected = self.id_key_selection(anchor, node, current, env)?;
                     let selects = |n: &Nav<'t>| selected.contains(n);
                     match anchor.connector {
                         Connector::Parent => selects(&ancestor),
@@ -283,12 +333,12 @@ impl<'a, 't> Transformation<'a, 't> {
                 if !parent.move_to_parent() {
                     return Ok(false);
                 }
-                self.matches_from(alternative, index + 1, &parent, current)
+                self.matches_from(alternative, index + 1, &parent, current, env)
             }
             Connector::Ancestor => {
                 let mut ancestor = node.clone();
                 while ancestor.move_to_parent() {
-                    if self.matches_from(alternative, index + 1, &ancestor, current)? {
+                    if self.matches_from(alternative, index + 1, &ancestor, current, env)? {
                         return Ok(true);
                     }
                 }
@@ -341,7 +391,9 @@ impl<'a, 't> Transformation<'a, 't> {
         step: &PatternStep,
         node: &Nav<'t>,
         current: &Nav<'t>,
+        env: MatchEnv<'_, 't>,
     ) -> Result<bool, XsltError> {
+        let frame = env.frame;
         if !node_test_matches(&step.test, step.axis, node) {
             return Ok(false);
         }
@@ -350,10 +402,10 @@ impl<'a, 't> Transformation<'a, 't> {
         for (level, &predicate) in step.predicates.iter().enumerate() {
             let expr = &self.sheet.expr(predicate).expr;
             let holds = if expr.uses_position() || expr.uses_last() {
-                match self.placement(step, level, node, current, &mut built)? {
+                match self.placement(step, level, node, current, env, &mut built)? {
                     Some((position, size)) => {
                         let value =
-                            self.eval_predicate(predicate, node, position, size, current)?;
+                            self.eval_predicate(predicate, node, position, size, current, frame)?;
                         predicate_holds(&value, position).map_err(|e| self.xpath_error(e))?
                     }
                     None => false,
@@ -364,9 +416,9 @@ impl<'a, 't> Transformation<'a, 't> {
                 // this crate's does — the §16 functions read the context item
                 // and `current()`, never the position or size, and a
                 // stylesheet function's body has no focus (§10.3).
-                let value = self.eval_predicate(predicate, node, 1, 1, current)?;
+                let value = self.eval_predicate(predicate, node, 1, 1, current, frame)?;
                 if numeric_predicate(&value).is_some() {
-                    match self.placement(step, level, node, current, &mut built)? {
+                    match self.placement(step, level, node, current, env, &mut built)? {
                         Some((position, _)) => {
                             predicate_holds(&value, position).map_err(|e| self.xpath_error(e))?
                         }
@@ -395,13 +447,14 @@ impl<'a, 't> Transformation<'a, 't> {
         position: usize,
         size: usize,
         current: &Nav<'t>,
+        frame: &Frame<'t>,
     ) -> Result<XPathValue<Nav<'t>>, XsltError> {
         let mut cx = XsltContext::empty();
         cx.item = Some(XmlItem::Node(item.clone()));
         cx.position = position;
         cx.size = size;
         cx.current = Some(XmlItem::Node(current.clone()));
-        self.eval_expr(predicate, &Frame::default(), &cx)
+        self.eval_expr(predicate, frame, &cx)
     }
 
     /// The position of `node` in S`level` — the sequence predicate `level` of
@@ -420,23 +473,36 @@ impl<'a, 't> Transformation<'a, 't> {
     /// position in constant time, and `item[1]` or `item[@a][2]` costs one pass
     /// over the siblings per parent instead of one per sibling.
     ///
-    /// When it cannot be remembered, the sequence is built for this candidate
-    /// and kept in `built` (the level it is for, and its members) for the
-    /// step's later predicates, which continue from it instead of starting
-    /// again from S0 — so a step with several positional predicates still
-    /// filters the siblings once per candidate, as before M2l.
+    /// When it cannot be remembered for the run but the pattern is matched
+    /// within one evaluation of an instruction, it is remembered for that
+    /// evaluation instead if nothing the earlier predicates read can differ
+    /// between two candidates of the evaluation — see `evaluation_independent`
+    /// and [`EvaluationScope`]: a predicate that reads a local variable of the
+    /// instruction (`r[@k = $v][1]` in `group-starting-with`) is linear again.
+    ///
+    /// Otherwise the sequence is built for this candidate and kept in `built`
+    /// (the level it is for, and its members) for the step's later predicates,
+    /// which continue from it instead of starting again from S0 — so a step
+    /// with several positional predicates still filters the siblings once per
+    /// candidate, as before M2l.
     fn placement(
         &self,
         step: &PatternStep,
         level: usize,
         node: &Nav<'t>,
         current: &Nav<'t>,
+        env: MatchEnv<'_, 't>,
         built: &mut Option<(usize, Vec<Nav<'t>>)>,
     ) -> Result<Option<(usize, usize)>, XsltError> {
+        let frame = env.frame;
         let mut parent = node.clone();
         if !parent.move_to_parent() {
-            let members =
-                self.apply_predicates(&step.predicates[..level], vec![node.clone()], current)?;
+            let members = self.apply_predicates(
+                &step.predicates[..level],
+                vec![node.clone()],
+                current,
+                frame,
+            )?;
             return Ok(locate(&members, node));
         }
         let predicate = step.predicates[level];
@@ -451,6 +517,7 @@ impl<'a, 't> Transformation<'a, 't> {
                     &step.predicates[..level],
                     self.node_test_siblings(step, &parent, node),
                     current,
+                    frame,
                 )?;
                 let placement = Rc::new(Placement::new(&members));
                 let found = placement.locate(node);
@@ -458,6 +525,12 @@ impl<'a, 't> Transformation<'a, 't> {
                 Ok(found)
             }
             Lookup::Uncacheable => {
+                if let Some(scope) = env
+                    .scope
+                    .filter(|scope| self.scope_admits(scope, step, level))
+                {
+                    return self.scoped_placement(scope, step, level, &parent, node, current);
+                }
                 // The levels only increase within one step, so a sequence
                 // built for an earlier predicate is a prefix of this work.
                 let (from, members) = match built.take() {
@@ -465,12 +538,67 @@ impl<'a, 't> Transformation<'a, 't> {
                     _ => (0, self.node_test_siblings(step, &parent, node)),
                 };
                 let members =
-                    self.apply_predicates(&step.predicates[from..level], members, current)?;
+                    self.apply_predicates(&step.predicates[from..level], members, current, frame)?;
                 let found = locate(&members, node);
                 *built = Some((level, members));
                 Ok(found)
             }
         }
+    }
+
+    /// Whether `scope` may remember S`level` of `step` for the rest of its
+    /// evaluation (`evaluation_independent`) — decided once per predicate and
+    /// evaluation.
+    fn scope_admits(
+        &self,
+        scope: &EvaluationScope<'_, 't>,
+        step: &PatternStep,
+        level: usize,
+    ) -> bool {
+        scope
+            .placements
+            .borrow_mut()
+            .entry(step.predicates[level])
+            .or_insert_with(|| {
+                self.evaluation_independent(&step.predicates[..level])
+                    .then(HashMap::new)
+            })
+            .is_some()
+    }
+
+    /// The position of `node` in S`level` of `step` among the children of
+    /// `parent`, and the size of that sequence, through `scope`: built on the
+    /// first candidate of `parent` in this evaluation, looked up for the
+    /// others. As for the run-wide cache, no borrow is held while predicates
+    /// are evaluated, and an error is not remembered.
+    fn scoped_placement(
+        &self,
+        scope: &EvaluationScope<'_, 't>,
+        step: &PatternStep,
+        level: usize,
+        parent: &Nav<'t>,
+        node: &Nav<'t>,
+        current: &Nav<'t>,
+    ) -> Result<Option<(usize, usize)>, XsltError> {
+        let predicate = step.predicates[level];
+        let slot = (parent.document().serial(), parent.current_ref());
+        if let Some(Some(by_parent)) = scope.placements.borrow().get(&predicate) {
+            if let Some(placement) = by_parent.get(&slot) {
+                return Ok(placement.locate(node));
+            }
+        }
+        let members = self.apply_predicates(
+            &step.predicates[..level],
+            self.node_test_siblings(step, parent, node),
+            current,
+            scope.frame,
+        )?;
+        let placement = Placement::new(&members);
+        let found = placement.locate(node);
+        if let Some(Some(by_parent)) = scope.placements.borrow_mut().get_mut(&predicate) {
+            by_parent.insert(slot, placement);
+        }
+        Ok(found)
     }
 
     /// Filters `members` by `predicates`, left to right, each over the whole
@@ -480,12 +608,14 @@ impl<'a, 't> Transformation<'a, 't> {
         predicates: &[ExprId],
         mut members: Vec<Nav<'t>>,
         current: &Nav<'t>,
+        frame: &Frame<'t>,
     ) -> Result<Vec<Nav<'t>>, XsltError> {
         for &predicate in predicates {
             let size = members.len();
             let mut kept = Vec::with_capacity(size);
             for (index, member) in members.iter().enumerate() {
-                let value = self.eval_predicate(predicate, member, index + 1, size, current)?;
+                let value =
+                    self.eval_predicate(predicate, member, index + 1, size, current, frame)?;
                 if predicate_holds(&value, index + 1).map_err(|e| self.xpath_error(e))? {
                     kept.push(member.clone());
                 }
@@ -581,8 +711,10 @@ impl<'a, 't> Transformation<'a, 't> {
     /// inputs: the member's own focus, which is the same in every computation
     /// of the sequence, and the node the whole pattern is matched against,
     /// which `current()` returns (§16.6.1) and which differs from match to
-    /// match. Local variables would be a third (no pattern site binds any
-    /// today, `Frame::default()`; a pattern of a later instruction might).
+    /// match. Local variables are a third: a `group-starting-with` /
+    /// `group-ending-with` pattern sees the frame of its instruction
+    /// ([`matches_in`](Self::matches_in)), whose values differ from one
+    /// evaluation of the instruction to the next.
     /// So the sequence is candidate-independent when every predicate
     ///
     /// - reads only global variables and parameters, whose values are fixed
@@ -595,16 +727,53 @@ impl<'a, 't> Transformation<'a, 't> {
     ///   (§10.3 "Within the body of a stylesheet function, the focus is
     ///   initially undefined"), but each call may construct new nodes.
     fn candidate_independent(&self, before: &[ExprId]) -> bool {
-        before.iter().all(|&id| {
-            self.reads_only_globals(id)
-                && self
-                    .sheet
-                    .expr(id)
-                    .expr
-                    .function_calls()
-                    .iter()
-                    .all(|call| call.namespace == FN_NS && call.local_name != "current")
-        })
+        before
+            .iter()
+            .all(|&id| self.reads_only_globals(id) && self.standard_functions_only(id))
+    }
+
+    /// Whether the sequence the predicates `before` leave among a parent's
+    /// children is the same for every candidate matched within **one
+    /// evaluation** of an instruction ([`EvaluationScope`]):
+    /// `candidate_independent` without its condition on variables.
+    ///
+    /// - A local variable is fixed for the evaluation: the scope holds a
+    ///   shared borrow of the instruction's frame for as long as it exists,
+    ///   so no slot of it can be assigned in the meantime, and the scope ends
+    ///   with the evaluation. That is all the scope adds.
+    /// - `current()` is still refused. In a pattern "its value is the node
+    ///   that is being matched against the pattern" (§16.6.1), and one
+    ///   evaluation matches many nodes, each as its own `current()`
+    ///   (`group_by_pattern` hands every population node in as both): one
+    ///   evaluation fixes the frame, not the candidate. `r[. is current()][1]`
+    ///   matches every `r`.
+    /// - A stylesheet function is still refused, for the run-wide cache's
+    ///   reason. One evaluation adds nothing its body could read: it sees no
+    ///   focus and no `current()` (§10.3: "Within the body of a stylesheet
+    ///   function, the focus is initially undefined"), not the caller's
+    ///   locals ("It is not possible within the body of the stylesheet
+    ///   function to access the values of local variables that were in scope
+    ///   in the place where the function call was written"), and no current
+    ///   group (§14.3: "During the evaluation of a stylesheet function, the
+    ///   current group and current grouping key are set to the empty
+    ///   sequence"). But every call may construct new nodes (§11), whose
+    ///   identity a predicate can observe (`is`, `generate-id()`, the order of
+    ///   nodes in different trees), so two filterings of the same siblings
+    ///   need not agree, and nothing in the specification lets a processor
+    ///   share one call's nodes with another.
+    fn evaluation_independent(&self, before: &[ExprId]) -> bool {
+        before.iter().all(|&id| self.standard_functions_only(id))
+    }
+
+    /// Whether the expression `id` calls only functions in the standard
+    /// function namespace other than `current()` (see `candidate_independent`).
+    fn standard_functions_only(&self, id: ExprId) -> bool {
+        self.sheet
+            .expr(id)
+            .expr
+            .function_calls()
+            .iter()
+            .all(|call| call.namespace == FN_NS && call.local_name != "current")
     }
 
     /// S0 of `node`, whose parent is `parent`: the nodes `step`'s axis and
@@ -897,6 +1066,93 @@ impl Placement {
         self.positions
             .get(&node.current_ref())
             .map(|&position| (position as usize, self.size))
+    }
+}
+
+/// What a pattern's predicates are evaluated in besides the candidate's focus
+/// and `current()`: the variable frame and, for a pattern of an instruction,
+/// the memory of the evaluation it is matched in.
+#[derive(Clone, Copy)]
+pub(super) struct MatchEnv<'e, 't> {
+    frame: &'e Frame<'t>,
+    scope: Option<&'e EvaluationScope<'e, 't>>,
+}
+
+impl<'e, 't> MatchEnv<'e, 't> {
+    /// A `match` pattern of `xsl:template` or `xsl:key`: the global variables
+    /// only — `empty` is an empty frame — and only the run-wide caches.
+    pub(super) fn top_level(empty: &'e Frame<'t>) -> Self {
+        MatchEnv {
+            frame: empty,
+            scope: None,
+        }
+    }
+}
+
+/// What the pattern matcher remembers for **one evaluation** of an instruction
+/// whose patterns see the instruction's local variables:
+/// `group-starting-with` / `group-ending-with` of `xsl:for-each-group` (M2g)
+/// and, once M3c implements `xsl:number`, its `count` / `from` patterns,
+/// which are meant to match through [`Transformation::matches_in`] with a scope
+/// of their own per evaluation in the same way.
+///
+/// The run-wide caches ([`PlacementCache`], `id_key_selections`) refuse
+/// whatever reads a local variable, because a local differs between
+/// evaluations of the instruction: a variable inside `xsl:for-each` is bound
+/// again for every item, in the same frame slot, and a template's parameters
+/// for every call. Within one evaluation it cannot differ, and the scope makes
+/// sure of that by construction rather than by convention:
+///
+/// - it holds a shared borrow of the frame for its whole life, so the frame
+///   cannot be changed while it exists, and every predicate matched through it
+///   is evaluated in exactly that frame ([`env`](Self::env));
+/// - it is a local of the evaluating function (`group_by_pattern`), dropped
+///   when the evaluation ends, never stored in the `Transformation`; the next
+///   evaluation of the same instruction starts with an empty one;
+/// - it reaches the matcher only as an argument: an evaluation of the same
+///   instruction reached from inside a predicate (through a stylesheet
+///   function, say) runs in a frame of its own with a scope of its own.
+///
+/// What it holds:
+///
+/// - S*i* of a positional predicate whose earlier predicates are
+///   `evaluation_independent` but not `candidate_independent`, per (predicate,
+///   parent) — what the run-wide [`PlacementCache`] holds for the others;
+/// - the selection of an `id(…)` / `key(…)` anchor whose argument is a local
+///   variable, per (call, document) — what `id_key_selections` holds when it
+///   is a global or a literal.
+///
+/// It has no size limit: it lives for one evaluation, and holds at most one
+/// sequence per (predicate, parent) and one selection per (call, document)
+/// that evaluation's matches reach, so it is bounded by the trees matched. The
+/// run-wide cache is bounded only because it lives for the whole run.
+pub(super) struct EvaluationScope<'f, 't> {
+    /// The frame of the instruction being evaluated.
+    frame: &'f Frame<'t>,
+    /// By predicate: the sequences by parent, or `None` if the step's sequence
+    /// depends on the candidate even within one evaluation.
+    placements: RefCell<HashMap<ExprId, Option<HashMap<ParentSlot, Placement>>>>,
+    /// What each `id()` / `key()` anchor reading a local selected, per
+    /// document.
+    selections: RefCell<IdKeySelections<'t>>,
+}
+
+impl<'f, 't> EvaluationScope<'f, 't> {
+    /// An empty scope for one evaluation of an instruction running in `frame`.
+    pub(super) fn new(frame: &'f Frame<'t>) -> Self {
+        EvaluationScope {
+            frame,
+            placements: RefCell::new(HashMap::new()),
+            selections: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// The environment to match in: this scope, and its frame.
+    fn env(&self) -> MatchEnv<'_, 't> {
+        MatchEnv {
+            frame: self.frame,
+            scope: Some(self),
+        }
     }
 }
 

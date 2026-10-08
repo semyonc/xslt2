@@ -299,10 +299,25 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                 Ok(XPathValue::string(String::new()))
             }
             XsltFn::Key => self.key(ctx, args),
-            XsltFn::CurrentGroup | XsltFn::CurrentGroupingKey => Err(XsltError::not_implemented(
-                format!("{}()", which.name()),
-                "M2g",
-            )),
+            // §14.1: "While an xsl:for-each-group instruction is being
+            // evaluated, the current group will be non-empty. At other times,
+            // it will be an empty sequence." Like `current()`, these read the
+            // XSLT half of the context, which nested XPath scopes (predicates,
+            // `/` steps) do not change.
+            XsltFn::CurrentGroup => Ok(match &self.cx.group {
+                Some(group) => XPathValue::from_sequence(group.items.clone()),
+                None => XPathValue::empty(),
+            }),
+            // §14.2: "While an xsl:for-each-group instruction with a group-by
+            // or group-adjacent attribute is being evaluated, the current
+            // grouping key will be a single atomic value. At other times, it
+            // will be the empty sequence."
+            XsltFn::CurrentGroupingKey => {
+                Ok(match self.cx.group.as_ref().and_then(|g| g.key.clone()) {
+                    Some(key) => XPathValue::from_atomic(key),
+                    None => XPathValue::empty(),
+                })
+            }
             XsltFn::RegexGroup => Err(XsltError::not_implemented("regex-group()", "M2h")),
             // §16.4, §16.5. These are in the catalog as stubs only, so that a
             // call to one is reported as a missing feature rather than as an
@@ -461,7 +476,12 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
         // value of the argument".
         let sought = xsd_schema::xpath::functions::atomize_sequence(value)
             .map_err(|e| self.run.xpath_error(e))?;
-        let nodes = self.run.key_lookup(key, sought, &root, top.as_ref())?;
+        // The key specifier is evaluated with the current group of this call
+        // (see `Transformation::key_lookup`).
+        let group = self.cx.group.as_ref();
+        let nodes = self
+            .run
+            .key_lookup(key, sought, &root, top.as_ref(), group)?;
         Ok(XPathValue::from_sequence(
             nodes.into_iter().map(XmlItem::Node).collect(),
         ))

@@ -432,12 +432,8 @@ fn every_notimpl_names_its_sub_milestone() {
         |content: &str| format!(r#"<xsl:template match="/"><out>{content}</out></xsl:template>"#);
     let cases: Vec<(String, &str, &str)> = vec![
         // compile/instructions.rs: the instruction table. (`xsl:sort` and
-        // `xsl:perform-sort` were M2d's rows until M2d implemented them.)
-        (
-            template(r#"<xsl:for-each-group select="*" group-by="."/>"#),
-            "xsl:for-each-group",
-            "M2g",
-        ),
+        // `xsl:perform-sort` were M2d's rows until M2d implemented them;
+        // `xsl:for-each-group` was M2g's until M2g — `tests/m2g_grouping.rs`.)
         (
             template(r#"<xsl:analyze-string select="'a'" regex="a"/>"#),
             "xsl:analyze-string",
@@ -479,17 +475,8 @@ fn every_notimpl_names_its_sub_milestone() {
             "M3a",
         ),
         // runtime/functions.rs: the §16 evaluator.
-        // (key() was NOT-IMPL until M2f — `tests/m2f_keys.rs`.)
-        (
-            template(r#"<xsl:value-of select="current-group()"/>"#),
-            "current-group()",
-            "M2g",
-        ),
-        (
-            template(r#"<xsl:value-of select="current-grouping-key()"/>"#),
-            "current-grouping-key()",
-            "M2g",
-        ),
+        // (key() was NOT-IMPL until M2f — `tests/m2f_keys.rs`; current-group()
+        // and current-grouping-key() until M2g — `tests/m2g_grouping.rs`.)
         (
             template(r#"<xsl:value-of select="regex-group(1)"/>"#),
             "regex-group()",

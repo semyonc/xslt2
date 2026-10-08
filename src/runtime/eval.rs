@@ -124,6 +124,10 @@ impl<'a, 't> Transformation<'a, 't> {
                 Ok(())
             }
 
+            InstructionKind::ForEachGroup { .. } => {
+                self.for_each_group(instruction, frame, cx, out)
+            }
+
             // §13.2: "The result of the xsl:perform-sort instruction is the
             // result of sorting its initial sequence using its contained sort
             // key specification."
