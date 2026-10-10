@@ -117,6 +117,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     // Settled by `settle_key_group_dependence` once every
                     // key is known.
                     observes_group: false,
+                    observes_captures: false,
                 });
             }
         }
@@ -132,16 +133,23 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     /// key and type of its sequence constructor, at any depth. A function call
     /// is seen by its expanded name (`XPathExpr::function_calls`, the name the
     /// call was bound to): `current-group()` and `current-grouping-key()`
-    /// read the group; `key()` evaluates another specifier with it. A call to
-    /// a stylesheet function is neither: §14.3 "During the evaluation of a
+    /// read the group; `regex-group()` reads the current captured substrings
+    /// (§15.2); `key()` evaluates another specifier with both. A call to a
+    /// stylesheet function is none of these: §14.3 "During the evaluation of a
     /// stylesheet function, the current group and current grouping key are set
-    /// to the empty sequence".
+    /// to the empty sequence", and §15.2 empties the captured substrings
+    /// during "a stylesheet function" too.
     ///
     /// The instructions of a sequence constructor that run other code with the
     /// caller's current group are the template invocations and the attribute
     /// sets (`instruction_reaches_group`); a template called from a key
-    /// specifier may read the group, so such a specifier counts as reading
-    /// it. Global variables do not: they are evaluated with no group.
+    /// specifier may read the group and the captured substrings, so such a
+    /// specifier counts as reading both. Global variables do not: they are
+    /// evaluated with neither.
+    ///
+    /// The test is by name and conservative: a `regex-group()` call inside an
+    /// `xsl:analyze-string` of the specifier itself reads that instruction's
+    /// own substrings, not the caller's, but still counts.
     fn group_reach(&self, specifier: &ValueSource, first_expr: usize) -> GroupReach {
         let mut reach = GroupReach::default();
         for compiled in &self.exprs[first_expr..] {
@@ -151,6 +159,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 }
                 match call.local_name.as_str() {
                     "current-group" | "current-grouping-key" => reach.reads_group = true,
+                    "regex-group" => reach.reads_captures = true,
                     "key" => reach.calls_key = true,
                     _ => {}
                 }
@@ -159,7 +168,13 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         if let ValueSource::Content(body) = specifier {
             visit(body, &mut |instruction| {
                 if instruction_reaches_group(&instruction.kind) {
+                    // A template or an attribute set runs with the caller's
+                    // current group *and* captured substrings (§15.2:
+                    // "unaffected through calls of xsl:apply-templates,
+                    // xsl:call-template, xsl:apply-imports or xsl:next-match,
+                    // or by expansion of named attribute sets").
                     reach.reads_group = true;
+                    reach.reads_captures = true;
                 }
             });
         }
@@ -174,16 +189,21 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     /// `key()` call asks for is an expression, so any key may be reached, and
     /// through any chain of `key()` calls — every chain that reaches the group
     /// ends at a key that reads it.
+    ///
+    /// The current captured substrings (§15.2) are settled the same way, into
+    /// [`Key::observes_captures`].
     pub(super) fn settle_key_group_dependence(&mut self) {
-        let any_reads = self
-            .keys
-            .iter()
-            .flat_map(|key| &key.definitions)
-            .any(|definition| definition.group_reach.reads_group);
+        let definitions = || self.keys.iter().flat_map(|key| &key.definitions);
+        let any_reads_group = definitions().any(|d| d.group_reach.reads_group);
+        let any_reads_captures = definitions().any(|d| d.group_reach.reads_captures);
         for key in &mut self.keys {
             key.observes_group = key.definitions.iter().any(|definition| {
                 definition.group_reach.reads_group
-                    || (any_reads && definition.group_reach.calls_key)
+                    || (any_reads_group && definition.group_reach.calls_key)
+            });
+            key.observes_captures = key.definitions.iter().any(|definition| {
+                definition.group_reach.reads_captures
+                    || (any_reads_captures && definition.group_reach.calls_key)
             });
         }
     }
@@ -228,12 +248,15 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
 }
 
 /// Whether `kind` runs code other than its own expressions and sequence
-/// constructors with the caller's current group: a template invocation (§5.4.4
-/// clears the current group for "calls on stylesheet functions" only, so a
-/// template sees it), or the expansion of attribute sets (evaluated in the
-/// caller's context, `runtime/eval.rs`). Everything else an instruction
-/// evaluates is an expression or a sequence constructor of its own, which
-/// [`Builder::group_reach`] sees anyway.
+/// constructors with the caller's current group and captured substrings: a
+/// template invocation (§5.4.4 clears the current group for "calls on
+/// stylesheet functions" only, so a template sees it; §15.2 leaves the
+/// captured substrings "unaffected through calls of xsl:apply-templates,
+/// xsl:call-template, xsl:apply-imports or xsl:next-match"), or the expansion
+/// of attribute sets (evaluated in the caller's context, `runtime/eval.rs`).
+/// Everything else an instruction evaluates is an expression or a sequence
+/// constructor of its own, which [`Builder::group_reach`] sees anyway — the
+/// bodies of `xsl:analyze-string` included.
 ///
 /// Exhaustive on purpose: a new instruction has to be classified here.
 fn instruction_reaches_group(kind: &InstructionKind) -> bool {
@@ -247,6 +270,7 @@ fn instruction_reaches_group(kind: &InstructionKind) -> bool {
         | InstructionKind::Copy { attr_sets, .. } => !attr_sets.is_empty(),
         InstructionKind::ForEach { .. }
         | InstructionKind::ForEachGroup { .. }
+        | InstructionKind::AnalyzeString { .. }
         | InstructionKind::PerformSort { .. }
         | InstructionKind::If { .. }
         | InstructionKind::Choose { .. }

@@ -334,7 +334,8 @@ impl<'a, 't> Transformation<'a, 't> {
     /// stack with no template invocation or function call in between: the
     /// built-in template rules, a key index build (`runtime/keys.rs`), the
     /// evaluation of a global variable, the expansion of an attribute set
-    /// that uses another.
+    /// that uses another, the compilation of a computed regular expression
+    /// (`runtime/analyze.rs`).
     ///
     /// A count of nested calls cannot stand in for this, because the stack one
     /// call uses depends on its body — an `xsl:variable` holding nested literal

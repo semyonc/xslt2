@@ -285,6 +285,45 @@ pub enum Grouping {
     EndingWith(PatternId),
 }
 
+/// Where the regular expression of an `xsl:analyze-string` comes from
+/// (§15.1).
+///
+/// A compiled regular expression is opaque: it tells the effective `regex`
+/// and `flags` it was compiled from, and nothing of the engine behind it
+/// (`regexml`, which is not part of this crate's API).
+///
+/// ```
+/// use xslt2::model::RegexSource;
+///
+/// fn effective(regex: &RegexSource) -> Option<(&str, &str)> {
+///     match regex {
+///         RegexSource::Fixed(compiled) => Some((compiled.pattern(), compiled.flags())),
+///         RegexSource::Computed { .. } => None,
+///     }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use xslt2::model::RegexSource;
+///
+/// fn engine(regex: &RegexSource) {
+///     if let RegexSource::Fixed(compiled) = regex {
+///         let _ = compiled.regex(); // crate-private
+///     }
+/// }
+/// ```
+pub enum RegexSource {
+    /// Neither `regex` nor `flags` contains an expression: the regular
+    /// expression was compiled once, by the compiler.
+    Fixed(std::sync::Arc<crate::regex::CompiledRegex>),
+    /// `regex` or `flags` is computed: both are evaluated, and the regular
+    /// expression compiled (or taken from the run's cache), each time the
+    /// instruction is evaluated. An absent `flags` is the zero-length string
+    /// (§15.1: "If the attribute is omitted, the effect is the same as
+    /// supplying a zero-length string").
+    Computed { regex: Avt, flags: Option<Avt> },
+}
+
 /// The value of a variable-binding element (§9.2).
 pub enum VarValue {
     /// `select="…"` — the value is the expression's result.
@@ -525,6 +564,22 @@ pub enum InstructionKind {
         body: Body,
         terminate: Avt,
     },
+    /// `xsl:analyze-string` (§15.1).
+    ///
+    /// > The xsl:analyze-string instruction takes as input a string (the
+    /// > result of evaluating the expression in the select attribute) and a
+    /// > regular expression (the effective value of the regex attribute).
+    ///
+    /// An absent `xsl:matching-substring` or `xsl:non-matching-substring` is
+    /// `None`: "If the element is absent, the effect is the same as if it were
+    /// present with empty content." The `xsl:fallback` children are not kept:
+    /// they "are ignored by an XSLT 2.0 processor".
+    AnalyzeString {
+        select: ExprId,
+        regex: RegexSource,
+        matching: Option<Body>,
+        non_matching: Option<Body>,
+    },
     /// `xsl:fallback` outside an unknown extension instruction: ignored
     /// (§18.2.3 "the xsl:fallback instruction … is ignored").
     Fallback,
@@ -640,6 +695,13 @@ pub struct Key {
     /// has an index per document **and current group**; any other key, one
     /// per document for the run.
     pub observes_group: bool,
+    /// Whether the key specifier of some declaration may observe the current
+    /// captured substrings (§15.2) of the `key()` call it is evaluated for:
+    /// one declaration's [`GroupReach::reads_captures`], or a
+    /// [`GroupReach::calls_key`] while some key of the stylesheet reads them.
+    /// Settled with [`observes_group`](Self::observes_group). Such a key has
+    /// an index per document and `xsl:matching-substring` activation.
+    pub observes_captures: bool,
 }
 
 /// One `xsl:key` declaration (§16.3.1).
@@ -657,14 +719,18 @@ pub struct KeyDefinition {
 }
 
 /// What a key specifier may observe of the current group and the current
-/// grouping key (§14.1, §14.2) of the `key()` call it is evaluated for, as far
-/// as the compiler can tell — conservatively: `true` means "may".
+/// grouping key (§14.1, §14.2), and of the current captured substrings
+/// (§15.2), of the `key()` call it is evaluated for, as far as the compiler
+/// can tell — conservatively: `true` means "may".
 ///
 /// §16.3.1 changes only the focus ("The expression will be evaluated with the
 /// node that matches the pattern as the context node"), and §5.4.4 clears the
 /// current group and grouping key only for "calls on stylesheet functions", so
 /// the specifier evaluated for a call made inside an `xsl:for-each-group`
-/// sees that group.
+/// sees that group. §5.4.4's table clears the current captured substrings for
+/// "xsl:non-matching-substring; calls on stylesheet functions" and §15.2
+/// empties them for "a pattern or a stylesheet function", so the same holds
+/// for them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GroupReach {
     /// The specifier calls `current-group()` or `current-grouping-key()`, or
@@ -673,8 +739,15 @@ pub struct GroupReach {
     /// expands an attribute set — both run with the caller's current group.
     /// A call to a stylesheet function does not count: its body has none.
     pub reads_group: bool,
+    /// The same for the current captured substrings (§15.2): the specifier
+    /// calls `regex-group()`, or its sequence constructor invokes a template
+    /// or expands an attribute set — §15.2: "The value of the current
+    /// captured substrings is unaffected through calls of
+    /// xsl:apply-templates, xsl:call-template, xsl:apply-imports or
+    /// xsl:next-match, or by expansion of named attribute sets."
+    pub reads_captures: bool,
     /// The specifier calls `key()`, whose own specifier is then evaluated with
-    /// the same current group.
+    /// the same current group and captured substrings.
     pub calls_key: bool,
 }
 

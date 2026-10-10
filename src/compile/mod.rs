@@ -6,6 +6,7 @@
 //! the caller's [`NameTable`] and [`XsltFunctions`], so the arena is dropped as
 //! soon as `compile_*` returns.
 
+mod analyze;
 mod attributes;
 mod avt;
 pub(crate) mod checks;

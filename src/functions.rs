@@ -1259,34 +1259,24 @@ pub fn system_property(local: &str) -> &'static str {
 /// > The function returns true if and only if … the expanded-QName identifies
 /// > an instruction that the implementation supports.
 ///
-/// The XSLT declarations are not instructions, so they answer false.
+/// Every instruction of the static-checking table (`compile::checks`, one row
+/// per XSLT 2.0 element) except those in `NOT_YET_IMPLEMENTED_INSTRUCTIONS`.
+/// The XSLT declarations and the subordinate elements (`xsl:sort`,
+/// `xsl:matching-substring`, …) are not instructions, so they answer false.
+/// (A supported instruction may still have an option a later milestone
+/// adds — a collation, a `type` — but the instruction itself runs.)
 pub fn element_available(uri: &str, local: &str) -> bool {
     uri == crate::names::XSLT_NS
-        && matches!(
-            local,
-            "apply-templates"
-                | "apply-imports"
-                | "attribute"
-                | "call-template"
-                | "choose"
-                | "comment"
-                | "copy"
-                | "copy-of"
-                | "document"
-                | "element"
-                | "fallback"
-                | "for-each"
-                | "if"
-                | "message"
-                | "namespace"
-                | "next-match"
-                | "processing-instruction"
-                | "sequence"
-                | "text"
-                | "value-of"
-                | "variable"
-        )
+        && crate::compile::checks::is_instruction(local)
+        && !NOT_YET_IMPLEMENTED_INSTRUCTIONS.contains(&local)
 }
+
+/// The XSLT 2.0 instructions this processor recognises but does not run yet:
+/// each compiles to an `XSLT2-NOTIMPL` instruction (`compile/instructions.rs`)
+/// — `xsl:number` (M3c) and `xsl:result-document` (M3b). Remove a name here
+/// when its milestone implements it: `tests/m2h_regex.rs` pins the answer for
+/// all 26 instructions and checks that these two still raise `XSLT2-NOTIMPL`.
+const NOT_YET_IMPLEMENTED_INSTRUCTIONS: &[&str] = &["number", "result-document"];
 
 /// §18.1.1: whether one of the processor's own functions of this name is
 /// available — at `arity`, or at any arity when `arity` is `None`.
@@ -1335,18 +1325,32 @@ pub fn function_available(
 pub fn arity_argument<N: xsd_schema::navigator::DomNavigator>(
     value: Option<&xsd_schema::xpath::functions::XPathValue<N>>,
 ) -> Result<Option<Option<usize>>, crate::error::XsltError> {
-    use crate::error::XsltError;
-    use xsd_schema::types::XmlTypeCode;
     let Some(value) = value else {
         return Ok(None);
     };
+    let integer = integer_argument(value, "the $arity argument of function-available()")?;
+    Ok(Some(integer.and_then(|n| usize::try_from(n).ok())))
+}
+
+/// An argument whose declared type is `xs:integer`, after XPath 2.0 §3.1.5's
+/// function conversion rules (see [`arity_argument`] for the rules quoted):
+/// the integer, or `Ok(None)` for one outside the `i64` range. `what` names the
+/// argument in the XPTY0004 message.
+///
+/// `function-available($name, $arity)` (§18.1.1) and `regex-group($n)`
+/// (§15.2) use it.
+pub fn integer_argument<N: xsd_schema::navigator::DomNavigator>(
+    value: &xsd_schema::xpath::functions::XPathValue<N>,
+    what: &str,
+) -> Result<Option<i64>, crate::error::XsltError> {
+    use crate::error::XsltError;
+    use xsd_schema::types::XmlTypeCode;
     let atoms = xsd_schema::xpath::functions::atomize_sequence(value.clone())?;
     let [atom] = atoms.as_slice() else {
         return Err(XsltError::new(
             "XPTY0004",
             format!(
-                "the $arity argument of function-available() must be a single xs:integer, \
-                 not a sequence of {} atomic values",
+                "{what} must be a single xs:integer, not a sequence of {} atomic values",
                 atoms.len()
             ),
         ));
@@ -1358,20 +1362,13 @@ pub fn arity_argument<N: xsd_schema::navigator::DomNavigator>(
             return Err(XsltError::new(
                 "XPTY0004",
                 format!(
-                    "the $arity argument of function-available() must be an xs:integer, not \
-                     a value of type xs:{}",
+                    "{what} must be an xs:integer, not a value of type xs:{}",
                     code.local_name().unwrap_or("anyAtomicType")
                 ),
             ))
         }
     };
-    Ok(Some(
-        integer
-            .to_string_value()
-            .parse::<i64>()
-            .ok()
-            .and_then(|n| usize::try_from(n).ok()),
-    ))
+    Ok(integer.to_string_value().parse::<i64>().ok())
 }
 
 /// `xs:integer` and the built-in types derived from it — the values that match

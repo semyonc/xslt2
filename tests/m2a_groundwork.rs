@@ -433,12 +433,8 @@ fn every_notimpl_names_its_sub_milestone() {
     let cases: Vec<(String, &str, &str)> = vec![
         // compile/instructions.rs: the instruction table. (`xsl:sort` and
         // `xsl:perform-sort` were M2d's rows until M2d implemented them;
-        // `xsl:for-each-group` was M2g's until M2g — `tests/m2g_grouping.rs`.)
-        (
-            template(r#"<xsl:analyze-string select="'a'" regex="a"/>"#),
-            "xsl:analyze-string",
-            "M2h",
-        ),
+        // `xsl:for-each-group` was M2g's until M2g — `tests/m2g_grouping.rs`;
+        // `xsl:analyze-string` was M2h's until M2h — `tests/m2h_regex.rs`.)
         (template(r#"<xsl:number/>"#), "xsl:number", "M3c"),
         (
             template(r#"<xsl:result-document href="x.xml"/>"#),
@@ -476,12 +472,8 @@ fn every_notimpl_names_its_sub_milestone() {
         ),
         // runtime/functions.rs: the §16 evaluator.
         // (key() was NOT-IMPL until M2f — `tests/m2f_keys.rs`; current-group()
-        // and current-grouping-key() until M2g — `tests/m2g_grouping.rs`.)
-        (
-            template(r#"<xsl:value-of select="regex-group(1)"/>"#),
-            "regex-group()",
-            "M2h",
-        ),
+        // and current-grouping-key() until M2g — `tests/m2g_grouping.rs`;
+        // regex-group() until M2h — `tests/m2h_regex.rs`.)
         // (A fragment identifier in document() was NOT-IMPL until M2i, which
         // made it XTRE1160 — `tests/m2i_core_defects.rs`.)
         // (pattern.rs: the key()/id() pattern was NOT-IMPL until M2f —

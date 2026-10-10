@@ -643,6 +643,14 @@ pub(super) fn spec_of(local: &str) -> Option<&'static ElementSpec> {
     TABLE.iter().find(|spec| spec.local == local)
 }
 
+/// Whether `xsl:<local>` is an XSLT 2.0 instruction: an element whose syntax
+/// summary says "Category: instruction" (`xsl:variable`'s says both
+/// declaration and instruction). The basis of `element-available()`
+/// (`functions::element_available`).
+pub(crate) fn is_instruction(local: &str) -> bool {
+    spec_of(local).is_some_and(|spec| spec.category.in_sequence())
+}
+
 /// The code for an attribute of `xsl:<element>` whose value is not one of the
 /// permitted values for it.
 ///
@@ -1429,6 +1437,15 @@ pub(super) fn visit(body: &Body, f: &mut impl FnMut(&Instruction)) {
                     visit(body, f);
                 }
                 if let Some(body) = otherwise {
+                    visit(body, f);
+                }
+            }
+            InstructionKind::AnalyzeString {
+                matching,
+                non_matching,
+                ..
+            } => {
+                for body in [matching, non_matching].into_iter().flatten() {
                     visit(body, f);
                 }
             }

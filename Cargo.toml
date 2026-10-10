@@ -18,6 +18,10 @@ xsd-schema = { path = "../xsd-schema", features = ["xsd11"] }
 bumpalo = "3"
 # Typed keys for the document store (DocId).
 slotmap = "1.0"
+# The regular-expression engine behind xsl:analyze-string (§15). The same
+# requirement as xsd-schema's, so the graph keeps one copy and a local
+# `[patch.crates-io]` of it applies to both.
+regexml = "0.2"
 
 [dev-dependencies]
 pretty_assertions = "1.4"

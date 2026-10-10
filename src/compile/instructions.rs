@@ -437,17 +437,12 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     milestone: "M3c",
                 })
             }
-            "analyze-string" | "result-document" => {
-                Ok(InstructionKind::NotImplemented {
-                    feature: format!("xsl:{local}"),
-                    // The owner of each, per the roadmap's §4.
-                    milestone: match local.as_str() {
-                        "analyze-string" => "M2h",
-                        "result-document" => "M3b",
-                        _ => unreachable!("the arm above lists exactly these elements"),
-                    },
-                })
-            }
+            "analyze-string" => self.analyze_string(nav, module_id, ctx, &loc),
+            "result-document" => Ok(InstructionKind::NotImplemented {
+                feature: format!("xsl:{local}"),
+                // The owner, per the roadmap's §4.
+                milestone: "M3b",
+            }),
             other => {
                 // §3.9: in a forwards-compatible region an unknown XSLT
                 // instruction becomes its xsl:fallback children; with no

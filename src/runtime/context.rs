@@ -67,6 +67,44 @@ pub(crate) struct CurrentGroup<'t> {
     pub(crate) serial: u64,
 }
 
+/// The current captured substrings while an `xsl:matching-substring` is
+/// evaluated (§15.2).
+///
+/// > \[Definition: While the xsl:matching-substring instruction is active, a
+/// > set of current captured substrings is available, corresponding to the
+/// > parenthesized sub-expressions of the regular expression.\]
+pub(crate) struct CapturedSubstrings {
+    /// Indexed by group number: 0 is the whole match ("The zeroeth captured
+    /// substring is the string that matches the entire regex"), N the
+    /// subexpression "contained by the Nth left parenthesis in the regex".
+    /// `None` for a group that did not take part in the match; the vector
+    /// ends at the highest-numbered group that did, so a missing entry is a
+    /// group that does not exist or did not take part — both are "" to
+    /// `regex-group()`.
+    pub(crate) groups: Vec<Option<String>>,
+    /// A number no other activation of the run has — shared with the current
+    /// group's (`CurrentGroup::serial`), so that whichever of the two was
+    /// created later has the larger number: the key indexes built while this
+    /// activation is current are kept under it (`runtime/keys.rs`), and
+    /// dropped when its `xsl:matching-substring` ends.
+    pub(crate) serial: u64,
+}
+
+impl CapturedSubstrings {
+    /// `regex-group($n)` (§15.2): "The function returns the zero-length
+    /// string if there is no captured substring with the relevant number" —
+    /// a negative number, a group the regular expression does not have, one
+    /// that "did not match any part of the input string", or one that
+    /// "matched a zero-length substring".
+    pub(crate) fn group(&self, n: i64) -> &str {
+        usize::try_from(n)
+            .ok()
+            .and_then(|n| self.groups.get(n))
+            .and_then(Option::as_deref)
+            .unwrap_or("")
+    }
+}
+
 /// The XSLT half of the dynamic context (§5.4, §9.1).
 #[derive(Clone)]
 pub struct XsltContext<'t> {
@@ -91,6 +129,18 @@ pub struct XsltContext<'t> {
     /// [`empty`](Self::empty) has none: a stylesheet function's body, a global
     /// variable, a pattern (a key's `match` included).
     pub(crate) group: Option<Rc<CurrentGroup<'t>>>,
+    /// The current captured substrings (§15.2); `None` when they are the
+    /// empty sequence. Set by `xsl:matching-substring`, emptied by
+    /// `xsl:non-matching-substring` — and, by being absent from a context
+    /// built from [`empty`](Self::empty), during "a pattern or a stylesheet
+    /// function" and a global variable's evaluation (§5.4.3's initial value).
+    /// Everything else carries it through: "The value of the current
+    /// captured substrings is unaffected through calls of
+    /// xsl:apply-templates, xsl:call-template, xsl:apply-imports or
+    /// xsl:next-match, or by expansion of named attribute sets." A key
+    /// specifier evaluated for a `key()` call sees the call's
+    /// (`Transformation::key_lookup`).
+    pub(crate) captured: Option<Rc<CapturedSubstrings>>,
 }
 
 impl<'t> XsltContext<'t> {
@@ -104,6 +154,7 @@ impl<'t> XsltContext<'t> {
             current_rule: None,
             tunnel: Rc::new(TunnelMap::default()),
             group: None,
+            captured: None,
         }
     }
 

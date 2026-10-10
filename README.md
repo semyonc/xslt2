@@ -3,14 +3,14 @@
 Schema-aware XSLT 2.0 processor in Rust, built on the
 [`xsd-schema`](../xsd-schema) validator and its XPath 2.0 engine.
 
-Status: **M2 — full language, in progress** (M1, M2a–M2g, M2i, M2j, M2l done). Stylesheets are loaded,
+Status: **M2 — full language, in progress** (M1, M2a–M2j, M2l done). Stylesheets are loaded,
 compiled and run: the module graph with import precedence, the lexical static contexts of §5.4.1,
 template rules with the §6.4 priorities and conflict resolution, the built-in rules,
 `xsl:apply-imports` and `xsl:next-match`, variables and parameters (tunnel included), attribute
 value templates, attribute sets, the node constructors, `xsl:copy`/`xsl:copy-of`, `xsl:message`,
 `xsl:sort` / `xsl:perform-sort` with collations, `xsl:function`, `xsl:key` with `key()` and the `id()` /
-`key()` patterns, `xsl:for-each-group`, and the XML and text output methods. `xsl:analyze-string`, `xsl:number`, `format-number` and
-the HTML/XHTML output methods belong to later milestones and report the internal `XSLT2-NOTIMPL`
+`key()` patterns, `xsl:for-each-group`, `xsl:analyze-string` with `regex-group()`, and the XML and text output methods.
+`xsl:number`, `format-number` and the HTML/XHTML output methods belong to later milestones and report the internal `XSLT2-NOTIMPL`
 code rather than a wrong answer.
 
 ```rust
@@ -48,13 +48,13 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 | | |
 |---|---|
 | XSLT 2.0-applicable | 6,619 |
-| excluded (documented in `tests/xslts/filter.rs`) | 32 |
-| runnable (dependencies satisfied) | 5,719 |
-| pass | 4,864 |
-| fail / wrongError / harnessError | 68 / 0 / 3 |
-| not implemented (`XSLT2-NOTIMPL`, M2–M4) | 784 |
-| pass rate over runnable | 85.05% |
-| headline (basic profile, non-regex families) | 3,717 / 4,210 = **88.3%** |
+| excluded (documented in `tests/xslts/filter.rs`) | 61 |
+| runnable (dependencies satisfied) | 5,690 |
+| pass | 5,013 |
+| fail / wrongError / harnessError | 69 / 0 / 3 |
+| not implemented (`XSLT2-NOTIMPL`, M2k–M4) | 605 |
+| pass rate over runnable | 88.10% |
+| headline (basic profile, non-regex families) | 3,770 / 4,210 = **89.6%** |
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the
@@ -77,7 +77,9 @@ registry, `../../XSLT2_M2D_REPORT.md`) took it to 4,522, and M2e (`xsl:function`
 more documented exclusions) to 4,628, and M2f (`xsl:key`, `key()`, `id()` / `key()` patterns,
 `../../XSLT2_M2F_REPORT.md`) to 4,786 of 5,721 on 2026-10-04; M2l (pattern predicates decided per candidate, a
 performance change) kept it there, and M2g (`xsl:for-each-group`, `../../XSLT2_M2G_REPORT.md`; two more documented
-exclusions) took it to 4,864 of 5,719 on 2026-10-08.
+exclusions) took it to 4,864 of 5,719 on 2026-10-08, and M2h (`xsl:analyze-string`, `regex-group()`,
+`../../XSLT2_M2H_REPORT.md`) to 5,013 of 5,690 on 2026-10-10 — 29 `misc/regex-classes` general-category cases are
+excluded because their reference results pin Unicode 3.1 / 5.2 / 6.0 and the regex backend implements Unicode 15.1.
 
 The sixteen test-sets M1 targets:
 

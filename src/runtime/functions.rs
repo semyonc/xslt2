@@ -318,7 +318,26 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                     None => XPathValue::empty(),
                 })
             }
-            XsltFn::RegexGroup => Err(XsltError::not_implemented("regex-group()", "M2h")),
+            // §15.2: "regex-group($group-number as xs:integer) as xs:string" —
+            // the Nth captured substring of the current match, "" whenever
+            // there is none: outside xsl:matching-substring (the current
+            // captured substrings are then the empty sequence), for a negative
+            // or non-existent group, and for a group that did not take part
+            // in the match or matched a zero-length string. Like `current()`
+            // it reads the XSLT half of the context, so a predicate or a path
+            // step inside the expression does not change the answer.
+            XsltFn::RegexGroup => {
+                let argument = args.first().cloned().unwrap_or_else(XPathValue::empty);
+                let n = crate::functions::integer_argument(
+                    &argument,
+                    "the argument of regex-group() ($group-number as xs:integer)",
+                )?;
+                let group = match (&self.cx.captured, n) {
+                    (Some(captured), Some(n)) => captured.group(n).to_string(),
+                    _ => String::new(),
+                };
+                Ok(XPathValue::string(group))
+            }
             // §16.4, §16.5. These are in the catalog as stubs only, so that a
             // call to one is reported as a missing feature rather than as an
             // unknown function (XPST0017) at compile time.
@@ -476,12 +495,15 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
         // value of the argument".
         let sought = xsd_schema::xpath::functions::atomize_sequence(value)
             .map_err(|e| self.run.xpath_error(e))?;
-        // The key specifier is evaluated with the current group of this call
-        // (see `Transformation::key_lookup`).
-        let group = self.cx.group.as_ref();
+        // The key specifier is evaluated with the current group and captured
+        // substrings of this call (see `Transformation::key_lookup`).
+        let caller = super::keys::KeyCaller {
+            group: self.cx.group.as_ref(),
+            captured: self.cx.captured.as_ref(),
+        };
         let nodes = self
             .run
-            .key_lookup(key, sought, &root, top.as_ref(), group)?;
+            .key_lookup(key, sought, &root, top.as_ref(), caller)?;
         Ok(XPathValue::from_sequence(
             nodes.into_iter().map(XmlItem::Node).collect(),
         ))
@@ -685,7 +707,7 @@ fn single_string<N: DomNavigator>(value: Option<&XPathValue<N>>) -> Option<Strin
 /// conversions of XPath 2.0 §3.1.5: a string (or a type derived from it), an
 /// `xs:untypedAtomic` (cast to `xs:string`), or an `xs:anyURI` (promoted to
 /// `xs:string`, §B.1).
-fn converts_to_string(value: &XmlValue) -> bool {
+pub(super) fn converts_to_string(value: &XmlValue) -> bool {
     let value = match &value.value {
         XmlValueKind::Union(inner) => inner,
         _ => value,
@@ -703,7 +725,7 @@ fn type_name(value: &XmlValue) -> &'static str {
 }
 
 /// An atomized argument, described for a message.
-fn describe_atoms(atoms: &[XmlValue]) -> String {
+pub(super) fn describe_atoms(atoms: &[XmlValue]) -> String {
     match atoms {
         [] => "an empty sequence".to_string(),
         [atom] => format!("a value of type xs:{}", type_name(atom)),

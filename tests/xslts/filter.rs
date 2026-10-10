@@ -78,7 +78,37 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     // ── Unicode-version-dependent regex classes ──
     ("regex-syntax-xslt20-0984", "expects U+2308/U+2309 in \\w = [#x0000-#x10FFFF]-[\\p{P}\\p{Z}\\p{C}] (XSD 1.0 2E §F.1.1); in Unicode 16.0 they are Ps/Pe, i.e. \\p{P} (verified with Python unicodedata 16.0.0), so the case pins an older Unicode (that they were Sm until Unicode 6.3: INFERRED, not checked against the historical data). The Unicode version is implementation-defined, the latest recommended (F&O 1.0 §1.1; XSLT 2.0 [Unicode] reference)"),
     ("regex-syntax-xslt20-0985", "expects U+1369..U+1371 in \\d = \\p{Nd} (XSD 1.0 2E §F.1.1); in Unicode 16.0 they are No (verified with Python unicodedata 16.0.0), so the case pins an older Unicode (that they were Nd until Unicode 4.1: INFERRED, not checked against the historical data). The Unicode version is implementation-defined, the latest recommended (F&O 1.0 §1.1; XSLT 2.0 [Unicode] reference)"),
-    ("regex-syntax-xslt20-0987", "Unicode-vintage character class, excluded by project decision (2026-10-03, cluster L-REGEX-UNICODE-VINTAGE with 0984/0985). The case expects U+0346 outside \\c, which pins \\c to the NameChar of XML 1.0 Second Edition: F&O 1.0 2E §7.6.1 \"The regular expression syntax and semantics are identical to those defined in [XML Schema Part 2: Datatypes Second Edition]\", whose Appendix F reads \"\\c the set of name characters, those ·match·ed by NameChar\" with a dated link to XML 1.0 2E (WD-xml-2e-20000814); XML 1.0 2E (REC-xml-20001006): NameChar ::= Letter | Digit | '.' | '-' | '_' | ':' | CombiningChar | Extender, CombiningChar ::= [#x0300-#x0345] | …, classes that \"can be derived from the Unicode 2.0 character database\" (all read at w3.org; that the dated 2000-08-14 draft has the same production: INFERRED). U+0346 lies outside it. The regex backend (regexml) uses the XML 1.0 Fifth Edition name characters, [4a] NameChar ::= … [#x0300-#x036F] …, where U+0346 is a name character. Under that normative chain the expectation is the strict XPath 2.0 one, so this is a deliberate exclusion of a dated character class, not a wrong expectation; the strict alternative (\\c and \\i per XML 1.0 2E in the XPath 2.0 regex dialect) is an M2h / regex-dialect item"),
+    ("regex-syntax-xslt20-0987", "Unicode-vintage character class, excluded by project decision (2026-10-03, cluster L-REGEX-UNICODE-VINTAGE with 0984/0985). The case expects U+0346 outside \\c, which pins \\c to the NameChar of XML 1.0 Second Edition: F&O 1.0 2E §7.6.1 \"The regular expression syntax and semantics are identical to those defined in [XML Schema Part 2: Datatypes Second Edition]\", whose Appendix F reads \"\\c the set of name characters, those ·match·ed by NameChar\" with a dated link to XML 1.0 2E (WD-xml-2e-20000814); XML 1.0 2E (REC-xml-20001006): NameChar ::= Letter | Digit | '.' | '-' | '_' | ':' | CombiningChar | Extender, CombiningChar ::= [#x0300-#x0345] | …, classes that \"can be derived from the Unicode 2.0 character database\" (all read at w3.org; that the dated 2000-08-14 draft has the same production: INFERRED). U+0346 lies outside it. The regex backend (regexml) uses the XML 1.0 Fifth Edition name characters, [4a] NameChar ::= … [#x0300-#x036F] …, where U+0346 is a name character. Under that normative chain the expectation is the strict XPath 2.0 one, so this is a deliberate exclusion of a dated character class, not a wrong expectation; the strict alternative (\\c and \\i per XML 1.0 2E in the XPath 2.0 regex dialect) is a regex-dialect item outside M2h, kept excluded by decision"),
+    // ── misc/regex-classes: general categories checked against Unicode 3.1 / 5.2 / 6.0 data (user decision 2026-10-10) ──
+    ("regex-classes-001", X_REGEX_CLASSES_UNICODE_NONCHAR), // C
+    ("regex-classes-003", X_REGEX_CLASSES_UNICODE), // Cf
+    ("regex-classes-004", X_REGEX_CLASSES_UNICODE_NONCHAR), // Cn
+    ("regex-classes-006", X_REGEX_CLASSES_UNICODE), // L
+    ("regex-classes-007", X_REGEX_CLASSES_UNICODE), // Ll
+    ("regex-classes-008", X_REGEX_CLASSES_UNICODE), // Lm
+    ("regex-classes-009", X_REGEX_CLASSES_UNICODE), // Lo
+    ("regex-classes-011", X_REGEX_CLASSES_UNICODE), // Lu
+    ("regex-classes-012", X_REGEX_CLASSES_UNICODE), // M
+    ("regex-classes-013", X_REGEX_CLASSES_UNICODE), // Mc
+    ("regex-classes-014", X_REGEX_CLASSES_UNICODE), // Me
+    ("regex-classes-015", X_REGEX_CLASSES_UNICODE), // Mn
+    ("regex-classes-016", X_REGEX_CLASSES_UNICODE), // N
+    ("regex-classes-017", X_REGEX_CLASSES_UNICODE), // Nd
+    ("regex-classes-018", X_REGEX_CLASSES_UNICODE), // Nl
+    ("regex-classes-019", X_REGEX_CLASSES_UNICODE), // No
+    ("regex-classes-020", X_REGEX_CLASSES_UNICODE), // P
+    ("regex-classes-022", X_REGEX_CLASSES_UNICODE), // Pd
+    ("regex-classes-023", X_REGEX_CLASSES_UNICODE), // Pe
+    ("regex-classes-024", X_REGEX_CLASSES_UNICODE_NONCHAR), // C
+    ("regex-classes-026", X_REGEX_CLASSES_UNICODE), // Po
+    ("regex-classes-027", X_REGEX_CLASSES_UNICODE), // Ps
+    ("regex-classes-028", X_REGEX_CLASSES_UNICODE), // S
+    ("regex-classes-029", X_REGEX_CLASSES_UNICODE), // Sc
+    ("regex-classes-030", X_REGEX_CLASSES_UNICODE), // Sk
+    ("regex-classes-031", X_REGEX_CLASSES_UNICODE), // Sm
+    ("regex-classes-032", X_REGEX_CLASSES_UNICODE), // So
+    ("regex-classes-033", X_REGEX_CLASSES_UNICODE), // Z
+    ("regex-classes-036", X_REGEX_CLASSES_UNICODE), // Zs
     // ── misc/unicode-90: the sixteen version="3.0" cases (the other 1,444 are 2.0) ──
     ("unicode90-001", X_UNICODE90),
     ("unicode90-002", X_UNICODE90),
@@ -105,6 +135,19 @@ const X_EQNAME_OUTPUT: &str = "<xsl:output name=\"Q{…}format2\"> in a version=
 const X_STYLESHEET_WHITESPACE: &str = "the expected assert-xml keeps whitespace-only text that can only come from the stylesheet, which §4.2 removes (\"Any whitespace text node that satisfies both the following conditions is removed from the tree\"); assert-xml compares canonical forms byte for byte (catalog schema), so no conformant processor produces it";
 const X_COPY_WITHOUT_FOCUS: &str = "xsl:copy in the body of a stylesheet function (copy903err.xsl), where §10.3 says \"Within the body of a stylesheet function, the focus is initially undefined; this means that any attempt to reference the context item, context position, or context size is a non-recoverable dynamic error. [XPDY0002]\" — and xsl:copy copies the context item (§11.9.1: \"The xsl:copy instruction provides a way of copying the context item\"). The expected XTTE0945 is an XSLT 3.0 code: it occurs nowhere in the XSLT 2.0 Recommendation, Appendix E (Summary of Error Conditions) included";
 const X_UNICODE90: &str = "version=\"3.0\" stylesheet (unicode90-001.xsl / -002.xsl): the entry point is a template named xsl:initial-template (XTSE0080 under XSLT 2.0), the regex arrives as a static parameter (3.0), and the select uses the XPath 3.0 simple-map operator `!` (absent from the XPath 2.0 grammar)";
+
+/// The text both `regex-classes` justifications share (a macro, so that the second can extend
+/// it with `concat!`).
+macro_rules! regex_classes_unicode {
+    () => {
+        "misc/regex-classes: reclass.xsl matches \\p{X}+ and \\P{X}+ over all 1,112,033 legal code points (9 to 10, 13, 32 to 55295, 57344 to 65533, 65536 to 1114111) and returns <true/> only when the ranges it finds deep-equal one of its reference files, which exist for Unicode 3.1, 5.2 and 6.0 — its own comment: \"Alternative results are acceptable depending on which version of Unicode the processor supports\"; the set declares <unicode-version value=\"6.0\" satisfied=\"true\"/>. The regex backend (regexml on ICU4X 1.5) implements Unicode 15.1 (established at M2h, XSLT2_M2H_REPORT.md §6 and its review: for the 14 classes compared code point by code point, the output equals Python's Unicode 16.0 data except for the characters added in 16.0 and U+1171E, recategorized in 16.0), and every code point at which the result differs from the 6.0 reference is a character assigned or recategorized after Unicode 6.0, so it matches none of the three references. The Unicode version is implementation-defined, the latest recommended (F&O 1.0 §1.1; XSLT 2.0 [Unicode] reference). The 84 block classes (IsBasicLatin …) and the 7 general categories whose result still equals a reference (Cc, Co, Lt, Pc, Pi, Zl, Zp) still run"
+    };
+}
+const X_REGEX_CLASSES_UNICODE: &str = regex_classes_unicode!();
+const X_REGEX_CLASSES_UNICODE_NONCHAR: &str = concat!(
+    regex_classes_unicode!(),
+    ". For C and Cn (cases 001 and 024 test C, 004 Cn) one more difference has nothing to do with later assignments: the 6.0 reference leaves the 64 noncharacters among the legal code points (U+FDD0 to U+FDEF, and U+nFFFE / U+nFFFF for n = 1 to 16; U+FFFE and U+FFFF are not in the tested set) out of the class, while the 3.1 and 5.2 references include them, as the data of every Unicode version does (noncharacters are General_Category Cn: so in the 3.1 and 5.2 references, and in Python unicodedata 16.0.0 and 3.2.0). No version's data reproduces the 6.0 reference for these classes, and data newer than 5.2 cannot reproduce the 3.1 or 5.2 references"
+);
 
 /// Cases whose expected result is a document node with several top-level nodes although the
 /// catalog leaves `<output well-formed>` at its default, "yes" ("Determines whether the output

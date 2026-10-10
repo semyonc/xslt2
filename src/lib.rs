@@ -45,6 +45,7 @@ pub mod names;
 pub mod output;
 pub mod pattern;
 pub mod receiver;
+pub(crate) mod regex;
 pub mod resolver;
 pub mod runtime;
 pub mod store;

@@ -171,7 +171,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 Rc::new(CurrentGroup {
                     items: group.items,
                     key: group.key,
-                    serial: self.next_group_serial(),
+                    serial: self.next_scope_serial(),
                 })
             })
             .collect();
@@ -185,7 +185,7 @@ impl<'a, 't> Transformation<'a, 't> {
         // instruction early.
         let mut keys = self.keys.borrow_mut();
         for group in &groups {
-            keys.forget_group(group.serial);
+            keys.forget_scope(group.serial);
         }
         outcome
     }
@@ -251,16 +251,9 @@ impl<'a, 't> Transformation<'a, 't> {
             self.eval_body(body, frame, &inner, out)?;
             // The group is never current again: its key indexes go now, so
             // that at most the groups being evaluated hold any.
-            self.keys.borrow_mut().forget_group(groups[index].serial);
+            self.keys.borrow_mut().forget_scope(groups[index].serial);
         }
         Ok(())
-    }
-
-    /// A serial number for a new current group ([`CurrentGroup::serial`]).
-    fn next_group_serial(&self) -> u64 {
-        let serial = self.group_serials.get() + 1;
-        self.group_serials.set(serial);
-        serial
     }
 
     /// The collation string grouping keys are compared under (§14.3).

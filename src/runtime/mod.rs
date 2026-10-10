@@ -11,6 +11,7 @@
 //! tunnel parameters — is passed down explicitly, so no `RefCell` is ever
 //! borrowed across an evaluation.
 
+mod analyze;
 mod calls;
 mod content;
 mod context;
@@ -80,10 +81,17 @@ pub struct TransformOptions {
     /// A count cannot bound the stack a call uses, which depends on its body;
     /// [`Self::stack_limit`] does, and the run stops at whichever limit is
     /// reached first. Key index builds, global variables and attribute sets,
-    /// which can also nest, are not counted — each is entered at most once per
-    /// declaration (a key once per document and current group) on any one
-    /// chain — and only
-    /// [`Self::stack_limit`] bounds them.
+    /// which can also nest, are not counted, and only [`Self::stack_limit`]
+    /// bounds them. A global variable or an attribute set is entered at most
+    /// once per declaration on any one chain of them. A key's index is built
+    /// at most once per document, current group and current captured
+    /// substrings — re-entering a build that is in progress is XTDE0640 — but
+    /// that does not make it once per chain: a key's own evaluation can call
+    /// `key()` over a document it creates, or, when its content runs
+    /// `xsl:for-each-group` or `xsl:analyze-string`, under a current group or
+    /// captured substrings of its own, and each of those is a new index to
+    /// build. A key that looks itself up that way recurses until the stack
+    /// guard stops it.
     pub max_recursion_depth: usize,
     /// How many bytes of host stack the run may use, measured from the point
     /// where it starts, before it is abandoned with the same error as
@@ -95,9 +103,10 @@ pub struct TransformOptions {
     /// where evaluation nests without such an entry: before every key index
     /// build (a key's pattern or key specifier may call `key()` for another
     /// key, or for the same key over another document), every evaluation of
-    /// a global variable, and every attribute set that another one uses. What
-    /// one body uses *between* two such entries is not checked; the room left
-    /// above the limit is for that.
+    /// a global variable, every attribute set that another one uses, and
+    /// every compilation of a computed `xsl:analyze-string` regular
+    /// expression. What one body uses *between* two such entries is not
+    /// checked; the room left above the limit is for that.
     ///
     /// `None` (the default) derives the limit from the thread the run is on:
     ///
@@ -281,9 +290,14 @@ pub struct Transformation<'a, 't> {
     /// for a key whose specifier may observe it, current group — built on
     /// first use.
     keys: RefCell<keys::KeyIndexes<'t>>,
-    /// The serial number of the last current group created
-    /// (`CurrentGroup::serial`); 0 before the first.
-    group_serials: std::cell::Cell<u64>,
+    /// The serial number of the last current group or set of captured
+    /// substrings created (`CurrentGroup::serial`,
+    /// `CapturedSubstrings::serial`) — one counter for both, which
+    /// `runtime/keys.rs` relies on; 0 before the first.
+    scope_serials: std::cell::Cell<u64>,
+    /// The regular expressions of `xsl:analyze-string` instructions whose
+    /// `regex` or `flags` is computed, by effective value (`runtime/analyze.rs`).
+    regexes: RefCell<analyze::RegexCache>,
     /// What the call of each `id()` / `key()` pattern selects, per document
     /// (§5.5.2), computed on first use.
     id_key_selections: RefCell<patterns::IdKeySelections<'t>>,
@@ -332,7 +346,8 @@ impl<'a> CompiledStylesheet<'a> {
             store: RefCell::new(DocumentStore::new(arena, self.names())),
             globals: RefCell::new(globals),
             keys: RefCell::new(keys::KeyIndexes::default()),
-            group_serials: std::cell::Cell::new(0),
+            scope_serials: std::cell::Cell::new(0),
+            regexes: RefCell::new(analyze::RegexCache::default()),
             id_key_selections: RefCell::new(HashMap::new()),
             placements: RefCell::new(patterns::PlacementCache::default()),
             messages: RefCell::new(Vec::new()),
@@ -401,6 +416,16 @@ impl<'a, 't> Transformation<'a, 't> {
     /// The document store of this run.
     pub fn store(&self) -> &RefCell<DocumentStore<'t>> {
         &self.store
+    }
+
+    /// A serial number for a new current group or a new set of current
+    /// captured substrings (`CurrentGroup::serial`,
+    /// `CapturedSubstrings::serial`): one counter for both, so that of two
+    /// nested activations the inner one always has the larger number.
+    pub(super) fn next_scope_serial(&self) -> u64 {
+        let serial = self.scope_serials.get() + 1;
+        self.scope_serials.set(serial);
+        serial
     }
 
     /// The messages produced so far.

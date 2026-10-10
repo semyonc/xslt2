@@ -23,6 +23,15 @@
 //! other key is evaluated with no current group — it cannot tell — and keeps
 //! one index per document for the run.
 //!
+//! The current captured substrings (§15.2) are treated the same way: §5.4.4's
+//! table clears them for "xsl:non-matching-substring; calls on stylesheet
+//! functions" and §15.2 for "a pattern or a stylesheet function", neither of
+//! which a key specifier is, so it sees those of the `key()` call. A key that
+//! may observe them (`Key::observes_captures`) has an index per document and
+//! `xsl:matching-substring` activation (`CapturedSubstrings::serial`), dropped
+//! when the activation ends; a key may observe both, and then has one per
+//! (group, activation) pair.
+//!
 //! Building an index evaluates the key's patterns and key specifiers, which
 //! may call `key()` again. A call for a *different* (key, document) pair — or,
 //! for a key that observes the group, (key, document, group) — just builds
@@ -50,12 +59,20 @@ use xsd_schema::xpath::functions::{atomize_sequence, XPathValue};
 use xsd_schema::xpath::operators::{eval_binary, value_eq};
 use xsd_schema::xpath::XmlItem;
 
-use super::context::{CurrentGroup, XsltContext};
+use super::context::{CapturedSubstrings, CurrentGroup, XsltContext};
 use super::{Frame, Transformation};
 use crate::collation::{Collation, CollationResolver, CODEPOINT_COLLATION_URI};
 use crate::error::{codes, XsltError};
 use crate::model::{Key, KeyDefinition, KeyId, ValueSource};
 use crate::receiver::{Nav, SequenceCollector};
+
+/// What a key specifier may observe of the context of the `key()` call it is
+/// evaluated for: its current group and its current captured substrings.
+#[derive(Clone, Copy, Default)]
+pub(super) struct KeyCaller<'c, 't> {
+    pub(super) group: Option<&'c Rc<CurrentGroup<'t>>>,
+    pub(super) captured: Option<&'c Rc<CapturedSubstrings>>,
+}
 
 /// The index of one key over one document, the marker that it is being built,
 /// or the error its build failed with.
@@ -68,66 +85,97 @@ pub(super) enum KeyState<'t> {
     Failed(XsltError),
 }
 
-/// Where one index is kept: the key, the serial number of the document, and
-/// the serial number of the current group it was built for
-/// (`CurrentGroup::serial`) — 0 for a call made outside any group, and for
-/// every key that cannot observe the group.
+/// Where one index is kept: the key, the serial number of the document, the
+/// serial number of the current group it was built for (`CurrentGroup::serial`)
+/// — 0 for a call made outside any group, and for every key that cannot observe
+/// the group — and likewise that of the current captured substrings
+/// (`CapturedSubstrings::serial`).
 #[derive(Clone, Copy)]
 struct IndexSlot {
     key: KeyId,
     document: u64,
     group: u64,
+    captures: u64,
 }
+
+impl IndexSlot {
+    /// The scope whose table holds the index: the serial of whichever of the
+    /// group and the captured substrings was activated later, 0 (the run) when
+    /// neither applies.
+    ///
+    /// The two serials come from one counter, and the activations nest: one
+    /// that starts while the other is current ends before it does. So the
+    /// later one — the larger serial — is the inner one, and once it ends this
+    /// (group, captures) pair can never be current again: dropping the inner
+    /// activation's table drops exactly the indexes that are dead.
+    fn scope(self) -> u64 {
+        self.group.max(self.captures)
+    }
+
+    fn entry(self) -> IndexKey {
+        (self.key, self.document, self.group, self.captures)
+    }
+}
+
+/// An index's key within the table of its scope.
+type IndexKey = (KeyId, u64, u64, u64);
 
 /// Every index of a run.
 ///
-/// The indexes built with no current group live for the run. Those built for
-/// one group are kept in a table of that group's own, which
-/// [`forget_group`](Self::forget_group) drops when the group's evaluation is
-/// over: the group can never be current again, and without that a
-/// group-dependent key used in each of many groups would keep an index per
-/// group to the end of the run. At any moment only the groups being evaluated
-/// — the nested `xsl:for-each-group` bodies in progress, and the groups whose
-/// sort keys have been computed but whose body has not run yet — hold any.
+/// The indexes built with neither a current group nor current captured
+/// substrings live for the run. Those built for one group or one
+/// `xsl:matching-substring` activation are kept in a table of that
+/// activation's own (`IndexSlot::scope`), which
+/// [`forget_scope`](Self::forget_scope) drops when the activation is over: it
+/// can never be current again, and without that a group-dependent key used in
+/// each of many groups would keep an index per group to the end of the run.
+/// At any moment only the activations in progress — the nested
+/// `xsl:for-each-group` bodies and `xsl:matching-substring` evaluations, and
+/// the groups whose sort keys have been computed but whose body has not run
+/// yet — hold any.
 #[derive(Default)]
 pub(super) struct KeyIndexes<'t> {
-    run: HashMap<(KeyId, u64), KeyState<'t>>,
-    groups: HashMap<u64, HashMap<(KeyId, u64), KeyState<'t>>>,
+    run: HashMap<IndexKey, KeyState<'t>>,
+    scopes: HashMap<u64, HashMap<IndexKey, KeyState<'t>>>,
 }
 
 impl<'t> KeyIndexes<'t> {
     fn get(&self, slot: IndexSlot) -> Option<&KeyState<'t>> {
-        let table = if slot.group == 0 {
-            Some(&self.run)
-        } else {
-            self.groups.get(&slot.group)
+        let table = match slot.scope() {
+            0 => Some(&self.run),
+            scope => self.scopes.get(&scope),
         };
-        table.and_then(|table| table.get(&(slot.key, slot.document)))
+        table.and_then(|table| table.get(&slot.entry()))
     }
 
     fn insert(&mut self, slot: IndexSlot, state: KeyState<'t>) {
-        let table = if slot.group == 0 {
-            &mut self.run
-        } else {
-            self.groups.entry(slot.group).or_default()
+        let table = match slot.scope() {
+            0 => &mut self.run,
+            scope => self.scopes.entry(scope).or_default(),
         };
-        table.insert((slot.key, slot.document), state);
+        table.insert(slot.entry(), state);
     }
 
     fn remove(&mut self, slot: IndexSlot) {
-        if slot.group == 0 {
-            self.run.remove(&(slot.key, slot.document));
-        } else if let Some(table) = self.groups.get_mut(&slot.group) {
-            table.remove(&(slot.key, slot.document));
+        match slot.scope() {
+            0 => {
+                self.run.remove(&slot.entry());
+            }
+            scope => {
+                if let Some(table) = self.scopes.get_mut(&scope) {
+                    table.remove(&slot.entry());
+                }
+            }
         }
     }
 
-    /// Drops every index built for the group with this serial number.
-    pub(super) fn forget_group(&mut self, serial: u64) {
-        // The usual case — no key of the stylesheet observes the group — costs
-        // no hashing per group.
-        if !self.groups.is_empty() {
-            self.groups.remove(&serial);
+    /// Drops every index built for the group or `xsl:matching-substring`
+    /// activation with this serial number.
+    pub(super) fn forget_scope(&mut self, serial: u64) {
+        // The usual case — no key of the stylesheet observes the group or the
+        // captured substrings — costs no hashing per activation.
+        if !self.scopes.is_empty() {
+            self.scopes.remove(&serial);
         }
     }
 }
@@ -273,22 +321,23 @@ impl<'a, 't> Transformation<'a, 't> {
     /// equal to one of `sought`, restricted to the subtree of `top` when the
     /// call had a third argument — in document order, without duplicates.
     ///
-    /// `group` is the current group of the call (`XsltContext::group`), with
-    /// which the key specifier is evaluated.
+    /// `caller` is the dynamic context of the call (`XsltContext::group`,
+    /// `XsltContext::captured`): the key specifier is evaluated with its
+    /// current group and current captured substrings.
     pub(super) fn key_lookup(
         &self,
         key: KeyId,
         sought: Vec<XmlValue>,
         root: &Nav<'t>,
         top: Option<&Nav<'t>>,
-        group: Option<&Rc<CurrentGroup<'t>>>,
+        caller: KeyCaller<'_, 't>,
     ) -> Result<Vec<Nav<'t>>, XsltError> {
         // "If the second argument is an empty sequence, the result of the
         // function will be an empty sequence."
         if sought.is_empty() {
             return Ok(Vec::new());
         }
-        let index = self.key_index(key, root, group)?;
+        let index = self.key_index(key, root, caller)?;
         let definition = self.sheet.key(key);
         let collation = self.key_collation(definition)?;
         let mut hits: Vec<u32> = Vec::new();
@@ -333,8 +382,8 @@ impl<'a, 't> Transformation<'a, 't> {
     }
 
     /// The index of `key` over the document whose root is `root` — for a key
-    /// that may observe the current group, the one for `group` — built on
-    /// first use.
+    /// that may observe the current group or the current captured substrings,
+    /// the one for the caller's — built on first use.
     ///
     /// A build that fails is not attempted again while its index could be
     /// asked for: its error is remembered and raised by every later use. The
@@ -353,15 +402,21 @@ impl<'a, 't> Transformation<'a, 't> {
         &self,
         key: KeyId,
         root: &Nav<'t>,
-        group: Option<&Rc<CurrentGroup<'t>>>,
+        caller: KeyCaller<'_, 't>,
     ) -> Result<Rc<KeyIndex<'t>>, XsltError> {
         // A key that cannot observe the group is built with none, so that one
-        // index answers every call over the document, in a group or not.
-        let group = group.filter(|_| self.sheet.key(key).observes_group);
+        // index answers every call over the document, in a group or not; and
+        // likewise for the captured substrings.
+        let definition = self.sheet.key(key);
+        let caller = KeyCaller {
+            group: caller.group.filter(|_| definition.observes_group),
+            captured: caller.captured.filter(|_| definition.observes_captures),
+        };
         let slot = IndexSlot {
             key,
             document: root.document().serial(),
-            group: group.map_or(0, |group| group.serial),
+            group: caller.group.map_or(0, |group| group.serial),
+            captures: caller.captured.map_or(0, |captured| captured.serial),
         };
         match self.keys.borrow().get(slot) {
             Some(KeyState::Built(index)) => return Ok(Rc::clone(index)),
@@ -391,7 +446,7 @@ impl<'a, 't> Transformation<'a, 't> {
         // behind.
         self.check_stack()?;
         self.keys.borrow_mut().insert(slot, KeyState::Building);
-        let built = self.build_key_index(key, root, group);
+        let built = self.build_key_index(key, root, caller);
         let mut keys = self.keys.borrow_mut();
         match built {
             Ok(index) => {
@@ -421,7 +476,7 @@ impl<'a, 't> Transformation<'a, 't> {
         &self,
         key: KeyId,
         root: &Nav<'t>,
-        group: Option<&Rc<CurrentGroup<'t>>>,
+        caller: KeyCaller<'_, 't>,
     ) -> Result<KeyIndex<'t>, XsltError> {
         let definition = self.sheet.key(key);
         let collation = self.key_collation(definition)?;
@@ -434,7 +489,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 if !self.matches(self.sheet.pattern(declaration.pattern), node)? {
                     continue;
                 }
-                for value in self.key_specifier_values(declaration, node, group)? {
+                for value in self.key_specifier_values(declaration, node, caller)? {
                     let value = self.key_value(value, definition.compat);
                     let Some(placement) = placement_of(&value, &collation) else {
                         continue;
@@ -475,12 +530,14 @@ impl<'a, 't> Transformation<'a, 't> {
     /// functions" alone — unlike the current template rule and mode, which it
     /// clears for "the sequence constructors contained in xsl:key" — so §14.1
     /// applies: "While an xsl:for-each-group instruction is being evaluated,
-    /// the current group will be non-empty."
+    /// the current group will be non-empty." The current captured substrings
+    /// are `caller`'s by the same reading: §15.2 empties them only for
+    /// "xsl:non-matching-substring", "a pattern" and "a stylesheet function".
     fn key_specifier_values(
         &self,
         declaration: &KeyDefinition,
         node: &Nav<'t>,
-        group: Option<&Rc<CurrentGroup<'t>>>,
+        caller: KeyCaller<'_, 't>,
     ) -> Result<Vec<XmlValue>, XsltError> {
         let item = XmlItem::Node(node.clone());
         let mut cx = XsltContext::empty();
@@ -488,7 +545,8 @@ impl<'a, 't> Transformation<'a, 't> {
         cx.position = 1;
         cx.size = 1;
         cx.current = Some(item);
-        cx.group = group.cloned();
+        cx.group = caller.group.cloned();
+        cx.captured = caller.captured.cloned();
         let mut frame = Frame::with_slots(declaration.frame_size);
         let value = match &declaration.specifier {
             ValueSource::Select(id) => self.eval_expr(*id, &frame, &cx),
@@ -889,5 +947,98 @@ fn for_each_node<'t>(
                 return Ok(());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bumpalo::Bump;
+    use xsd_schema::namespace::NameTable;
+
+    use crate::{Compiler, TransformOptions, XsltFunctions};
+
+    /// Runs `body` (the content of `<xsl:template match="/">`, with the key
+    /// `k` declared as `key`) over `<doc><r/><r/></doc>` and returns, after the
+    /// run, how many indexes live for the run and how many activation scopes
+    /// still hold any.
+    fn tables_after(key: &str, body: &str) -> (usize, usize) {
+        let main = format!(
+            r#"<xsl:stylesheet version="2.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+                 {key}
+                 <xsl:template match="/"><xsl:variable name="doc" select="."/><out>{body}</out></xsl:template>
+               </xsl:stylesheet>"#
+        );
+        let functions = XsltFunctions::new();
+        let names = NameTable::new();
+        let sheet = Compiler::new(&names, &functions)
+            .compile_str(&main, "file:///keys/main.xsl")
+            .expect("the stylesheet compiles");
+        let arena = Bump::new();
+        let run = sheet.transformation(&arena, TransformOptions::default());
+        run.transform_source("file:///keys/in.xml", "<doc><r/><r/></doc>")
+            .expect("the run succeeds");
+        let keys = run.keys.borrow();
+        (keys.run.len(), keys.scopes.len())
+    }
+
+    const MATCHES: &str = r#"<xsl:analyze-string select="'abc'" regex="(.)">
+        <xsl:matching-substring><xsl:value-of select="count(key('k', 'x', $doc))"/></xsl:matching-substring>
+      </xsl:analyze-string>"#;
+
+    /// A key that cannot observe the captured substrings is built once, for
+    /// the run, however many `xsl:matching-substring` activations call it.
+    #[test]
+    fn an_ordinary_key_has_one_index_for_the_run() {
+        assert_eq!(
+            tables_after(r#"<xsl:key name="k" match="r" use="'x'"/>"#, MATCHES),
+            (1, 0)
+        );
+    }
+
+    /// A key that observes them gets an index per activation, each dropped
+    /// when its `xsl:matching-substring` ends: none is left after the run.
+    #[test]
+    fn a_capture_dependent_key_leaves_no_index_behind() {
+        assert_eq!(
+            tables_after(
+                r#"<xsl:key name="k" match="r" use="concat('x', regex-group(9))"/>"#,
+                MATCHES
+            ),
+            (0, 0)
+        );
+    }
+
+    /// The same for a key that observes the current group and the captured
+    /// substrings, inside a group: the pair's index lives in the scope of the
+    /// later (inner) activation and goes with it; the group's own scope goes
+    /// when the group ends.
+    #[test]
+    fn a_key_observing_both_leaves_no_index_behind() {
+        let body = format!(
+            r#"<xsl:for-each-group select="1 to 2" group-by=".">{MATCHES}<xsl:value-of select="count(key('k', 'x', $doc))"/></xsl:for-each-group>"#
+        );
+        assert_eq!(
+            tables_after(
+                r#"<xsl:key name="k" match="r" use="concat('x', regex-group(9), current-group()[0])"/>"#,
+                &body
+            ),
+            (0, 0)
+        );
+    }
+
+    /// `IndexSlot::scope`: the inner — later, larger — serial of the two.
+    #[test]
+    fn the_scope_is_the_later_activation() {
+        let slot = |group, captures| super::IndexSlot {
+            key: crate::model::KeyId(0),
+            document: 1,
+            group,
+            captures,
+        };
+        assert_eq!(slot(0, 0).scope(), 0);
+        assert_eq!(slot(3, 0).scope(), 3);
+        assert_eq!(slot(0, 5).scope(), 5);
+        assert_eq!(slot(7, 5).scope(), 7);
+        assert_eq!(slot(3, 5).scope(), 5);
     }
 }

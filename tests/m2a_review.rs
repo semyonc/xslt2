@@ -107,10 +107,13 @@ fn a_not_implemented_function_in_a_pattern_is_never_recovered_from() {
 /// feature reached inside a pattern predicate was swallowed the same way.
 /// (`key()` was an `XSLT2-NOTIMPL` stub from M1 until M2f implemented it, and
 /// was the third case here; `current-group() = 1` was the first until M2g,
-/// which made it the static XTSE1060 — `tests/m2g_grouping.rs`.)
+/// which made it the static XTSE1060 — `tests/m2g_grouping.rs`; `regex-group(1)`
+/// was the second until M2h implemented it — `tests/m2h_regex.rs`. The only
+/// missing features an expression can still reach are the other `format-*`
+/// stubs, M3d's, so `format-time()` stands in for them.)
 #[test]
 fn any_missing_feature_in_a_pattern_predicate_propagates() {
-    for predicate in ["regex-group(1)"] {
+    for predicate in ["format-time(xs:time('00:00:00'), '[H]') = '0'"] {
         for strict in [false, true] {
             let error = match run(&two_rules(predicate), ONE_ITEM, strict) {
                 Err(e) => e,
