@@ -11,6 +11,8 @@
 //!   (`collation/uca/search.rs`): the review's case, 2,000 × `a` searched for
 //!   1,000 × `a` + `b`, took 21.5 s in a release build.
 
+mod common;
+
 use std::sync::Arc;
 
 use bumpalo::Bump;
@@ -34,7 +36,7 @@ fn run(sheet: &str, source: &str) -> Result<String, XsltError> {
         .transformation(&arena, TransformOptions::default())
         .with_resolver(resolver)
         .transform_source("file:///m2k/in.xml", source)?;
-    compiled.serialize_primary(&outcome)
+    compiled.serialize_primary(&outcome).map(common::body)
 }
 
 /// The items of `select` sorted by one `xsl:sort` with `attributes`, joined.

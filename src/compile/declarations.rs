@@ -6,16 +6,15 @@ use std::collections::HashMap;
 
 use xsd_schema::navigator::{DomNavigator, DomNodeType};
 
-use super::attributes::{check_attributes, STANDARD_ATTRS};
+use super::attributes::check_attributes;
 use super::Alias;
 use super::Builder;
 use super::ScopeEntry;
 use crate::error::{codes, XsltError};
 use crate::model::*;
 use crate::names::{parse_yes_no, split_qname, QName, XSLT_NS};
-use crate::output::parse_method;
 use crate::receiver::Nav;
-use crate::stylesheet::{attr_local, attributes, DeclKind, Module, ModuleId, StaticContextId};
+use crate::stylesheet::{attr_local, DeclKind, Module, ModuleId, StaticContextId};
 use crate::whitespace;
 
 impl<'a, 'm, 't> Builder<'a, 'm, 't> {
@@ -138,7 +137,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             }
         }
         self.check_attribute_set_references()?;
-        self.check_output_conflicts()?;
+        self.finish_output_definitions()?;
         Ok(())
     }
 
@@ -160,35 +159,6 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         Ok(())
     }
 
-    /// > \[ERR XTSE1560\] It is a static error if two `xsl:output` declarations
-    /// > within an output definition specify explicit values for the same
-    /// > attribute (other than `cdata-section-elements` and
-    /// > `use-character-maps`), with the values of the attributes being not
-    /// > equal, unless there is another `xsl:output` declaration within the same
-    /// > output definition that has higher import precedence and that specifies
-    /// > an explicit value for the same attribute.
-    fn check_output_conflicts(&self) -> Result<(), XsltError> {
-        let named: Vec<(Option<&QName>, &crate::output::OutputDefinition)> =
-            std::iter::once((None, &self.output))
-                .chain(self.named_outputs.iter().map(|(n, d)| (Some(n), d)))
-                .collect();
-        for (name, definition) in named {
-            if let Some(attribute) = definition.conflicting_attribute() {
-                let which = match name {
-                    Some(name) => format!("the output definition named {name}"),
-                    None => "the unnamed output definition".to_string(),
-                };
-                return Err(XsltError::new(
-                    codes::XTSE1560,
-                    format!(
-                        "two xsl:output declarations of {which} give different values for \
-                         {attribute} at the same import precedence"
-                    ),
-                ));
-            }
-        }
-        Ok(())
-    }
     // ── Declarations (§7.3) ──────────────────────────────────────────────
 
     fn declare_globals(&mut self, decls: &[(u32, ModuleId, Nav<'t>)]) -> Result<(), XsltError> {
@@ -303,6 +273,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             "variable" | "param" => Ok(()), // handled in pass 1
             "function" => Ok(()),           // `collect_functions`, `compile_functions`
             "output" => self.output_declaration(nav, ctx, precedence, module),
+            "character-map" => self.character_map_declaration(nav, module_id, ctx, precedence),
             "strip-space" | "preserve-space" => {
                 self.space_declaration(nav, ctx, precedence, module)
             }
@@ -330,64 +301,6 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 }
             }
         }
-    }
-
-    fn output_declaration(
-        &mut self,
-        nav: &Nav<'t>,
-        ctx: StaticContextId,
-        precedence: u32,
-        module: &Module<'t>,
-    ) -> Result<(), XsltError> {
-        let name = self.declared_name(nav, "name", ctx, module)?;
-        let target = match &name {
-            Some(name) => self.named_outputs.entry(name.clone()).or_default(),
-            None => &mut self.output,
-        };
-        for (uri, local, _, value) in attributes(nav) {
-            if !uri.is_empty() {
-                continue;
-            }
-            match local.as_str() {
-                "name" => {}
-                "method" => target.method.set_checked(parse_method(&value)?, precedence),
-                "version" => target.version.set_checked(value, precedence),
-                "encoding" => target.encoding.set_checked(value, precedence),
-                "indent" => target
-                    .indent
-                    .set_checked(parse_yes_no(&value, "indent")?, precedence),
-                "omit-xml-declaration" => target
-                    .omit_xml_declaration
-                    .set_checked(parse_yes_no(&value, "omit-xml-declaration")?, precedence),
-                "standalone" => {
-                    let value = match whitespace::trim(&value) {
-                        "omit" => None,
-                        other => Some(parse_yes_no(other, "standalone")?),
-                    };
-                    target.standalone.set_checked(value, precedence);
-                }
-                "doctype-public" => target.doctype_public.set_checked(value, precedence),
-                "doctype-system" => target.doctype_system.set_checked(value, precedence),
-                "media-type" => target.media_type.set_checked(value, precedence),
-                // Serialization parameters M1 does not act on but must accept.
-                "cdata-section-elements"
-                | "escape-uri-attributes"
-                | "include-content-type"
-                | "normalization-form"
-                | "undeclare-prefixes"
-                | "use-character-maps"
-                | "byte-order-mark" => {}
-                other if STANDARD_ATTRS.contains(&other) => {}
-                other => {
-                    return Err(XsltError::new(
-                        codes::XTSE0090,
-                        format!("xsl:output has no attribute named {other:?}"),
-                    )
-                    .with_location(module.location(nav)))
-                }
-            }
-        }
-        Ok(())
     }
 
     fn space_declaration(
@@ -969,7 +882,6 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
 /// yet, and the roadmap sub-milestone (§4) that owns each.
 fn unimplemented_declaration(local: &str) -> Option<&'static str> {
     Some(match local {
-        "character-map" => "M3a",
         "decimal-format" => "M3d",
         "import-schema" => "M4",
         _ => return None,

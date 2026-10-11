@@ -6,6 +6,8 @@
 //! plus whatever extra modules a case needs, a stylesheet compiled at
 //! `file:///review/main.xsl`, and the serialized primary result.
 
+mod common;
+
 use std::sync::Arc;
 
 use xsd_schema::namespace::NameTable;
@@ -45,7 +47,7 @@ fn run(
     } else {
         transformation.transform_source("file:///review/in.xml", source)?
     };
-    compiled.serialize_primary(&outcome)
+    compiled.serialize_primary(&outcome).map(common::body)
 }
 
 /// `run` with no extra modules, the source supplied inline.
@@ -210,7 +212,10 @@ fn p1_2_two_alternatives_of_one_template_are_not_a_conflict() {
         .transform_source("file:///review/in.xml", "<root><b/></root>")
         .unwrap();
     assert_eq!(
-        compiled.serialize_primary(&outcome).unwrap(),
+        compiled
+            .serialize_primary(&outcome)
+            .map(common::body)
+            .unwrap(),
         "<out>ONCE</out>"
     );
 }
@@ -362,7 +367,13 @@ fn p2_4_an_excluded_stylesheet_element_keeps_itself_and_loses_its_children() {
         .transformation(&arena, TransformOptions::default())
         .transform_source("file:///review/in.xml", "<root>text</root>")
         .unwrap();
-    assert_eq!(compiled.serialize_primary(&outcome).unwrap(), "text");
+    assert_eq!(
+        compiled
+            .serialize_primary(&outcome)
+            .map(common::body)
+            .unwrap(),
+        "text"
+    );
 }
 
 // ── P2-5 relative URIs resolve against the expression's base URI ─────────
@@ -446,7 +457,10 @@ fn p2_5_xml_base_moves_the_base_uri_of_the_expression() {
         .transform_source("file:///review/in.xml", "<root/>")
         .unwrap();
     assert_eq!(
-        compiled.serialize_primary(&outcome).unwrap(),
+        compiled
+            .serialize_primary(&outcome)
+            .map(common::body)
+            .unwrap(),
         "<out>RIGHT</out>"
     );
 }

@@ -3,6 +3,8 @@
 //! test names the suite case(s) it reproduces and quotes the specification
 //! sentence it checks.
 
+mod common;
+
 use std::sync::Arc;
 
 use bumpalo::Bump;
@@ -46,7 +48,7 @@ fn run_sheet_with_options(
         .transformation(&arena, options)
         .with_resolver(resolver)
         .transform_source("file:///m2i/in.xml", source)?;
-    compiled.serialize_primary(&outcome)
+    compiled.serialize_primary(&outcome).map(common::body)
 }
 
 /// Runs a stylesheet body from the named template `main`, with no source.
@@ -60,7 +62,7 @@ fn run_main(body: &str) -> Result<String, XsltError> {
         .transformation(&arena, TransformOptions::default())
         .with_initial_template(QName::local("main"))
         .transform_without_source()?;
-    compiled.serialize_primary(&outcome)
+    compiled.serialize_primary(&outcome).map(common::body)
 }
 
 /// The same, for a stylesheet body wrapped in a plain `xsl:stylesheet`.
@@ -536,7 +538,10 @@ fn an_unmatched_dot_dot_is_removed_when_resolving_under_a_scheme() {
         .transform_without_source()
         .unwrap();
     assert_eq!(
-        compiled.serialize_primary(&outcome).unwrap(),
+        compiled
+            .serialize_primary(&outcome)
+            .map(common::body)
+            .unwrap(),
         r#"<out xml:base="../b">urn:b</out>"#
     );
 }

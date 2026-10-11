@@ -13,6 +13,8 @@
 //! table in `compile::checks` is transcribed from the element syntax summaries
 //! that Appendix D collects.
 
+mod common;
+
 use std::sync::Arc;
 
 use bumpalo::Bump;
@@ -75,7 +77,7 @@ fn run(module: &str) -> Result<String, XsltError> {
         .transformation(&arena, TransformOptions::default())
         .with_resolver(resolver)
         .transform_source(SOURCE_URI, SOURCE)?;
-    compiled.serialize_primary(&outcome)
+    compiled.serialize_primary(&outcome).map(common::body)
 }
 
 /// Asserts that `module` is rejected with `code`, at compile time.

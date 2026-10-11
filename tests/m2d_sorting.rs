@@ -6,6 +6,8 @@
 //! (DESIGN §9.1), the comparison rules of §13.1.2 / §13.1.3, `xsl:perform-sort`
 //! and backwards-compatible behaviour.
 
+mod common;
+
 use std::cmp::Ordering;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -70,7 +72,7 @@ fn run_with_docs(
         .transformation(&arena, TransformOptions::default())
         .with_resolver(resolver)
         .transform_source("file:///m2d/in.xml", source)?;
-    compiled.serialize_primary(&outcome)
+    compiled.serialize_primary(&outcome).map(common::body)
 }
 
 /// Runs a whole stylesheet module over `source` with the default functions.

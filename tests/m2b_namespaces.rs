@@ -12,6 +12,8 @@
 //! Every test names the suite case it reproduces, so the mapping from this
 //! file to `XSLT2_M2B_REPORT.md` is mechanical.
 
+mod common;
+
 use std::sync::Arc;
 
 use bumpalo::Bump;
@@ -37,7 +39,7 @@ fn run_sheet(sheet: &str, source: &str) -> Result<String, XsltError> {
         .transformation(&arena, TransformOptions::default())
         .with_resolver(resolver)
         .transform_source("file:///m2b/in.xml", source)?;
-    compiled.serialize_primary(&outcome)
+    compiled.serialize_primary(&outcome).map(common::body)
 }
 
 /// The same, for a stylesheet body wrapped in a plain `xsl:stylesheet`.
@@ -403,7 +405,10 @@ fn an_alias_reaches_an_included_module() {
         .with_resolver(resolver)
         .transform_source("file:///m2b/in.xml", IN)
         .expect("runs");
-    let out = compiled.serialize_primary(&outcome).expect("serializes");
+    let out = compiled
+        .serialize_primary(&outcome)
+        .map(common::body)
+        .expect("serializes");
     assert!(
         out.contains(&format!(r#"xmlns:xsl="{NS}""#)) && !out.contains("http://alias/"),
         "the included module's literal result element is aliased too: {out}"

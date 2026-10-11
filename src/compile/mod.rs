@@ -18,6 +18,7 @@ mod instructions;
 mod keys;
 mod literal;
 mod modes;
+mod output;
 mod patterns;
 mod tree;
 
@@ -167,6 +168,10 @@ struct Builder<'a, 'm, 't> {
     space_rules: Vec<SpaceRule>,
     output: OutputDefinition,
     named_outputs: HashMap<QName, OutputDefinition>,
+    /// Every `xsl:character-map` declaration (§20.1), resolved by
+    /// `finish_output_definitions` into `expanded_character_maps`.
+    character_maps: Vec<output::CharacterMapDecl>,
+    expanded_character_maps: HashMap<QName, crate::serialize::CharacterMap>,
     /// Variables in scope at the point currently being compiled.
     scope: Vec<ScopeEntry>,
     /// Slots used by the frame currently being compiled.
@@ -233,6 +238,8 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             space_rules: Vec::new(),
             output: OutputDefinition::default(),
             named_outputs: HashMap::new(),
+            character_maps: Vec::new(),
+            expanded_character_maps: HashMap::new(),
             scope: Vec::new(),
             frame_size: 0,
             decl_order: 0,
@@ -263,12 +270,30 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         let modes = self.build_mode_table();
         let principal = self.modules.module(self.modules.principal);
         let base_uri = principal.uri.clone();
-        let principal_compat = {
+        let (principal_compat, principal_version_1_0) = {
             let mut nav = principal.doc.create_navigator();
             if crate::stylesheet::move_to_document_element(&mut nav) {
-                static_context_of(&nav, principal, self.functions.collations())?.compat
+                // §20's default output method: "if the version attribute of the
+                // xsl:stylesheet element of the principal stylesheet module has
+                // the value 1.0" (`xsl:version` on a simplified stylesheet).
+                let version = if xsd_schema::navigator::DomNavigator::namespace_uri(&nav)
+                    == crate::names::XSLT_NS
+                {
+                    crate::stylesheet::attr_local(&nav, "version")
+                } else {
+                    crate::stylesheet::attr_ns(&nav, crate::names::XSLT_NS, "version")
+                };
+                let one = version
+                    .as_deref()
+                    .map(crate::whitespace::trim)
+                    .and_then(|v| v.parse::<f64>().ok())
+                    == Some(1.0);
+                (
+                    static_context_of(&nav, principal, self.functions.collations())?.compat,
+                    one,
+                )
             } else {
-                CompatMode::Xslt20
+                (CompatMode::Xslt20, false)
             }
         };
         Ok(CompiledStylesheet {
@@ -292,6 +317,8 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             key_index: std::mem::take(&mut self.key_index),
             output: std::mem::take(&mut self.output),
             named_outputs: std::mem::take(&mut self.named_outputs),
+            character_maps: std::mem::take(&mut self.expanded_character_maps),
+            principal_version_1_0,
             space_rules: std::mem::take(&mut self.space_rules),
             functions_table: std::mem::take(&mut self.functions_table)
                 .into_iter()

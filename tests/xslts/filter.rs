@@ -111,6 +111,8 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     ("regex-classes-032", X_REGEX_CLASSES_UNICODE), // So
     ("regex-classes-033", X_REGEX_CLASSES_UNICODE), // Z
     ("regex-classes-036", X_REGEX_CLASSES_UNICODE), // Zs
+    // ── decl/character-map: XSLT 3.0 serialization in a stylesheet labelled XSLT20+ ──
+    ("character-map-026", "a version=\"3.0\" stylesheet labelled XSLT20+: xsl:output method=\"adaptive\" is XTSE1570 in XSLT 2.0 (§20: an unprefixed method \"must be one of xml, html, xhtml, or text\"), the template is named xsl:initial-template (XTSE0080: \"It is a static error to use a reserved namespace in the name of a named template\"), and map { … } is an XPath 3.1 map constructor, absent from the XPath 2.0 grammar; the expected adaptive serialization cannot arise from an XSLT 2.0 processor"),
     // ── misc/unicode-90: the sixteen version="3.0" cases (the other 1,444 are 2.0) ──
     ("unicode90-001", X_UNICODE90),
     ("unicode90-002", X_UNICODE90),

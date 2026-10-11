@@ -11,6 +11,8 @@
 //! * F3 `alternate=blanked`, F5 the `&` separator, F6 `version`, F7 the Unicode
 //!   extension keywords of `lang`, F9 one collator per canonical tailoring.
 
+mod common;
+
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::rc::Rc;
@@ -38,7 +40,7 @@ fn run_with(functions: &XsltFunctions, sheet: &str, source: &str) -> Result<Stri
         .transformation(&arena, TransformOptions::default())
         .with_resolver(resolver)
         .transform_source("file:///m2k/in.xml", source)?;
-    compiled.serialize_primary(&outcome)
+    compiled.serialize_primary(&outcome).map(common::body)
 }
 
 /// Wraps template-level declarations in a `version="2.0"` stylesheet.

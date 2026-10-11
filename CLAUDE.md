@@ -30,11 +30,12 @@ PSVI, `BufferDocument`). Separate git repository.
 | `src/model.rs` | The `Instruction` tree (§7.4), declaration tables (§7.3), `CompiledStylesheet` |
 | `src/pattern.rs` | Pattern grammar (§5.5.2), the §6.4 default priorities, the dispatch-index key |
 | `src/compile/checks.rs` | The **static-checking table**: one `ElementSpec` row per XSLT 2.0 element (category, required/optional attributes, AVTs, content model) transcribed from the spec's syntax summaries, and the single pass that validates a module against it before compilation. A new element = a new row here |
-| `src/compile/` | `Compiler`: modules → declarations and instructions. `mod.rs` (builder core), `declarations`, `instructions`, `literal`, `expressions`, `avt`, `patterns`, `modes`, `attributes`, `tree`, `functions` (`xsl:function`), `keys` (`xsl:key`), `grouping` (`xsl:for-each-group`), `analyze` (`xsl:analyze-string`). Walk stylesheet children **only** through `Module::children()` / `Builder::children()` — it applies §3.12 `use-when` exclusion by construction |
-| `src/runtime/` | `Transformation`: `mod.rs` (entry points), `context` (§5.4), `dispatch` (§6), `patterns`, `eval` (instructions), `content`, `variables`, `documents` (loading, §4.4 admission), `functions` (the §16 evaluator), `expressions`, `serialize`, `sort` (`xsl:sort`, `xsl:perform-sort`), `calls` (stylesheet functions), `keys` (key indexes), `grouping` (`xsl:for-each-group`), `analyze` (`xsl:analyze-string`, the run's regex cache) |
-| `src/receiver.rs` | `Receiver`, `ComplexContentNormalizer` (§5.7.1), `ResultBuilder`, `SequenceCollector` |
+| `src/compile/` | `Compiler`: modules → declarations and instructions. `mod.rs` (builder core), `declarations`, `output` (`xsl:output`, `xsl:character-map`), `instructions`, `literal`, `expressions`, `avt`, `patterns`, `modes`, `attributes`, `tree`, `functions` (`xsl:function`), `keys` (`xsl:key`), `grouping` (`xsl:for-each-group`), `analyze` (`xsl:analyze-string`). Walk stylesheet children **only** through `Module::children()` / `Builder::children()` — it applies §3.12 `use-when` exclusion by construction |
+| `src/runtime/` | `Transformation`: `mod.rs` (entry points), `context` (§5.4), `dispatch` (§6), `patterns`, `eval` (instructions), `content`, `variables`, `documents` (loading, §4.4 admission), `functions` (the §16 evaluator), `expressions`, `serialize` (a result tree through `src/serialize/`), `sort` (`xsl:sort`, `xsl:perform-sort`), `calls` (stylesheet functions), `keys` (key indexes), `grouping` (`xsl:for-each-group`), `analyze` (`xsl:analyze-string`, the run's regex cache) |
+| `src/receiver.rs` | `Receiver`, `ComplexContentNormalizer` (§5.7.1), `ResultBuilder`, `SequenceCollector`, `TemporaryOutputState` (the content of `xsl:document`: d-o-e dropped, §11.5/§20.2) |
 | `src/store.rs` | `DocumentStore`: arena-allocated documents, URI identity, `generate-id()` |
-| `src/output.rs` | `xsl:output` merged by import precedence → `SerializeOptions` |
+| `src/output.rs` | `OutputDefinition`: the `xsl:output` attributes merged by import precedence (§20), `cdata-section-elements` united, `use-character-maps` concatenated and expanded; `compile/output.rs` reads `xsl:output` / `xsl:character-map` (XTSE1560, XTSE1570, XTSE1580, XTSE1590, XTSE1600, XTSE0020 parameter domains) |
+| `src/serialize/` | The serializer (M3a; Serialization 1.0 2E, read at w3.org): `params` (an output definition resolved against a tree — §20's default method, per-method defaults, SEPM/SESU checks), `markup` (the `xml`, `xhtml`, `html` methods, iterative), `html` (HTML 4.01 / XHTML tables, URI escaping), `encoding` (UTF-8, UTF-16, US-ASCII, ISO-8859-1; anything else SESU0007), `charmap`, `marks` (`disable-output-escaping` kept beside the tree, §20.2); the text method in `mod.rs`. The result is a `String` (the encoding phase skipped, Ser. §4); `serialize_primary_to_bytes` encodes |
 | `src/functions.rs` | The §16 function library as an XPath catalog, plus the `use-when` evaluator |
 | `src/collation.rs`, `src/collation/uca.rs`, `src/collation/uca/search.rs` | The collation registry (`CollationResolver`): codepoint, HTML ASCII case-insensitive, host-registered; `CaseOrderCollation` for `xsl:sort lang` / `case-order`; with the `icu-collation` feature the F&O 3.1 §5.3.3 UCA URIs and locale-tailored sorting on ICU4X 1.5 (`uca.rs`) and the substring search under them (`uca/search.rs`) |
 | `src/regex.rs` | §15 regular expressions: the XPath 2.0 dialect check (a copy of `xsd-schema`'s private pre-pass) in front of `regexml`, and XTDE1140 / XTDE1145 / XTDE1150 |
@@ -45,7 +46,9 @@ PSVI, `BufferDocument`). Separate git repository.
 cargo build
 cargo clippy --all-targets         # 0 warnings expected
 cargo test                         # unit tests + every tests/*.rs except the W3C harness (it skips itself in debug): m0b…m2a, m2c, m2d_sorting, m2e_functions, m2f_keys, m2g_grouping, m2g_review, m2h_regex, m2i_core_defects, m2l_pattern_predicates, ns_inherit, q33_depth, …
-                                   # + fn_error + m2b_namespaces + m2c_static_checks
+                                   # + fn_error + m2b_namespaces + m2c_static_checks + m3a_serialization + m3a_review + m3a_review2
+                                   # (tests/common/mod.rs: `common::body` drops the default XML
+                                   # declaration for the tests written before M3a)
                                    # (the W3C harness skips itself in a debug build)
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps   # must exit 0; the local regexml fork's own
                                                  # rustc warning is a dependency's and does not fail it
@@ -113,7 +116,10 @@ tree in two forms (`runner::ResultDocument`): `serialized`, written with the sty
 the catalog's default parameters (method xml, indent no, omit-xml-declaration yes), which every
 assertion about the tree reads — `assert`, `assert-xml`, `assert-string-value`, `assert-eq`,
 `assert-empty` — re-parsed with roxmltree, so `indent="yes"`, the text method or an output encoding
-never add or remove a node. A failure of the stylesheet's own serialization is still the run's error.
+never add or remove a node. A failure of the stylesheet's own serialization is the run's error only
+when the case asks for serialization (`<output serialize="yes"/>`; the catalog's default is `no`);
+otherwise the tree assertions still run and only the serialization assertions see the failure (M3a).
+An `assert-serialization` without `method` is compared under the method the stylesheet used.
 `assert-string-value` normalizes unless `normalize-space="false"` (the catalog's `default="true"`), with
 XML whitespace only. `assert-true` / `-false` / `-count` / `-type` / `-deep-eq` / `-permutation` need a
 raw sequence result, which an XSLT 2.0 run never delivers: `harnessError`.

@@ -9,6 +9,8 @@
 //! current group and grouping key everywhere else, the dynamic errors, and a
 //! performance bound.
 
+mod common;
+
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -58,7 +60,7 @@ fn run_with(
         let outcome = compiled
             .transformation(&arena, TransformOptions::default())
             .transform_source("file:///m2g/in.xml", &source)?;
-        compiled.serialize_primary(&outcome)
+        compiled.serialize_primary(&outcome).map(common::body)
     })
 }
 

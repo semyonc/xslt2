@@ -22,6 +22,10 @@ slotmap = "1.0"
 # requirement as xsd-schema's, so the graph keeps one copy and a local
 # `[patch.crates-io]` of it applies to both.
 regexml = "0.2"
+# Serialization's `normalization-form` (NFC, NFD, NFKC, NFKD). Already in the
+# graph through `xsd-schema` (its `fn:normalize-unicode`), with the same
+# requirement, so no new build.
+unicode-normalization = "0.1"
 # The Unicode Collation Algorithm with locale tailorings (DESIGN §9.5), behind
 # the off-by-default `icu-collation` feature. Pinned to the ICU4X 1.5 line that
 # `regexml` already brings (icu_properties, icu_locid, icu_provider …), so the

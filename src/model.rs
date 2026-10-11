@@ -487,7 +487,7 @@ pub enum InstructionKind {
     ValueOf {
         value: ValueSource,
         separator: Option<Avt>,
-        /// `disable-output-escaping` — stored, honoured by the serializer (M3).
+        /// `disable-output-escaping` (§20.2), honoured by the serializer.
         disable_output_escaping: bool,
         /// Backwards-compatible behaviour: only the first item (§9.10 row 5).
         first_item_only: bool,
@@ -903,6 +903,11 @@ pub struct CompiledStylesheet<'a> {
     pub(crate) key_index: HashMap<QName, KeyId>,
     pub(crate) output: OutputDefinition,
     pub(crate) named_outputs: HashMap<QName, OutputDefinition>,
+    /// Every `xsl:character-map`, expanded (§20.1), by name.
+    pub(crate) character_maps: HashMap<QName, crate::serialize::CharacterMap>,
+    /// Whether the principal module's `version` is 1.0, which makes `xml`
+    /// rather than `xhtml` the default method of an XHTML result (§20).
+    pub(crate) principal_version_1_0: bool,
     pub(crate) space_rules: Vec<SpaceRule>,
     /// The stylesheet functions that won for their name and arity (§10.3).
     pub(crate) functions_table: Vec<StylesheetFunction>,
@@ -1085,14 +1090,69 @@ impl<'a> CompiledStylesheet<'a> {
 }
 
 impl CompiledStylesheet<'_> {
-    /// Serializes a run's primary result per the merged `xsl:output` (§20).
+    /// Serializes a run's primary result with the unnamed output definition
+    /// (§20: "It is also used when serializing the final result tree that is
+    /// created implicitly"), as characters: the encoding decides what is
+    /// escaped and what the XML declaration says, and a byte order mark is a
+    /// leading U+FEFF (see [`crate::serialize`]).
     pub fn serialize_primary(
         &self,
         outcome: &crate::runtime::Outcome<'_>,
     ) -> Result<String, crate::XsltError> {
         match outcome.primary {
-            Some(doc) => crate::runtime::serialize_result(self, doc),
+            Some(doc) => crate::runtime::serialize_result(
+                self,
+                &self.output,
+                doc,
+                Some(&outcome.disabled_escaping),
+                true,
+            ),
             None => Ok(String::new()),
         }
+    }
+
+    /// [`Self::serialize_primary`] followed by the encoding phase: the octets
+    /// in the output definition's encoding (Serialization §4).
+    pub fn serialize_primary_to_bytes(
+        &self,
+        outcome: &crate::runtime::Outcome<'_>,
+    ) -> Result<Vec<u8>, crate::XsltError> {
+        match outcome.primary {
+            Some(doc) => crate::runtime::serialize_result_to_bytes(
+                self,
+                &self.output,
+                doc,
+                Some(&outcome.disabled_escaping),
+                true,
+            ),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The serialization parameters [`Self::serialize_primary`] writes a run's
+    /// primary result with: the unnamed output definition resolved against
+    /// the tree, §20's default method included (an XHTML result of a 1.0
+    /// stylesheet is `xml`). `None` when there is no primary result; an error
+    /// is the one `serialize_primary` would report for the parameters.
+    pub fn primary_serialization_params(
+        &self,
+        outcome: &crate::runtime::Outcome<'_>,
+    ) -> Result<Option<crate::serialize::SerializationParams>, crate::XsltError> {
+        match outcome.primary {
+            Some(doc) => crate::serialize::SerializationParams::resolve(
+                &self.output,
+                &doc.create_navigator(),
+                crate::runtime::tree_context(self, true),
+            )
+            .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// A character map by name, expanded (§20.1) — what an
+    /// `xsl:result-document/@use-character-maps` would add to its output
+    /// definition's map.
+    pub fn character_map(&self, name: &QName) -> Option<&crate::serialize::CharacterMap> {
+        self.character_maps.get(name)
     }
 }

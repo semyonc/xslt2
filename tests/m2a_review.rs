@@ -14,6 +14,8 @@
 //! The helper mirrors `m2a_groundwork.rs`: an in-memory resolver serving
 //! `file:///m2a/in.xml`, a stylesheet compiled at `file:///m2a/main.xsl`.
 
+mod common;
+
 use std::sync::Arc;
 
 use bumpalo::Bump;
@@ -55,7 +57,7 @@ fn run(body: &str, source: &str, strict: bool) -> Result<String, XsltError> {
         .transformation(&arena, options)
         .with_resolver(resolver)
         .transform_source("file:///m2a/in.xml", source)?;
-    compiled.serialize_primary(&outcome)
+    compiled.serialize_primary(&outcome).map(common::body)
 }
 
 /// A stylesheet with a high-priority rule carrying `predicate` and a plain
@@ -345,7 +347,10 @@ fn an_untyped_prebuilt_document_is_still_admitted() {
         .insert_ref(doc, Some("file:///m2a/plain.xml"));
     let outcome = run.transform_document(id).expect("an untyped tree is fine");
     assert_eq!(
-        compiled.serialize_primary(&outcome).unwrap(),
+        compiled
+            .serialize_primary(&outcome)
+            .map(common::body)
+            .unwrap(),
         "<out>UNTYPED</out>"
     );
 }

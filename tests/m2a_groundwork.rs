@@ -16,6 +16,8 @@
 //! `file:///m2a/in.xml`, a stylesheet compiled at `file:///m2a/main.xsl`, and
 //! the serialized primary result.
 
+mod common;
+
 use std::sync::Arc;
 
 use xsd_schema::namespace::NameTable;
@@ -49,7 +51,7 @@ fn transform(body: &str, source: &str) -> Result<String, XsltError> {
         .transformation(&arena, TransformOptions::default())
         .with_resolver(resolver)
         .transform_source("file:///m2a/in.xml", source)?;
-    compiled.serialize_primary(&outcome)
+    compiled.serialize_primary(&outcome).map(common::body)
 }
 
 // ═══ Phase 2 — §3.12 exclusion by construction ═══════════════════════════
@@ -449,27 +451,8 @@ fn every_notimpl_names_its_sub_milestone() {
             "xsl:decimal-format",
             "M3d",
         ),
-        (
-            format!(r#"<xsl:character-map name="c"/>{}"#, template("")),
-            "xsl:character-map",
-            "M3a",
-        ),
-        // output.rs: methods, doctype, encodings.
-        (
-            format!(r#"<xsl:output method="html"/>{}"#, template("")),
-            "the html output method",
-            "M3a",
-        ),
-        (
-            format!(r#"<xsl:output doctype-system="x.dtd"/>{}"#, template("")),
-            "xsl:output/@doctype-*",
-            "M3a",
-        ),
-        (
-            format!(r#"<xsl:output encoding="EBCDIC-X"/>{}"#, template("")),
-            "the output encoding",
-            "M3a",
-        ),
+        // (xsl:character-map, the html/xhtml methods, doctype-* and the output
+        // encodings were NOT-IMPL until M3a — `tests/m3a_serialization.rs`.)
         // runtime/functions.rs: the §16 evaluator.
         // (key() was NOT-IMPL until M2f — `tests/m2f_keys.rs`; current-group()
         // and current-grouping-key() until M2g — `tests/m2g_grouping.rs`;

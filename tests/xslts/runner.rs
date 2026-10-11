@@ -48,6 +48,16 @@ pub struct ResultDocument {
     /// never reach it, so a re-parse sees the tree's own nodes and nothing else — except
     /// whitespace-only text directly under the document node, which no XML parse keeps.
     pub tree: Result<String, String>,
+    /// Why the stylesheet's own serialization failed, when the case does not ask for
+    /// serialization (`<output serialize="yes"/>`; the catalog: "Determines whether or not
+    /// serialization takes place. The default is no.") and so the failure is not the run's
+    /// error: the tree assertions are still evaluated, and `serialized` is empty.
+    pub serialization_error: Option<XsltError>,
+    /// The output method the stylesheet's serialization used (`xml`, `xhtml`, `html`, `text`),
+    /// for an `assert-serialization` that does not name one: its `method` "Identifies the
+    /// output method used for serialization, which affects the way in which the actual results
+    /// can be compared with the expected results".
+    pub method: Option<String>,
 }
 
 impl ResultDocument {
@@ -60,6 +70,8 @@ impl ResultDocument {
         ResultDocument {
             serialized: text.clone(),
             tree: Ok(text),
+            serialization_error: None,
+            method: None,
         }
     }
 }

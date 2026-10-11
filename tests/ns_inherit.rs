@@ -34,6 +34,8 @@
 //! the follow-up review (`XSLT2_NS_INHERIT_REVIEW2.md`, finding R1): it must
 //! stay linear to normalize, too.
 
+mod common;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -97,7 +99,10 @@ fn run_on(body: &str, source: &str) -> Run {
         .with_resolver(resolver)
         .transform_source("file:///ns-inherit/in.xml", source)
         .expect("run");
-    let serialized = compiled.serialize_primary(&outcome).expect("serialize");
+    let serialized = compiled
+        .serialize_primary(&outcome)
+        .map(common::body)
+        .expect("serialize");
     let mut tree = Vec::new();
     if let Some(doc) = outcome.primary {
         walk(&doc.create_navigator(), &mut tree);
@@ -557,7 +562,10 @@ fn timed(sheet: String, source: String) -> (Vec<usize>, Option<Duration>) {
             return (counts, None);
         }
         let started = Instant::now();
-        compiled.serialize_primary(&outcome).expect("serialize");
+        compiled
+            .serialize_primary(&outcome)
+            .map(common::body)
+            .expect("serialize");
         (counts, Some(transformed + started.elapsed()))
     })
 }

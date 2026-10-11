@@ -304,6 +304,109 @@ pub trait Receiver<'t> {
     }
 }
 
+// ── TemporaryOutputState ─────────────────────────────────────────────────
+
+/// The content of an `xsl:document` instruction, passed on to `out` with the
+/// disable-escaping property of its text dropped (§20.2).
+///
+/// §11.5: "The temporary tree rooted at this document node forms the result
+/// tree" — and §19.1: temporary output state "applies when instructions are
+/// writing to a temporary tree or any other non-final destination", whose
+/// consequence §20.2 spells out: "If output escaping is disabled for an
+/// xsl:value-of or xsl:text instruction evaluated when temporary output state
+/// is in effect, the request to disable output escaping is ignored." The
+/// document node's children may still end up in a final result tree (§5.7.1
+/// replaces a document node in element or document content by its children),
+/// so the receiver behind this one may be honouring the property; this
+/// wrapper is what keeps it from seeing it.
+///
+/// Every [`Receiver`] method is forwarded, the defaulted ones included.
+pub(crate) struct TemporaryOutputState<'r, 't> {
+    out: &'r mut dyn Receiver<'t>,
+}
+
+impl<'r, 't> TemporaryOutputState<'r, 't> {
+    pub(crate) fn new(out: &'r mut dyn Receiver<'t>) -> Self {
+        Self { out }
+    }
+}
+
+impl<'t> Receiver<'t> for TemporaryOutputState<'_, 't> {
+    fn start_document(&mut self) -> Result<(), XsltError> {
+        self.out.start_document()
+    }
+
+    fn end_document(&mut self) -> Result<(), XsltError> {
+        self.out.end_document()
+    }
+
+    fn start_element(
+        &mut self,
+        name: &Name,
+        binding: Option<NodeSchemaBinding>,
+        nilled: bool,
+    ) -> Result<(), XsltError> {
+        self.out.start_element(name, binding, nilled)
+    }
+
+    fn namespace(&mut self, prefix: &str, uri: &str) -> Result<(), XsltError> {
+        self.out.namespace(prefix, uri)
+    }
+
+    fn attribute(
+        &mut self,
+        name: &Name,
+        value: &str,
+        binding: Option<NodeSchemaBinding>,
+    ) -> Result<(), XsltError> {
+        self.out.attribute(name, value, binding)
+    }
+
+    fn end_start_tag(&mut self) -> Result<(), XsltError> {
+        self.out.end_start_tag()
+    }
+
+    fn text(&mut self, s: &str, _disable_escaping: bool) -> Result<(), XsltError> {
+        self.out.text(s, false)
+    }
+
+    fn comment(&mut self, s: &str) -> Result<(), XsltError> {
+        self.out.comment(s)
+    }
+
+    fn pi(&mut self, target: &str, data: &str) -> Result<(), XsltError> {
+        self.out.pi(target, data)
+    }
+
+    fn end_element(&mut self) -> Result<(), XsltError> {
+        self.out.end_element()
+    }
+
+    fn append_item(&mut self, item: &XmlItem<Nav<'t>>) -> Result<(), XsltError> {
+        self.out.append_item(item)
+    }
+
+    fn document_base_uri(&mut self, uri: &str) -> Result<(), XsltError> {
+        self.out.document_base_uri(uri)
+    }
+
+    fn element_base_uri(&mut self, uri: &str) -> Result<(), XsltError> {
+        self.out.element_base_uri(uri)
+    }
+
+    fn no_inherit_namespaces(&mut self) -> Result<(), XsltError> {
+        self.out.no_inherit_namespaces()
+    }
+
+    fn append_copy(
+        &mut self,
+        item: &XmlItem<Nav<'t>>,
+        namespaces: CopyNamespaces,
+    ) -> Result<(), XsltError> {
+        self.out.append_copy(item, namespaces)
+    }
+}
+
 // ── ComplexContentNormalizer ─────────────────────────────────────────────
 
 /// One open container of the normalizer.
@@ -512,6 +615,15 @@ pub struct ComplexContentNormalizer<'t, R: Receiver<'t>> {
     /// in. The innermost container is such a document node exactly when the
     /// last mark equals the current stack depth.
     document_marks: Vec<usize>,
+    /// Whether `disable-output-escaping` reaches `out` (§20.2): only for the
+    /// pipeline of a final result tree. Every other pipeline is a temporary
+    /// destination, written in temporary output state — "If output escaping is
+    /// disabled for an xsl:value-of or xsl:text instruction evaluated when
+    /// temporary output state is in effect, the request to disable output
+    /// escaping is ignored."
+    honour_disabled_escaping: bool,
+    /// The byte ranges of `text` that were written with escaping disabled.
+    disabled: Vec<(usize, usize)>,
     _marker: std::marker::PhantomData<&'t ()>,
 }
 
@@ -533,8 +645,20 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
             annotations,
             copy_namespaces: CopyNamespaces::All,
             document_marks: Vec::new(),
+            honour_disabled_escaping: false,
+            disabled: Vec::new(),
             _marker: std::marker::PhantomData,
         }
+    }
+
+    /// Passes `disable-output-escaping` on to the destination (§20.2): for the
+    /// pipeline that builds a final result tree, in final output state. Text
+    /// that arrives with escaping disabled is still merged with its neighbours
+    /// into one text node (§5.7.1); the destination receives it as consecutive
+    /// [`Receiver::text`] calls, one per run of equally-flagged characters.
+    pub fn honouring_disabled_escaping(mut self) -> Self {
+        self.honour_disabled_escaping = true;
+        self
     }
 
     /// Whether the innermost container being built is a document node, so
@@ -571,12 +695,27 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         }
         self.text_pending = false;
         let text = std::mem::take(&mut self.text);
+        let disabled = std::mem::take(&mut self.disabled);
         if text.is_empty() {
             return Ok(());
         }
         self.flush_start_tag()?;
         self.top().children_started = true;
-        self.out.text(&text, false)
+        if disabled.is_empty() {
+            return self.out.text(&text, false);
+        }
+        let mut at = 0;
+        for (start, end) in disabled {
+            if start > at {
+                self.out.text(&text[at..start], false)?;
+            }
+            self.out.text(&text[start..end], true)?;
+            at = end;
+        }
+        if at < text.len() {
+            self.out.text(&text[at..], false)?;
+        }
+        Ok(())
     }
 
     /// Writes the pending start tag: namespace fixup, then the declarations and
@@ -1179,9 +1318,16 @@ impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
         Ok(())
     }
 
-    fn text(&mut self, s: &str, _disable_escaping: bool) -> Result<(), XsltError> {
+    fn text(&mut self, s: &str, disable_escaping: bool) -> Result<(), XsltError> {
         if s.is_empty() {
             return Ok(());
+        }
+        if disable_escaping && self.honour_disabled_escaping {
+            let start = self.text.len();
+            match self.disabled.last_mut() {
+                Some(last) if last.1 == start => last.1 = start + s.len(),
+                _ => self.disabled.push((start, start + s.len())),
+            }
         }
         self.text.push_str(s);
         self.text_pending = true;
@@ -1272,6 +1418,16 @@ pub struct ResultBuilder<'t> {
     decls: Vec<(String, String)>,
     attrs: Vec<(Name, String, Option<NodeSchemaBinding>)>,
     open: Vec<u32>,
+    /// The `disable-output-escaping` property of the tree (§20.2), by text
+    /// node ordinal; see [`crate::serialize::EscapingMarks`].
+    marks: crate::serialize::EscapingMarks,
+    /// Text nodes started so far: the builder merges consecutive `text` calls
+    /// into one node, so a node starts at a `text` call that follows any other
+    /// event.
+    text_nodes: u32,
+    /// The byte length of the text node being built, while the last event was
+    /// `text`.
+    text_len: Option<usize>,
 }
 
 impl<'t> ResultBuilder<'t> {
@@ -1300,15 +1456,27 @@ impl<'t> ResultBuilder<'t> {
             decls: Vec::new(),
             attrs: Vec::new(),
             open: Vec::new(),
+            marks: crate::serialize::EscapingMarks::default(),
+            text_nodes: 0,
+            text_len: None,
         })
     }
 
     /// The finished document.
-    pub fn finish(mut self) -> Result<BufferDocument<'t>, XsltError> {
+    pub fn finish(self) -> Result<BufferDocument<'t>, XsltError> {
+        self.finish_with_marks().map(|(doc, _)| doc)
+    }
+
+    /// The finished document and its `disable-output-escaping` marks (§20.2).
+    pub fn finish_with_marks(
+        mut self,
+    ) -> Result<(BufferDocument<'t>, crate::serialize::EscapingMarks), XsltError> {
         self.flush()?;
-        self.builder
+        let doc = self
+            .builder
             .finalize()
-            .map_err(|e| XsltError::internal(format!("could not finish a result tree: {e}")))
+            .map_err(|e| XsltError::internal(format!("could not finish a result tree: {e}")))?;
+        Ok((doc, self.marks))
     }
 
     /// The node index of the element opened last, for the caller that needs to
@@ -1321,6 +1489,7 @@ impl<'t> ResultBuilder<'t> {
         let Some((name, binding, nilled)) = self.pending.take() else {
             return Ok(());
         };
+        self.text_len = None;
         let decls: Vec<(&str, &str)> = self
             .decls
             .iter()
@@ -1366,6 +1535,7 @@ impl<'t> Receiver<'t> for ResultBuilder<'t> {
     }
 
     fn end_document(&mut self) -> Result<(), XsltError> {
+        self.text_len = None;
         self.flush()
     }
 
@@ -1376,6 +1546,7 @@ impl<'t> Receiver<'t> for ResultBuilder<'t> {
         nilled: bool,
     ) -> Result<(), XsltError> {
         self.flush()?;
+        self.text_len = None;
         self.pending = Some((name.clone(), binding, nilled));
         Ok(())
     }
@@ -1399,19 +1570,38 @@ impl<'t> Receiver<'t> for ResultBuilder<'t> {
         self.flush()
     }
 
-    fn text(&mut self, s: &str, _disable_escaping: bool) -> Result<(), XsltError> {
+    /// Character data; with `disable_escaping`, the characters carry the
+    /// disable-escaping property (§20.2) — only a pipeline built with
+    /// [`ComplexContentNormalizer::honouring_disabled_escaping`] sends it.
+    fn text(&mut self, s: &str, disable_escaping: bool) -> Result<(), XsltError> {
+        if s.is_empty() {
+            return Ok(());
+        }
         self.flush()?;
+        let start = match self.text_len {
+            Some(len) => len,
+            None => {
+                self.text_nodes += 1;
+                0
+            }
+        };
+        if disable_escaping {
+            self.marks.push(self.text_nodes - 1, start, start + s.len());
+        }
+        self.text_len = Some(start + s.len());
         self.builder.text(s);
         Ok(())
     }
 
     fn comment(&mut self, s: &str) -> Result<(), XsltError> {
         self.flush()?;
+        self.text_len = None;
         self.builder.comment(s).map_err(build_error)
     }
 
     fn pi(&mut self, target: &str, data: &str) -> Result<(), XsltError> {
         self.flush()?;
+        self.text_len = None;
         self.builder
             .processing_instruction(target, data)
             .map_err(build_error)
@@ -1419,6 +1609,7 @@ impl<'t> Receiver<'t> for ResultBuilder<'t> {
 
     fn end_element(&mut self) -> Result<(), XsltError> {
         self.flush()?;
+        self.text_len = None;
         self.open.pop();
         self.builder.end_element().map_err(build_error)
     }

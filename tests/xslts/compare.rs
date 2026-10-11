@@ -369,7 +369,11 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
                 "expected error {code} but the transformation succeeded"
             )),
         },
-        AssertSerializationError { code } => match &out.error {
+        AssertSerializationError { code } => match out.error.as_ref().or(out
+            .primary
+            .as_ref()
+            .and_then(|p| p.serialization_error.as_ref()))
+        {
             Some(e) if code_matches(code, e) => Verdict::pass(),
             Some(e) => Verdict::wrong_error(format!(
                 "expected serialization error {code}, got {}: {}",
@@ -441,6 +445,10 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
             };
             match &out.primary {
                 None => Verdict::fail("no primary result"),
+                Some(ResultDocument {
+                    serialization_error: Some(e),
+                    ..
+                }) => unserialized(e),
                 Some(p) => match regex_matches(&p.serialized, &regex, flags) {
                     Ok(true) => Verdict::pass(),
                     Ok(false) => Verdict::fail(format!(
@@ -464,11 +472,15 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
             };
             match &out.primary {
                 None => Verdict::fail("no primary result"),
+                Some(ResultDocument {
+                    serialization_error: Some(e),
+                    ..
+                }) => unserialized(e),
                 Some(p) => {
                     if serializations_equal(
                         trim_trailing_newlines(&expected),
                         trim_trailing_newlines(&p.serialized),
-                        method.as_deref(),
+                        method.as_deref().or(p.method.as_deref()),
                         || !cx.inputs.may_produce_cr(),
                     ) {
                         Verdict::pass()
@@ -576,6 +588,15 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
         }
         Unknown(name) => Verdict::harness(format!("unknown assertion <{name}>")),
     }
+}
+
+/// A serialization assertion over a result whose stylesheet serialization failed in a case
+/// that does not ask for serialization (`ResultDocument::serialization_error`).
+fn unserialized(e: &xslt2::XsltError) -> Verdict {
+    Verdict::fail(format!(
+        "the stylesheet's serialization failed: {}: {}",
+        e.code, e.message
+    ))
 }
 
 fn unexpected_error(out: &RunOutput) -> Verdict {
@@ -901,6 +922,7 @@ fn eval_xpath<N: xsd_schema::xpath::DomNavigator, T>(
 }
 
 fn regex_matches(input: &str, regex: &str, flags: &str) -> Result<bool, String> {
+    let regex = &non_capturing_groups_as_groups(regex);
     let names = NameTable::new();
     let ctx = XPathContext::new(&names);
     let expr =
@@ -916,6 +938,51 @@ fn regex_matches(input: &str, regex: &str, flags: &str) -> Result<bool, String> 
         })
         .map_err(|e| format!("serialization-matches regex /{}/ raised {e}", clip(regex)))?;
     ebv(&value)
+}
+
+/// The catalog is the XSLT 3.0 suite's, and some `serialization-matches` regexes use the
+/// non-capturing group `(?:…)` of F&O 3.0 §5.6.1, which the XPath 2.0 `fn:matches` the harness
+/// evaluates them with does not have (FORX0002). For a yes/no match a capturing group is the
+/// same pattern — capturing changes only what is captured — unless the regex refers back to a
+/// group by number, so the rewrite is made only when it has no back-reference (`\1`–`\9`).
+/// Escaped parentheses and character classes are left alone.
+fn non_capturing_groups_as_groups(regex: &str) -> String {
+    let chars: Vec<char> = regex.chars().collect();
+    let has_backreference = chars
+        .windows(2)
+        .any(|w| w[0] == '\\' && matches!(w[1], '1'..='9'));
+    if has_backreference || !regex.contains("(?:") {
+        return regex.to_string();
+    }
+    let mut out = String::with_capacity(regex.len());
+    let (mut i, mut in_class) = (0, false);
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\\' => {
+                out.push(c);
+                if let Some(&next) = chars.get(i + 1) {
+                    out.push(next);
+                }
+                i += 2;
+                continue;
+            }
+            '[' => in_class = true,
+            ']' => in_class = false,
+            '(' if !in_class
+                && chars.get(i + 1) == Some(&'?')
+                && chars.get(i + 2) == Some(&':') =>
+            {
+                out.push('(');
+                i += 3;
+                continue;
+            }
+            _ => {}
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
 }
 
 fn load_text(
@@ -1344,7 +1411,9 @@ fn trim_trailing_newlines(s: &str) -> &str {
 /// throughout; this processor writes LF.
 ///
 /// The rule is kept narrow, so that it cannot hide a carriage return the result really needs.
-/// It applies only to an assertion whose `method` is `text` or `xml` (the two sections quoted),
+/// It applies only to an assertion whose `method` is `text`, `xml` or `xhtml` (the two sections
+/// quoted, and §6 for XHTML: "The serialization of the instance of the data model follows the same
+/// rules as for the XML output method", with §6.1.2 deferring the newline rule to §5.1.2),
 /// only when the expected text is CRLF *throughout* (every LF preceded by a CR and no other CR),
 /// and only when the actual serialization contains no CR at all. That alone is not enough: the
 /// text method writes a carriage return of the data model as it is, so a result string
@@ -1362,7 +1431,7 @@ fn serializations_equal(
     if expected == actual {
         return true;
     }
-    matches!(method, Some("text") | Some("xml"))
+    matches!(method, Some("text") | Some("xml") | Some("xhtml"))
         && crlf_throughout(expected)
         && !actual.contains('\r')
         && expected.replace("\r\n", "\n") == actual
@@ -2066,12 +2135,62 @@ pub mod self_test {
         );
     }
 
+    /// M3a (F8): a stylesheet serialization that failed in a case not asking for
+    /// serialization leaves the tree assertions to the tree; the serialization assertions see
+    /// the failure, and `assert-serialization-error` can match it.
+    fn a_failed_serialization_without_serialize_keeps_the_tree() {
+        let out = RunOutput {
+            primary: Some(ResultDocument {
+                serialized: String::new(),
+                tree: Ok("<a>x</a>".into()),
+                serialization_error: Some(xslt2::XsltError::new("SESU0007", "no such encoding")),
+                method: None,
+            }),
+            ..Default::default()
+        };
+        check(evaluate(&assert_("/a = 'x'"), &out, &cx()), Outcome::Pass);
+        check(evaluate(&matches_("x"), &out, &cx()), Outcome::Fail);
+        check(
+            evaluate(&serialization("<a>x</a>"), &out, &cx()),
+            Outcome::Fail,
+        );
+        let error = |code: &str| Assertion::AssertSerializationError { code: code.into() };
+        check(evaluate(&error("SESU0007"), &out, &cx()), Outcome::Pass);
+        check(
+            evaluate(&error("SERE0008"), &out, &cx()),
+            Outcome::WrongError,
+        );
+    }
+
+    /// M3a: a `(?:…)` group of an XPath 3.0 regex is matched as a plain group, unless the
+    /// regex has a back-reference; escaped and bracketed `(?:` stay as they are.
+    fn non_capturing_groups() {
+        assert_eq!(
+            non_capturing_groups_as_groups("a(?:[\\n\\r]|x)b"),
+            "a([\\n\\r]|x)b"
+        );
+        assert_eq!(non_capturing_groups_as_groups("\\(?:x"), "\\(?:x");
+        assert_eq!(non_capturing_groups_as_groups("[(?:]"), "[(?:]");
+        assert_eq!(non_capturing_groups_as_groups("(a)(?:b)\\1"), "(a)(?:b)\\1");
+        assert_eq!(
+            regex_matches("is <del>\n x", "is <del>(?:[\\n\\r]|\\r\\n) x", "s"),
+            Ok(true)
+        );
+    }
+
     /// M2j (L-CRLF-OUTFILE): an expected serialization written with CRLF throughout matches
-    /// LF newlines, for the text and xml methods only, and never hides a carriage return.
+    /// LF newlines, for the text, xml and xhtml methods only (xhtml since M3a: Serialization §6
+    /// gives it the XML method's newline rule), and never hides a carriage return.
     fn crlf_expected_serialization() {
         let text = Some("text");
         assert!(serializations_equal("a\r\nb", "a\nb", text, || true));
         assert!(serializations_equal("a\r\nb", "a\nb", Some("xml"), || true));
+        assert!(serializations_equal(
+            "a\r\nb",
+            "a\nb",
+            Some("xhtml"),
+            || true
+        ));
         assert!(serializations_equal("a\r\nb", "a\r\nb", text, || true));
         // Other methods, or no method given: exact.
         assert!(!serializations_equal("a\r\nb", "a\nb", None, || true));
@@ -2079,12 +2198,6 @@ pub mod self_test {
             "a\r\nb",
             "a\nb",
             Some("html"),
-            || true
-        ));
-        assert!(!serializations_equal(
-            "a\r\nb",
-            "a\nb",
-            Some("xhtml"),
             || true
         ));
         // Mixed line endings, a lone CR, a doubled CR: exact.
@@ -2369,6 +2482,8 @@ pub mod self_test {
             primary: Some(ResultDocument {
                 serialized: serialized.into(),
                 tree: Ok(tree.into()),
+                serialization_error: None,
+                method: None,
             }),
             ..Default::default()
         }
@@ -2510,6 +2625,8 @@ pub mod self_test {
             primary: Some(ResultDocument {
                 serialized: "x".into(),
                 tree: Err("cannot write".into()),
+                serialization_error: None,
+                method: None,
             }),
             ..Default::default()
         };
@@ -2656,6 +2773,8 @@ pub mod self_test {
             assert_over_a_non_well_formed_result_sees_the_document_node,
             xpath30_assertions_are_rewritten_exactly,
             crlf_expected_serialization,
+            non_capturing_groups,
+            a_failed_serialization_without_serialize_keeps_the_tree,
             a_non_well_formed_result_must_be_declared,
             harness_refusals_are_harness_errors,
             crlf_rule_needs_inputs_that_cannot_produce_cr,

@@ -62,6 +62,9 @@ struct Job {
     initial_template: Option<QName>,
     initial_mode: Option<ModeKey>,
     strict_recoverable: bool,
+    /// `<output serialize="yes"/>`: the case asks for the result to be serialized, so a
+    /// failure of the stylesheet's serialization is the run's error.
+    serialize: bool,
 }
 
 impl Job {
@@ -162,6 +165,13 @@ impl Job {
             initial_template: run.case.test.initial_template.as_ref().map(qname_of),
             initial_mode: run.case.test.initial_mode.as_ref().and_then(mode_of),
             strict_recoverable: run.strict_recoverable,
+            serialize: run
+                .case
+                .test
+                .output
+                .as_ref()
+                .and_then(|o| o.serialize)
+                .unwrap_or(false),
         })
     }
 
@@ -240,7 +250,7 @@ impl Job {
                 } else {
                     messages
                 };
-                match primary_result(&compiled, &outcome) {
+                match primary_result(&compiled, &outcome, self.serialize) {
                     Ok(primary) => RunOutput {
                         primary: Some(primary),
                         messages,
@@ -264,20 +274,52 @@ impl Job {
 /// own `xsl:output` (`CompiledStylesheet::serialize_primary`), and written with the catalog's
 /// default parameters (`default_serialization`).
 ///
-/// A failure of the stylesheet's serialization is still the run's error, as before: the
-/// harness always serializes the way the stylesheet asks, so an output the processor cannot
-/// write (an unimplemented method or encoding, a serialization error) ends the case.
+/// A failure of the stylesheet's serialization is the run's error only when the case asks for
+/// serialization — `<output serialize="yes"/>`; the catalog (`admin/catalog-schema.xsd`,
+/// `output/@serialize`): "Determines whether or not serialization takes place. The default is
+/// no." Otherwise the transformation succeeded and produced a tree, which is what the case's
+/// tree assertions are about: the failure is kept in `serialization_error`, where only a
+/// serialization assertion sees it (M3a, harness-review backlog item F8).
 fn primary_result(
     compiled: &xslt2::CompiledStylesheet<'_>,
     outcome: &xslt2::Outcome<'_>,
+    serialize: bool,
 ) -> Result<ResultDocument, XsltError> {
-    let serialized = compiled.serialize_primary(outcome)?;
-    let tree = match outcome.primary {
-        Some(doc) => default_serialization(doc),
-        // No primary result: `serialize_primary` wrote nothing either.
-        None => Ok(String::new()),
+    let (serialized, serialization_error) = match compiled.serialize_primary(outcome) {
+        Ok(text) => (text, None),
+        Err(e) if serialize => return Err(e),
+        Err(e) => (String::new(), Some(e)),
     };
-    Ok(ResultDocument { serialized, tree })
+    let (tree, method) = match outcome.primary {
+        Some(doc) => {
+            // The method `serialize_primary` used — with §20's rule that an XHTML result of a 1.0
+            // stylesheet defaults to `xml`.
+            let method = compiled
+                .primary_serialization_params(outcome)
+                .ok()
+                .flatten()
+                .map(|p| method_name(p.method).to_string());
+            (default_serialization(doc), method)
+        }
+        // No primary result: `serialize_primary` wrote nothing either.
+        None => (Ok(String::new()), None),
+    };
+    Ok(ResultDocument {
+        serialized,
+        tree,
+        serialization_error,
+        method,
+    })
+}
+
+fn method_name(method: xslt2::serialize::ResolvedMethod) -> &'static str {
+    use xslt2::serialize::ResolvedMethod::*;
+    match method {
+        Xml => "xml",
+        Xhtml => "xhtml",
+        Html => "html",
+        Text => "text",
+    }
 }
 
 /// A result tree written with the serialization parameters the catalog defines `assert-xml`
@@ -577,7 +619,7 @@ pub fn self_test() -> usize {
         let outcome = run
             .transform_source("urn:harness-probe-source", "<in/>")
             .expect("the probe stylesheet runs");
-        primary_result(&compiled, &outcome).expect("the probe result serializes")
+        primary_result(&compiled, &outcome, true).expect("the probe result serializes")
     };
     let sheet = |output: &str| {
         format!(
@@ -608,6 +650,68 @@ pub fn self_test() -> usize {
     check(
         declared.serialized.starts_with("<?xml") && declared.tree.as_deref() == Ok(tree),
         "the default form has no XML declaration",
+    );
+
+    // M3a (F8): a stylesheet serialization that fails ends the run only when the case asks
+    // for serialization; otherwise the tree is kept for the tree assertions and the failure for
+    // the serialization assertions.
+    let failing = |serialize: bool| {
+        let compiled = Compiler::new(&names, &functions)
+            .compile_str(
+                &sheet(r#"<xsl:output encoding="XXX-xx"/>"#),
+                "urn:harness-probe",
+            )
+            .expect("the probe stylesheet compiles");
+        let arena = Bump::new();
+        let run = compiled.transformation(&arena, TransformOptions::default());
+        let outcome = run
+            .transform_source("urn:harness-probe-source", "<in/>")
+            .expect("the probe stylesheet runs");
+        primary_result(&compiled, &outcome, serialize).map(|r| {
+            (
+                r.tree.clone(),
+                r.serialization_error.map(|e| e.code),
+                r.serialized,
+            )
+        })
+    };
+    check(
+        matches!(failing(true), Err(e) if e.code == "SESU0007"),
+        "serialize=\"yes\": the serialization failure is the run's error",
+    );
+    check(
+        failing(false)
+            == Ok((
+                Ok(tree.to_string()),
+                Some("SESU0007".to_string()),
+                String::new(),
+            )),
+        "serialize absent: the tree survives, the failure is kept for serialization assertions",
+    );
+    check(
+        forms(&sheet(r#"<xsl:output method="xhtml"/>"#))
+            .method
+            .as_deref()
+            == Some("xhtml")
+            && forms(&sheet("")).method.as_deref() == Some("xml"),
+        "the method the stylesheet serialization used is recorded",
+    );
+    // §20: "if the version attribute of the xsl:stylesheet element of the principal stylesheet
+    // module has the value 1.0, and if the result tree is generated implicitly …, then the
+    // default output method in this situation is xml" — the harness records what
+    // `serialize_primary` did, not the 2.0 default.
+    let xhtml_result = |version: &str| {
+        forms(&format!(
+            r#"<xsl:stylesheet version="{version}" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+                 <xsl:template match="/"><html xmlns="http://www.w3.org/1999/xhtml"/></xsl:template>
+               </xsl:stylesheet>"#
+        ))
+        .method
+    };
+    check(
+        xhtml_result("1.0").as_deref() == Some("xml")
+            && xhtml_result("2.0").as_deref() == Some("xhtml"),
+        "an XHTML result of a 1.0 stylesheet is recorded as the xml method",
     );
 
     // P2-3: a harness refusal is a harnessError, never an engine error that `<error

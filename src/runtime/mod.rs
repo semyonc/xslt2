@@ -30,7 +30,10 @@ mod variables;
 pub use content::SimpleDefault;
 pub use context::{Frame, XsltContext};
 pub use functions::XsltEvaluator;
-pub use serialize::{serialize_options, serialize_result, source_options, unknown_location};
+pub(crate) use serialize::tree_context;
+pub use serialize::{
+    serialize_result, serialize_result_to_bytes, source_options, unknown_location,
+};
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -261,6 +264,12 @@ pub struct Outcome<'t> {
     pub primary: Option<&'t BufferDocument<'t>>,
     /// `xsl:message` output, in order.
     pub messages: Vec<Message>,
+    /// The characters of the primary result tree's text nodes that were
+    /// written with `disable-output-escaping="yes"` in final output state
+    /// (§20.2) — the tree's "additional boolean property disable-escaping",
+    /// which only the serializer reads. Empty when the stylesheet disabled no
+    /// escaping.
+    pub disabled_escaping: crate::serialize::EscapingMarks,
 }
 /// How a template was entered, which decides the code a missing required
 /// parameter reports (§10.1.1).
@@ -500,7 +509,9 @@ impl<'a, 't> Transformation<'a, 't> {
             self.store.borrow().names(),
             None,
         )?;
-        let mut out = ComplexContentNormalizer::new(builder);
+        // The primary result is written in final output state (§19.1), so
+        // `disable-output-escaping` is honoured here and nowhere else (§20.2).
+        let mut out = ComplexContentNormalizer::new(builder).honouring_disabled_escaping();
         out.start_document()?;
 
         let mut cx = XsltContext::empty();
@@ -526,12 +537,13 @@ impl<'a, 't> Transformation<'a, 't> {
         }
 
         out.end_document()?;
-        let doc = out.into_inner().finish()?;
+        let (doc, disabled_escaping) = out.into_inner().finish_with_marks()?;
         let id = self.store.borrow_mut().insert(doc, None);
         let primary = self.store.borrow().get(id).map(|d| d.doc);
         Ok(Outcome {
             primary,
             messages: self.take_messages(),
+            disabled_escaping,
         })
     }
 

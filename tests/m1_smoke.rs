@@ -7,6 +7,8 @@
 //! separate from the conformance harness so that a regression here is readable
 //! without the suite.
 
+mod common;
+
 use std::sync::Arc;
 
 use bumpalo::Bump;
@@ -52,7 +54,7 @@ where
         .with_resolver(resolver);
     let run = setup(run);
     let outcome = run.transform_source("urn:test:in.xml", source)?;
-    compiled.serialize_primary(&outcome)
+    compiled.serialize_primary(&outcome).map(common::body)
 }
 
 /// Wraps a body in an `xsl:stylesheet` element.
@@ -384,7 +386,10 @@ fn a_stylesheet_parameter_can_be_supplied_by_the_caller() {
         );
     let outcome = run.transform_source("urn:test:in.xml", "<doc/>").unwrap();
     assert_eq!(
-        compiled.serialize_primary(&outcome).unwrap(),
+        compiled
+            .serialize_primary(&outcome)
+            .map(common::body)
+            .unwrap(),
         "<out>caller</out>"
     );
 }
@@ -474,7 +479,13 @@ fn an_xsl_message_is_collected_and_terminate_yes_ends_the_run() {
     let outcome = run.transform_source("urn:test:in.xml", "<doc/>").unwrap();
     assert_eq!(outcome.messages.len(), 1);
     assert_eq!(outcome.messages[0].content, "hello");
-    assert_eq!(compiled.serialize_primary(&outcome).unwrap(), "<out/>");
+    assert_eq!(
+        compiled
+            .serialize_primary(&outcome)
+            .map(common::body)
+            .unwrap(),
+        "<out/>"
+    );
 
     let terminating = sheet(
         r#"<xsl:template match="/"><xsl:message terminate="yes">stop</xsl:message></xsl:template>"#,
@@ -533,12 +544,15 @@ fn errors_carry_the_line_and_column_of_the_instruction() {
 #[test]
 fn xsl_output_controls_the_serialization() {
     let s = sheet(
-        r#"<xsl:output method="xml" omit-xml-declaration="no" encoding="UTF-8"/>
+        r#"<xsl:output method="xml" omit-xml-declaration="no" encoding="UTF-8" standalone="yes"/>
            <xsl:template match="/"><out/></xsl:template>"#,
     );
+    // (`transform` drops only the default declaration, `common::DECLARATION`.)
     let result = transform(&s, "<doc/>").unwrap();
-    assert!(result.starts_with("<?xml"), "{result}");
-    assert!(result.ends_with("<out/>"), "{result}");
+    assert_eq!(
+        result,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><out/>"#
+    );
 
     let text = sheet(
         r#"<xsl:output method="text"/>
@@ -653,7 +667,13 @@ fn a_named_template_can_be_the_entry_point() {
         .transformation(&arena, TransformOptions::default())
         .with_initial_template(QName::local("main"));
     let outcome = run.transform_source("urn:test:in.xml", "<doc/>").unwrap();
-    assert_eq!(compiled.serialize_primary(&outcome).unwrap(), "<out/>");
+    assert_eq!(
+        compiled
+            .serialize_primary(&outcome)
+            .map(common::body)
+            .unwrap(),
+        "<out/>"
+    );
 
     // §6: a name that is not declared is XTDE0040.
     let arena2 = Bump::new();

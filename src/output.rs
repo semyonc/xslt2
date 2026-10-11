@@ -1,36 +1,67 @@
-//! `xsl:output` (§20) and the serialization parameters M1 honours.
+//! `xsl:output` (§20): the merged output definitions a stylesheet declares.
 //!
-//! M1 serializes the `xml` method with the upstream serializer
-//! (`xsd_schema::document::serialize`) and the `text` method by concatenating
-//! the text nodes of the result. `html` and `xhtml` are M3, and reaching them
-//! raises the internal not-implemented code rather than silently producing XML.
+//! An output definition is the *stylesheet's* view of the serialization
+//! parameters: every attribute an `xsl:output` declaration may carry, merged by
+//! import precedence, with `cdata-section-elements` united and
+//! `use-character-maps` concatenated and expanded into one character map at
+//! compile time. What a serializer actually uses — the defaults that depend on
+//! the method, the method chosen from the tree when none is given — is worked
+//! out per result tree by [`crate::serialize::SerializationParams`].
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
-use xsd_schema::document::serialize::SerializeOptions;
+use crate::error::{codes, XsltError};
+use crate::names::{lexical_qname, QName};
+use crate::serialize::CharacterMap;
+use crate::whitespace;
 
-use crate::error::XsltError;
-use crate::names::QName;
-
-/// The output method (§20).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The output method (§20, Serialization §3 `method`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum OutputMethod {
-    /// No `method` attribute: §20 chooses `xml` unless the result looks like
-    /// HTML. M1 always writes XML and records the choice here.
+    /// No `method` attribute: §20 chooses one from the tree being serialized.
     #[default]
     Unspecified,
     Xml,
     Xhtml,
     Html,
     Text,
+    /// A prefixed QName: "the expanded-QName identifies the output method; the
+    /// behavior in this case is not specified by this document" (§20). This
+    /// processor implements none, so serializing with one is an error.
+    Other(QName),
 }
 
-/// One merged `xsl:output` declaration.
+impl OutputMethod {
+    /// The method's name as the spec spells it.
+    pub fn name(&self) -> String {
+        match self {
+            OutputMethod::Unspecified | OutputMethod::Xml => "xml".into(),
+            OutputMethod::Xhtml => "xhtml".into(),
+            OutputMethod::Html => "html".into(),
+            OutputMethod::Text => "text".into(),
+            OutputMethod::Other(q) => q.to_string(),
+        }
+    }
+}
+
+/// One merged output definition (§20).
 ///
-/// §20: "If there are several `xsl:output` declarations … the values of the
-/// attributes are combined … an attribute specified at a higher import
-/// precedence takes precedence." Each field therefore remembers the precedence
-/// that set it, so a later declaration of lower precedence cannot overwrite it.
+/// > For the `cdata-section-elements` attribute, the output definition uses the
+/// > union of the values from all the constituent `xsl:output` declarations. For
+/// > the `use-character-maps` attribute, the output definition uses the
+/// > concatenation of the sequences of expanded QNames values from all the
+/// > constituent `xsl:output` declarations, taking them in order of increasing
+/// > import precedence, or where several have the same import precedence, in
+/// > declaration order. For other attributes, the output definition uses the
+/// > value of that attribute from the `xsl:output` declaration with the highest
+/// > import precedence.
+///
+/// Each single-valued field remembers the precedence that set it (a
+/// [`Setting`]), so a declaration of lower precedence cannot overwrite it
+/// whatever order the module graph is walked in. A `doctype-*` attribute
+/// written as the zero-length string is stored as such: "the serialization
+/// parameter is not set (is "absent")", but it still overrides a value of lower
+/// precedence (`output-0312`).
 #[derive(Clone, Debug, Default)]
 pub struct OutputDefinition {
     pub method: Setting<OutputMethod>,
@@ -38,10 +69,27 @@ pub struct OutputDefinition {
     pub encoding: Setting<String>,
     pub indent: Setting<bool>,
     pub omit_xml_declaration: Setting<bool>,
+    /// `None` is `standalone="omit"`.
     pub standalone: Setting<Option<bool>>,
     pub doctype_public: Setting<String>,
     pub doctype_system: Setting<String>,
     pub media_type: Setting<String>,
+    pub byte_order_mark: Setting<bool>,
+    pub escape_uri_attributes: Setting<bool>,
+    pub include_content_type: Setting<bool>,
+    /// The token as written; checked against what the serializer supports when
+    /// it is used (SESU0011).
+    pub normalization_form: Setting<String>,
+    pub undeclare_prefixes: Setting<bool>,
+    /// The union of every declaration's `cdata-section-elements`.
+    pub cdata_section_elements: Vec<QName>,
+    /// `use-character-maps` of each declaration, keyed by (import precedence,
+    /// declaration order) so that [`Self::character_map_names`] is in the
+    /// order §20 concatenates them.
+    pub use_character_maps: BTreeMap<(u32, u32), Vec<QName>>,
+    /// The character map the names above expand to (§20.1), filled in once
+    /// every `xsl:character-map` is known.
+    pub character_map: CharacterMap,
 }
 
 /// A value plus the import precedence that set it.
@@ -92,6 +140,17 @@ impl<T> Setting<T> {
     pub fn is_set(&self) -> bool {
         self.value.is_some()
     }
+
+    /// A copy of this setting with a value that overrides any declaration
+    /// (the API override of §20: "An implementation may allow the attributes
+    /// of the `xsl:output` declaration to be overridden").
+    pub fn overridden(value: T) -> Self {
+        Self {
+            value: Some(value),
+            precedence: u32::MAX,
+            conflict: None,
+        }
+    }
 }
 
 impl<T: Copy> Setting<T> {
@@ -119,8 +178,8 @@ impl OutputDefinition {
     /// (§20, XTSE1560).
     ///
     /// `cdata-section-elements` and `use-character-maps` are exempt by the same
-    /// rule — §20 unions them rather than overriding — and are not stored here
-    /// at all, so they cannot appear.
+    /// rule — §20 unions them rather than overriding — and are not stored as
+    /// [`Setting`]s at all, so they cannot appear.
     pub fn conflicting_attribute(&self) -> Option<&'static str> {
         [
             ("method", self.method.conflicts()),
@@ -135,126 +194,76 @@ impl OutputDefinition {
             ("doctype-public", self.doctype_public.conflicts()),
             ("doctype-system", self.doctype_system.conflicts()),
             ("media-type", self.media_type.conflicts()),
+            ("byte-order-mark", self.byte_order_mark.conflicts()),
+            (
+                "escape-uri-attributes",
+                self.escape_uri_attributes.conflicts(),
+            ),
+            (
+                "include-content-type",
+                self.include_content_type.conflicts(),
+            ),
+            ("normalization-form", self.normalization_form.conflicts()),
+            ("undeclare-prefixes", self.undeclare_prefixes.conflicts()),
         ]
         .into_iter()
         .find_map(|(name, conflicts)| conflicts.then_some(name))
     }
 
-    /// The method actually used, with `Unspecified` resolved to `xml`.
-    ///
-    /// §20 lets a processor pick `html` when the first element is `html`; M1
-    /// does not implement the HTML method at all, so the default is always
-    /// XML, which is also what backwards-compatible behaviour asks for
-    /// (§9.10 row 11).
-    pub fn effective_method(&self) -> OutputMethod {
-        match self.method.get().copied().unwrap_or_default() {
-            OutputMethod::Unspecified => OutputMethod::Xml,
-            other => other,
-        }
+    /// The `use-character-maps` names of every constituent declaration, in
+    /// increasing import precedence and then declaration order (§20).
+    pub fn character_map_names(&self) -> impl Iterator<Item = &QName> {
+        self.use_character_maps.values().flatten()
     }
 
-    /// The highest character the declared encoding can write directly, or
-    /// `None` when every character can be written as it stands.
-    pub fn character_escaping(&self) -> Result<Option<char>, XsltError> {
-        let Some(encoding) = self.encoding.get() else {
-            return Ok(None);
-        };
-        match encoding_limit(encoding) {
-            Some(limit) => Ok(limit),
-            None => Err(XsltError::not_implemented(
-                format!("the output encoding {encoding:?}"),
-                "M3a",
-            )),
+    /// Adds a `cdata-section-elements` name unless it is already there (§20:
+    /// "the union of the values").
+    pub fn add_cdata_section_element(&mut self, name: QName) {
+        if !self.cdata_section_elements.contains(&name) {
+            self.cdata_section_elements.push(name);
         }
-    }
-
-    /// The upstream serializer options this definition maps to.
-    ///
-    /// The default is compact output: most of the conformance suite's
-    /// assertions re-parse the result and compare trees, and any indentation
-    /// this layer invents would show up as extra text nodes. `indent="yes"`
-    /// asks for two spaces per level, which is what the upstream serializer's
-    /// `indent: Some(width)` produces.
-    pub fn serialize_options(&self) -> Result<SerializeOptions, XsltError> {
-        match self.effective_method() {
-            OutputMethod::Xml => {}
-            OutputMethod::Text => {}
-            method => {
-                return Err(XsltError::not_implemented(
-                    format!("the {} output method", method_name(method)),
-                    "M3a",
-                ))
-            }
-        }
-        // Rejects an encoding M1 cannot honour at all; the escaping it implies
-        // is applied by the caller, after serialization.
-        self.character_escaping()?;
-        if self.doctype_public.is_set() || self.doctype_system.is_set() {
-            return Err(XsltError::not_implemented("xsl:output/@doctype-*", "M3a"));
-        }
-        Ok(SerializeOptions {
-            xml_declaration: !self.omit_xml_declaration.get_or(true),
-            standalone: self.standalone.get().copied().flatten(),
-            indent: if self.indent.get_or(false) {
-                Some(2)
-            } else {
-                None
-            },
-        })
     }
 }
 
-/// The highest code point the declared `encoding` can hold directly; anything
-/// above it is written as a numeric character reference.
+/// Parses the `method` attribute (§20 \[ERR XTSE1570\]).
 ///
-/// §20: "the encoding … specifies the preferred encoding to use for
-/// outputting the result tree". M1 writes UTF-8 bytes whatever the encoding
-/// says, so all it can honour is the *escaping* an encoding forces: a
-/// character the encoding cannot represent must appear as a character
-/// reference. `None` means nothing needs escaping.
-pub fn encoding_limit(encoding: &str) -> Option<Option<char>> {
-    match crate::whitespace::trim(encoding)
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "utf-8" | "utf8" | "utf-16" | "utf16" | "utf-16le" | "utf-16be" => Some(None),
-        "us-ascii" | "ascii" => Some(Some('\u{7F}')),
-        "iso-8859-1" | "latin1" | "latin-1" => Some(Some('\u{FF}')),
-        "windows-1252" | "cp1252" => Some(Some('\u{FF}')),
-        _ => None,
+/// > The value must (if present) be a valid QName. If the QName does not have
+/// > a prefix, then it identifies a method specified in \[XSLT and XQuery
+/// > Serialization\] and must be one of `xml`, `html`, `xhtml`, or `text`. If the
+/// > QName has a prefix, then the QName is expanded into an expanded-QName …
+/// > the behavior in this case is not specified by this document.
+///
+/// `resolve` maps a prefix to its namespace URI in the declaration's scope.
+pub fn parse_method(
+    value: &str,
+    resolve: impl Fn(&str) -> Option<String>,
+) -> Result<OutputMethod, XsltError> {
+    let value = whitespace::trim(value);
+    let invalid = || {
+        XsltError::new(
+            codes::XTSE1570,
+            format!(
+                "the output method {value:?} is neither xml, html, xhtml, text nor a prefixed QName"
+            ),
+        )
+    };
+    let (prefix, local) = lexical_qname(value).ok_or_else(invalid)?;
+    if prefix.is_empty() {
+        return match local {
+            "xml" => Ok(OutputMethod::Xml),
+            "xhtml" => Ok(OutputMethod::Xhtml),
+            "html" => Ok(OutputMethod::Html),
+            "text" => Ok(OutputMethod::Text),
+            _ => Err(invalid()),
+        };
     }
-}
-
-fn method_name(method: OutputMethod) -> &'static str {
-    match method {
-        OutputMethod::Unspecified | OutputMethod::Xml => "xml",
-        OutputMethod::Xhtml => "xhtml",
-        OutputMethod::Html => "html",
-        OutputMethod::Text => "text",
-    }
-}
-
-/// Parses the `method` attribute.
-pub fn parse_method(value: &str) -> Result<OutputMethod, XsltError> {
-    match crate::whitespace::trim(value) {
-        "xml" => Ok(OutputMethod::Xml),
-        "xhtml" => Ok(OutputMethod::Xhtml),
-        "html" => Ok(OutputMethod::Html),
-        "text" => Ok(OutputMethod::Text),
-        // §20: the value may be a QName with a prefix, naming an
-        // implementation-defined method. We implement none.
-        other => Err(XsltError::not_implemented(
-            format!("the output method {other:?}"),
-            "M3a",
+    match resolve(prefix) {
+        Some(uri) if !uri.is_empty() => Ok(OutputMethod::Other(QName::new(uri, local))),
+        _ => Err(XsltError::new(
+            codes::XTSE0280,
+            format!("the prefix {prefix:?} of the output method {value:?} is not bound"),
         )),
     }
-}
-
-/// Every `xsl:output` declaration of a stylesheet, unnamed plus named.
-#[derive(Default)]
-pub struct OutputDefinitions {
-    pub unnamed: OutputDefinition,
-    pub named: HashMap<QName, OutputDefinition>,
 }
 
 #[cfg(test)]
@@ -272,37 +281,39 @@ mod tests {
     }
 
     #[test]
-    fn the_default_is_compact_xml_without_a_declaration() {
-        let d = OutputDefinition::default();
-        assert_eq!(d.effective_method(), OutputMethod::Xml);
-        let options = d.serialize_options().unwrap();
-        assert!(!options.xml_declaration);
-        assert_eq!(options.indent, None);
+    fn equal_precedence_disagreement_is_a_conflict_unless_overridden() {
+        let mut d = OutputDefinition::default();
+        d.encoding.set_checked("UTF-8".into(), 1);
+        d.encoding.set_checked("UTF-16".into(), 1);
+        assert_eq!(d.conflicting_attribute(), Some("encoding"));
+        d.encoding.set_checked("US-ASCII".into(), 2);
+        assert_eq!(d.conflicting_attribute(), None);
     }
 
     #[test]
-    fn indent_yes_asks_the_upstream_serializer_for_two_spaces() {
-        let mut d = OutputDefinition::default();
-        d.indent.set(true, 0);
-        assert_eq!(d.serialize_options().unwrap().indent, Some(2));
+    fn methods_parse_as_the_four_names_or_a_prefixed_qname() {
+        let none = |_: &str| None;
+        assert_eq!(parse_method(" html ", none).unwrap(), OutputMethod::Html);
+        assert_eq!(parse_method("text", none).unwrap(), OutputMethod::Text);
+        assert_eq!(parse_method("adaptive", none).unwrap_err().code, "XTSE1570");
+        assert_eq!(
+            parse_method("your::xml", none).unwrap_err().code,
+            "XTSE1570"
+        );
+        assert_eq!(
+            parse_method("p:m", |_| Some("urn:m".into())).unwrap(),
+            OutputMethod::Other(QName::new("urn:m", "m"))
+        );
+        assert_eq!(parse_method("p:m", none).unwrap_err().code, "XTSE0280");
     }
 
     #[test]
-    fn an_encoding_decides_only_what_has_to_be_escaped() {
+    fn character_map_names_concatenate_by_precedence_then_order() {
         let mut d = OutputDefinition::default();
-        assert_eq!(d.character_escaping().unwrap(), None);
-        d.encoding.set("US-ASCII".to_string(), 0);
-        assert_eq!(d.character_escaping().unwrap(), Some('\u{7F}'));
-        d.encoding.set("utf-8".to_string(), 1);
-        assert_eq!(d.character_escaping().unwrap(), None);
-        d.encoding.set("EBCDIC".to_string(), 2);
-        assert!(d.character_escaping().unwrap_err().is_not_implemented());
-    }
-
-    #[test]
-    fn html_and_xhtml_are_not_implemented_in_m1() {
-        let mut d = OutputDefinition::default();
-        d.method.set(OutputMethod::Html, 0);
-        assert!(d.serialize_options().unwrap_err().is_not_implemented());
+        d.use_character_maps.insert((2, 1), vec![QName::local("b")]);
+        d.use_character_maps.insert((1, 5), vec![QName::local("a")]);
+        d.use_character_maps.insert((2, 0), vec![QName::local("c")]);
+        let names: Vec<_> = d.character_map_names().map(|q| q.local.clone()).collect();
+        assert_eq!(names, ["a", "c", "b"]);
     }
 }

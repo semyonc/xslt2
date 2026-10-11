@@ -10,6 +10,8 @@
 
 #![cfg(feature = "icu-collation")]
 
+mod common;
+
 use std::sync::Arc;
 
 use bumpalo::Bump;
@@ -36,7 +38,7 @@ fn run(sheet: &str, source: &str) -> Result<String, XsltError> {
         .transformation(&arena, TransformOptions::default())
         .with_resolver(resolver)
         .transform_source("file:///m2k/in.xml", source)?;
-    compiled.serialize_primary(&outcome)
+    compiled.serialize_primary(&outcome).map(common::body)
 }
 
 /// Wraps template-level declarations in a `version="2.0"` stylesheet.

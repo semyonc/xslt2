@@ -9,6 +9,8 @@
 //! compatibility row (DESIGN §9.10 row 10), and the places `key()` is called
 //! from.
 
+mod common;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -60,7 +62,7 @@ fn run_full(files: &[(&str, &str)], main: &str, source: &str) -> Result<String, 
             .transformation(&arena, TransformOptions::default())
             .with_resolver(resolver)
             .transform_source("file:///m2f/in.xml", &source)?;
-        compiled.serialize_primary(&outcome)
+        compiled.serialize_primary(&outcome).map(common::body)
     })
 }
 
@@ -747,7 +749,10 @@ fn run_with_messages(main: &str, source: &str) -> Result<(String, Vec<String>), 
             .transformation(&arena, TransformOptions::default())
             .transform_source("file:///m2f/in.xml", &source)?;
         let messages = outcome.messages.iter().map(|m| m.content.clone()).collect();
-        Ok((compiled.serialize_primary(&outcome)?, messages))
+        Ok((
+            compiled.serialize_primary(&outcome).map(common::body)?,
+            messages,
+        ))
     })
 }
 
@@ -1095,7 +1100,7 @@ fn a_host_collation_without_a_sort_key_still_compares_by_the_collation() {
         let outcome = compiled
             .transformation(&arena, TransformOptions::default())
             .transform_source("file:///m2f/in.xml", ITEMS)?;
-        compiled.serialize_primary(&outcome)
+        compiled.serialize_primary(&outcome).map(common::body)
     });
     assert_eq!(
         result.expect("the run succeeds"),
@@ -1152,7 +1157,7 @@ fn run_on_thread(
             let outcome = compiled
                 .transformation(&arena, options)
                 .transform_source("file:///m2f/in.xml", &source)?;
-            compiled.serialize_primary(&outcome)
+            compiled.serialize_primary(&outcome).map(common::body)
         })
         .expect("a test thread")
         .join()
@@ -1172,7 +1177,7 @@ fn run_on_large(stack: usize, main: &str, source: &str) -> Result<String, XsltEr
         let outcome = compiled
             .transformation(&arena, TransformOptions::default())
             .transform_source("file:///m2f/in.xml", &source)?;
-        compiled.serialize_primary(&outcome)
+        compiled.serialize_primary(&outcome).map(common::body)
     })
 }
 

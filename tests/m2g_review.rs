@@ -23,6 +23,8 @@
 //! (P2-3, the linearity test of `group-by`, is fixed in place in
 //! `m2g_grouping.rs`.)
 
+mod common;
+
 use std::time::{Duration, Instant};
 
 use bumpalo::Bump;
@@ -55,7 +57,7 @@ fn run(main: &str, source: &str) -> Result<String, XsltError> {
         let outcome = compiled
             .transformation(&arena, TransformOptions::default())
             .transform_source("file:///m2g/in.xml", &source)?;
-        compiled.serialize_primary(&outcome)
+        compiled.serialize_primary(&outcome).map(common::body)
     })
 }
 
@@ -459,7 +461,10 @@ fn run_with_messages(main: &str, source: &str) -> Result<(String, Vec<String>), 
             .transformation(&arena, TransformOptions::default())
             .transform_source("file:///m2g/in.xml", &source)?;
         let messages = outcome.messages.iter().map(|m| m.content.clone()).collect();
-        Ok((compiled.serialize_primary(&outcome)?, messages))
+        Ok((
+            compiled.serialize_primary(&outcome).map(common::body)?,
+            messages,
+        ))
     })
 }
 

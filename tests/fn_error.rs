@@ -21,6 +21,8 @@
 //! `file:///e/in.xml`, a stylesheet compiled at `file:///e/main.xsl`, and the
 //! serialized primary result.
 
+mod common;
+
 use std::sync::Arc;
 
 use xsd_schema::namespace::NameTable;
@@ -63,7 +65,7 @@ fn run(body: &str, source: &str, strict: bool) -> Result<String, XsltError> {
         .transformation(&arena, options)
         .with_resolver(resolver)
         .transform_source("file:///e/in.xml", source)?;
-    compiled.serialize_primary(&outcome)
+    compiled.serialize_primary(&outcome).map(common::body)
 }
 
 /// A stylesheet with a high-priority rule carrying `predicate` and a plain

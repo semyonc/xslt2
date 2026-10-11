@@ -1419,6 +1419,7 @@ dependencies = [
  "regexml",
  "roxmltree",
  "slotmap",
+ "unicode-normalization",
  "xsd-schema",
 ]
 

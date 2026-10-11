@@ -7,6 +7,8 @@
 //! `function-available` and `use-when`, and the places a function can be called
 //! from.
 
+mod common;
+
 use std::sync::Arc;
 
 use bumpalo::Bump;
@@ -62,7 +64,7 @@ fn run_full(
             .transformation(&arena, options)
             .with_resolver(resolver)
             .transform_source("file:///m2e/in.xml", &source)?;
-        compiled.serialize_primary(&outcome)
+        compiled.serialize_primary(&outcome).map(common::body)
     })
 }
 
@@ -260,7 +262,10 @@ fn a_function_set_reused_across_compilations_keeps_them_apart() {
                 .transformation(&arena, TransformOptions::default())
                 .transform_source("urn:in", "<doc/>")
                 .unwrap();
-            compiled.serialize_primary(&outcome).unwrap()
+            compiled
+                .serialize_primary(&outcome)
+                .map(common::body)
+                .unwrap()
         };
         assert_eq!(run_one(&first), "<out>A:g0 A:h1:x</out>");
         assert_eq!(run_one(&second), "<out>B:k0 B:g1:y</out>");
@@ -1196,7 +1201,7 @@ fn the_stack_limit_is_configurable_and_conservative_on_other_threads() {
                 let outcome = compiled
                     .transformation(&arena, options)
                     .transform_source("urn:in", "<doc/>")?;
-                compiled.serialize_primary(&outcome)
+                compiled.serialize_primary(&outcome).map(common::body)
             };
             (
                 run_with(TransformOptions::default()),

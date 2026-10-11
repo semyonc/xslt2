@@ -31,7 +31,10 @@
 //! let arena = bumpalo::Bump::new();
 //! let run = sheet.transformation(&arena, TransformOptions::default());
 //! let outcome = run.transform_source("urn:in", r#"<a n="7"/>"#)?;
-//! assert_eq!(sheet.serialize_primary(&outcome)?, "<out>7</out>");
+//! assert_eq!(
+//!     sheet.serialize_primary(&outcome)?,
+//!     r#"<?xml version="1.0" encoding="UTF-8"?><out>7</out>"#
+//! );
 //! # let _ = Arc::new(MemoryResolver::new());
 //! # Ok::<(), xslt2::XsltError>(())
 //! ```
@@ -48,6 +51,7 @@ pub mod receiver;
 pub(crate) mod regex;
 pub mod resolver;
 pub mod runtime;
+pub mod serialize;
 pub mod store;
 pub mod stylesheet;
 pub mod whitespace;

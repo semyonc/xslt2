@@ -5,6 +5,8 @@
 //! keeps a node's identity is worthless unless the test also shows that a real
 //! copy does *not*.
 
+mod common;
+
 use std::cell::RefCell;
 
 use bumpalo::Bump;
@@ -71,7 +73,10 @@ fn run_sheet(body: &str) -> String {
     let outcome = run
         .transform_source("urn:invariants:catalog.xml", SOURCE)
         .expect("run");
-    compiled.serialize_primary(&outcome).expect("serialize")
+    compiled
+        .serialize_primary(&outcome)
+        .map(common::body)
+        .expect("serialize")
 }
 
 /// The `n`-th `item` element of the principal source.
@@ -372,7 +377,12 @@ fn inv3_two_runs_of_one_compiled_stylesheet_are_isolated() {
                 .doc
                 .serial(),
         );
-        outputs.push(compiled.serialize_primary(&outcome).expect("serialize"));
+        outputs.push(
+            compiled
+                .serialize_primary(&outcome)
+                .map(common::body)
+                .expect("serialize"),
+        );
     }
 
     assert_eq!(

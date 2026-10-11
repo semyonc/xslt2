@@ -12,6 +12,8 @@
 //!
 //! The test itself runs a modest depth so that `cargo test` stays quick; set
 //! `Q33_DEPTH` and `Q33_STACK` to repeat the measurement.
+mod common;
+
 use bumpalo::Bump;
 use xsd_schema::namespace::NameTable;
 use xslt2::{Compiler, TransformOptions, XsltFunctions};
@@ -38,7 +40,7 @@ fn run(depth: u64) -> Result<String, xslt2::XsltError> {
     let arena = Bump::new();
     let run = compiled.transformation(&arena, TransformOptions::default());
     let outcome = run.transform_source("urn:in", "<doc/>")?;
-    compiled.serialize_primary(&outcome)
+    compiled.serialize_primary(&outcome).map(common::body)
 }
 
 #[test]

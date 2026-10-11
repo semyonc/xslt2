@@ -10,6 +10,8 @@
 //! component (DESIGN §9.1, one test per row), keys that observe them, and a
 //! linearity bound.
 
+mod common;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -77,6 +79,7 @@ fn run_files(files: &[(&str, &str)], main: &str, source: &str) -> Result<String,
             .map_err(|e| Failure::Dynamic(e.code))?;
         compiled
             .serialize_primary(&outcome)
+            .map(common::body)
             .map_err(|e| Failure::Dynamic(e.code))
     })
 }
@@ -1205,6 +1208,7 @@ fn run_here(
         .map_err(|e| (Phase::Dynamic, e))?;
     compiled
         .serialize_primary(&outcome)
+        .map(common::body)
         .map_err(|e| (Phase::Dynamic, e))
 }
 

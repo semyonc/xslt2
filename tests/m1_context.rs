@@ -10,6 +10,8 @@
 //! `xsl:param tunnel="yes"` sees; and the output state is which destination the
 //! events reach.
 
+mod common;
+
 use bumpalo::Bump;
 use xsd_schema::namespace::NameTable;
 use xslt2::{Compiler, MemoryResolver, TransformOptions, XsltError, XsltFunctions};
@@ -29,7 +31,7 @@ fn transform(sheet: &str, source: &str) -> Result<String, XsltError> {
     let arena = Bump::new();
     let run = compiled.transformation(&arena, TransformOptions::default());
     let outcome = run.transform_source("urn:test:in.xml", source)?;
-    compiled.serialize_primary(&outcome)
+    compiled.serialize_primary(&outcome).map(common::body)
 }
 
 fn messages(sheet: &str, source: &str) -> Vec<String> {

@@ -16,6 +16,8 @@
 //! `root(.)//(EE)` selects (evaluated by the XPath engine, which filters whole
 //! sequences), and the node set worked out by hand from XPath 2.0 §3.2.2.
 
+mod common;
+
 use std::time::{Duration, Instant};
 
 use bumpalo::Bump;
@@ -78,7 +80,7 @@ fn run_with(main: &str, source: &str, strict: bool) -> Result<String, XsltError>
         let outcome = compiled
             .transformation(&arena, options)
             .transform_source("file:///m2l/in.xml", &source)?;
-        compiled.serialize_primary(&outcome)
+        compiled.serialize_primary(&outcome).map(common::body)
     })
 }
 

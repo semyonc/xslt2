@@ -12,6 +12,8 @@
 
 #![cfg(not(feature = "icu-collation"))]
 
+mod common;
+
 use std::sync::Arc;
 
 use bumpalo::Bump;
@@ -36,7 +38,7 @@ fn run(sheet: &str, source: &str) -> Result<String, XsltError> {
         .transformation(&arena, TransformOptions::default())
         .with_resolver(resolver)
         .transform_source("file:///m2k/in.xml", source)?;
-    compiled.serialize_primary(&outcome)
+    compiled.serialize_primary(&outcome).map(common::body)
 }
 
 fn sheet(body: &str) -> String {
