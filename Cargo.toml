@@ -22,6 +22,36 @@ slotmap = "1.0"
 # requirement as xsd-schema's, so the graph keeps one copy and a local
 # `[patch.crates-io]` of it applies to both.
 regexml = "0.2"
+# The Unicode Collation Algorithm with locale tailorings (DESIGN §9.5), behind
+# the off-by-default `icu-collation` feature. Pinned to the ICU4X 1.5 line that
+# `regexml` already brings (icu_properties, icu_locid, icu_provider …), so the
+# feature adds the collator and its data, never a second ICU build.
+icu_collator = { version = "~1.5", optional = true }
+# `DataLocale`, the locale argument of the collator (already in the graph
+# through `regexml`'s ICU4X 1.5 crates: no new build).
+icu_provider = { version = "~1.5", optional = true }
+# `Locale`, to read the Unicode extension keywords of a UCA URI's `lang` (also
+# already in the graph through `regexml`'s ICU4X 1.5 crates).
+icu_locid = { version = "~1.5", optional = true }
+# The contraction and prefix tries of the collation data (`Char16TrieIterator`)
+# and the canonical decompositions, which the substring search of the UCA
+# collations reads to tell context-free characters (`collation/uca/search.rs`).
+# Both are already in the graph as dependencies of `icu_collator` 1.5: no new
+# build.
+icu_collections = { version = "~1.5", optional = true }
+icu_normalizer = { version = "~1.5", optional = true }
+
+[features]
+default = []
+# ICU/UCA collations: `http://www.w3.org/2013/collation/UCA?…` and
+# locale-tailored `xsl:sort lang` / `case-order` (DESIGN §9.5, milestone M2k).
+icu-collation = [
+    "dep:icu_collator",
+    "dep:icu_provider",
+    "dep:icu_locid",
+    "dep:icu_collections",
+    "dep:icu_normalizer",
+]
 
 [dev-dependencies]
 pretty_assertions = "1.4"

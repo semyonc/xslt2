@@ -17,7 +17,7 @@ use xsd_schema::navigator::{DomNavigator, DomNodeType, NamespaceAxisScope};
 use xsd_schema::xpath::functions::effective_boolean_value;
 use xsd_schema::xpath::{XPathContext, XPathExpr};
 
-use crate::collation::{CollationRegistry, UCA_COLLATION_PREFIX, UCA_MILESTONE};
+use crate::collation::{uca_not_implemented, CollationRegistry};
 use crate::error::{codes, Location, XsltError};
 use crate::functions::{StaticEvaluator, XsltFunctions};
 use crate::names::{CODEPOINT_COLLATION, XML_NS, XSLT_NS};
@@ -1237,20 +1237,12 @@ pub fn static_context_of(
                 .collect();
             ctx.default_collation = match candidates.iter().find(|uri| collations.recognizes(uri)) {
                 Some(uri) => uri.clone(),
-                // A UCA collation of F&O 3.0 is a missing feature, not a
-                // broken stylesheet: it needs locale data, which the planned
-                // ICU cargo feature brings (M2k, DESIGN §9.5).
-                None => match candidates
-                    .iter()
-                    .find(|uri| uri.starts_with(UCA_COLLATION_PREFIX))
-                {
-                    Some(uri) => {
-                        return Err(XsltError::not_implemented(
-                            format!("the collation {uri}"),
-                            UCA_MILESTONE,
-                        )
-                        .with_location(module.location(a)))
-                    }
+                // A UCA collation of F&O 3.1 is a missing feature, not a
+                // broken stylesheet, in a build without the `icu-collation`
+                // cargo feature (M2k, DESIGN §9.5), which brings its locale
+                // data.
+                None => match candidates.iter().find_map(|uri| uca_not_implemented(uri)) {
+                    Some(missing) => return Err(missing.with_location(module.location(a))),
                     None => {
                         return Err(XsltError::new(
                             codes::XTSE0125,

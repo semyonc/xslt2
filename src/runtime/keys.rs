@@ -43,8 +43,9 @@
 //! (`TransformOptions::stack_limit`), because a chain of builds nests on the
 //! host stack with nothing else in between to check it.
 
+use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
@@ -196,11 +197,19 @@ impl<'t> KeyIndexes<'t> {
 /// found from each other (see [`Placement`]). The values whose slot is
 /// [`Slot::Unhashed`] are kept apart in `unhashed`, so that the lookup of every
 /// other value pays nothing for them when there are none.
+///
+/// The string values of a key whose collation has no sort key
+/// ([`Slot::Collated`]) cannot be hashed at all; they live in `collated`, an
+/// index **ordered by the collation's `compare`**, one entry per class of
+/// strings equal under it. `compare` is a total order (the `Collation`
+/// contract), so a lookup costs O(log n) comparisons instead of one per string
+/// value of the key.
 #[derive(Default)]
 pub(super) struct KeyIndex<'t> {
     nodes: Vec<Nav<'t>>,
     buckets: HashMap<Slot, Vec<(XmlValue, u32)>>,
     unhashed: Vec<(XmlValue, u32)>,
+    collated: BTreeMap<Collated, Vec<(XmlValue, u32)>>,
 }
 
 /// The hash class of a key value.
@@ -218,11 +227,12 @@ pub(super) enum Slot {
     /// `xs:untypedAtomic`): its codepoints, or the collation's sort key, whose
     /// "equality and order agree with `compare`".
     String(Vec<u8>),
-    /// A string-like value under a collation that cannot produce sort keys:
-    /// one bucket, compared pairwise — so every lookup of a string in such a
-    /// key is linear in the key's string values (documented for hosts on
-    /// `XsltFunctions::register_collation`).
-    AnyString,
+    /// A string-like value under a collation that cannot produce sort keys
+    /// (a UCA collation, or a host collation without `sort_key`): its text.
+    /// Never a hash bucket — such values go to the index ordered by the
+    /// collation's `compare` ([`Collated`]: `KeyIndex::collated`, and the
+    /// grouping index's), where a lookup is a binary search.
+    Collated(String),
     /// A numeric value, by the bits of its `xs:float` rounding. Equal numbers
     /// of any two numeric types round to the same `xs:float`.
     Number(u32),
@@ -313,7 +323,54 @@ impl KeyCollation {
             KeyCollation::Other(collation) => collation.equals(a, b),
         }
     }
+
+    /// `text` as a key of an index ordered by this collation; `None` for the
+    /// codepoint collation, which never needs one (its strings hash).
+    pub(super) fn collated(&self, text: String) -> Option<Collated> {
+        match self {
+            KeyCollation::Codepoint => None,
+            KeyCollation::Other(collation) => Some(Collated {
+                text,
+                collation: Rc::clone(collation),
+            }),
+        }
+    }
 }
+
+/// A string ordered by a collation's `compare` — the key of the ordered index
+/// that stands in for hashing when the collation has no sort key
+/// ([`Slot::Collated`]).
+///
+/// The `Collation` contract makes `compare` a total order ("reflexive,
+/// antisymmetric, transitive, and stable for the life of the collation"), which
+/// is exactly what `Ord` asks of a `BTreeMap` key; every key of one map carries
+/// the same collation. Two strings equal under the collation are one key, so a
+/// map entry holds a class of equal strings: one binary search finds every
+/// candidate, and each is still confirmed by [`key_values_equal`].
+pub(super) struct Collated {
+    text: String,
+    collation: Rc<dyn Collation>,
+}
+
+impl Ord for Collated {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.collation.compare(&self.text, &other.text)
+    }
+}
+
+impl PartialOrd for Collated {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Collated {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Collated {}
 
 impl<'a, 't> Transformation<'a, 't> {
     /// The nodes `key()` returns (§16.3.2): those of the document whose root is
@@ -356,17 +413,28 @@ impl<'a, 't> Transformation<'a, 't> {
             };
             // A value no hash was computed for may equal anything.
             confirm(&index.unhashed);
-            if placement.home == Slot::Unhashed {
-                // No hash for the sought value: every value is a candidate.
-                index.buckets.values().for_each(confirm);
-                continue;
-            }
-            for slot in [Some(&placement.home), placement.also.as_ref()]
-                .into_iter()
-                .flatten()
-            {
-                if let Some(bucket) = index.buckets.get(slot) {
-                    confirm(bucket);
+            match placement.home {
+                Slot::Unhashed => {
+                    // No hash for the sought value: every value is a candidate.
+                    index.buckets.values().for_each(&mut confirm);
+                    index.collated.values().for_each(confirm);
+                }
+                // A string under a collation without sort keys: the class of
+                // equal strings, found by binary search.
+                Slot::Collated(text) => {
+                    if let Some(class) = collation
+                        .collated(text)
+                        .and_then(|probe| index.collated.get(&probe))
+                    {
+                        confirm(class);
+                    }
+                }
+                home => {
+                    for slot in [Some(&home), placement.also.as_ref()].into_iter().flatten() {
+                        if let Some(bucket) = index.buckets.get(slot) {
+                            confirm(bucket);
+                        }
+                    }
                 }
             }
         }
@@ -500,6 +568,11 @@ impl<'a, 't> Transformation<'a, 't> {
                     });
                     match placement.home {
                         Slot::Unhashed => index.unhashed.push((value, at)),
+                        Slot::Collated(text) => match collation.collated(text) {
+                            Some(key) => index.collated.entry(key).or_default().push((value, at)),
+                            // Not produced under the codepoint collation.
+                            None => index.unhashed.push((value, at)),
+                        },
                         home => index.buckets.entry(home).or_default().push((value, at)),
                     }
                 }
@@ -643,7 +716,7 @@ pub(super) fn placement_of(value: &XmlValue, collation: &KeyCollation) -> Option
             KeyCollation::Codepoint => Slot::String(text.into_bytes()),
             KeyCollation::Other(collation) => match collation.sort_key(&text) {
                 Some(key) => Slot::String(key),
-                None => Slot::AnyString,
+                None => Slot::Collated(text),
             },
         }));
     }

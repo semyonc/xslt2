@@ -5,12 +5,15 @@
 //! `group-by` hashes its grouping keys with the `eq`-consistent placement of
 //! `runtime/keys.rs` — the same slots an `xsl:key` index uses — so allocating a
 //! population of *n* items is linear in *n* for every key type that placement
-//! can hash, not *n* × (number of groups). A slot only narrows the candidates:
+//! can hash, not *n* × (number of groups). Strings under a collation without
+//! sort keys (a UCA collation) cannot be hashed; their groups are kept in an
+//! index ordered by the collation's `compare` instead, so each key costs
+//! O(log *g*) comparisons for *g* groups. A slot only narrows the candidates:
 //! every candidate group is confirmed by the real comparison, `eq` with strings
 //! under the grouping collation (`key_values_equal`), with one change §14.3
 //! makes for grouping: "the value NaN is considered equal to itself".
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use xsd_schema::types::{XmlValue, XmlValueKind};
@@ -18,13 +21,11 @@ use xsd_schema::xpath::functions::atomize_sequence;
 use xsd_schema::xpath::XmlItem;
 
 use super::context::{CurrentGroup, XsltContext};
-use super::keys::{key_values_equal, placement_of, KeyCollation, Placement, Slot};
+use super::keys::{key_values_equal, placement_of, Collated, KeyCollation, Placement, Slot};
 use super::patterns::EvaluationScope;
 use super::sort::SortRows;
 use super::{Frame, Transformation};
-use crate::collation::{
-    CollationResolver, CODEPOINT_COLLATION_URI, UCA_COLLATION_PREFIX, UCA_MILESTONE,
-};
+use crate::collation::{uca_not_implemented, CollationResolver, CODEPOINT_COLLATION_URI};
 use crate::error::{codes, XsltError};
 use crate::model::*;
 use crate::receiver::{Nav, Receiver};
@@ -68,12 +69,17 @@ impl<'t> Group<'t> {
 ///
 /// The obligation is the one `runtime/keys.rs` states for an index: a key
 /// equal to a group's key can be found from it — in its home slot, in its
-/// `also` slot (a date/time value on the other side of the timezone line), or
-/// among the groups whose key has no hash (`unhashed`, compared with every
-/// key). A key that itself has no hash is compared with every group.
+/// `also` slot (a date/time value on the other side of the timezone line), in
+/// the ordered index of strings under a collation without sort keys
+/// (`collated`), or among the groups whose key has no hash (`unhashed`,
+/// compared with every key). A key that itself has no hash is compared with
+/// every group.
 #[derive(Default)]
 struct GroupIndex {
     by_slot: HashMap<Slot, Vec<usize>>,
+    /// [`Slot::Collated`] keys, ordered by the grouping collation: one entry
+    /// per class of equal strings, holding the group created for it.
+    collated: BTreeMap<Collated, usize>,
     unhashed: Vec<usize>,
     /// The group of NaN, which for grouping "is considered equal to itself".
     nan: Option<usize>,
@@ -86,11 +92,15 @@ impl GroupIndex {
     /// exceptional circumstances involving non-transitivity), then one of these
     /// groups is selected in an implementation-dependent way" — the one
     /// created first.
+    ///
+    /// `probe` is the key's entry in the ordered index when its slot is
+    /// [`Slot::Collated`] (see [`GroupIndex::probe`]).
     fn find(
         &self,
         groups: &[Group<'_>],
         key: &XmlValue,
         placement: &Placement,
+        probe: Option<&Collated>,
         collation: &KeyCollation,
     ) -> Option<usize> {
         let equal = |&g: &usize| {
@@ -103,6 +113,10 @@ impl GroupIndex {
             // No hash for the sought key: every group is a candidate.
             return (0..groups.len()).find(equal);
         }
+        let collated = probe
+            .and_then(|probe| self.collated.get(probe))
+            .copied()
+            .filter(equal);
         let slots = [Some(&placement.home), placement.also.as_ref()];
         slots
             .into_iter()
@@ -110,13 +124,28 @@ impl GroupIndex {
             .filter_map(|slot| self.by_slot.get(slot))
             .chain(std::iter::once(&self.unhashed))
             .filter_map(|candidates| candidates.iter().copied().find(|g| equal(g)))
+            .chain(collated)
             .min()
     }
 
-    fn insert(&mut self, group: usize, placement: Placement) {
-        match placement.home {
-            Slot::Unhashed => self.unhashed.push(group),
-            home => self.by_slot.entry(home).or_default().push(group),
+    /// The ordered-index key of a [`Slot::Collated`] placement; `None` for
+    /// every other slot.
+    fn probe(placement: &Placement, collation: &KeyCollation) -> Option<Collated> {
+        match &placement.home {
+            Slot::Collated(text) => collation.collated(text.clone()),
+            _ => None,
+        }
+    }
+
+    fn insert(&mut self, group: usize, placement: Placement, probe: Option<Collated>) {
+        match (placement.home, probe) {
+            (Slot::Unhashed, _) => self.unhashed.push(group),
+            // A class of equal strings keeps the group created for it first;
+            // `find` found no group for it, so the entry is new.
+            (Slot::Collated(_), Some(probe)) => {
+                self.collated.entry(probe).or_insert(group);
+            }
+            (home, _) => self.by_slot.entry(home).or_default().push(group),
         }
     }
 }
@@ -293,11 +322,8 @@ impl<'a, 't> Transformation<'a, 't> {
         if let Some(collation) = self.sheet.functions().collations().resolve(&uri) {
             return Ok(KeyCollation::Other(collation));
         }
-        if uri.starts_with(UCA_COLLATION_PREFIX) {
-            return Err(XsltError::not_implemented(
-                format!("the collation {uri}"),
-                UCA_MILESTONE,
-            ));
+        if let Some(missing) = uca_not_implemented(&uri) {
+            return Err(missing);
         }
         Err(XsltError::new(
             codes::XTDE1110,
@@ -386,10 +412,11 @@ impl<'a, 't> Transformation<'a, 't> {
                     }
                     continue;
                 };
-                match index.find(&groups, &key, &placement, collation) {
+                let probe = GroupIndex::probe(&placement, collation);
+                match index.find(&groups, &key, &placement, probe.as_ref(), collation) {
                     Some(g) => groups[g].add(item, position),
                     None => {
-                        index.insert(groups.len(), placement);
+                        index.insert(groups.len(), placement, probe);
                         groups.push(Group::new(item, Some(key), position));
                     }
                 }

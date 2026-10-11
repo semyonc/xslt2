@@ -1354,7 +1354,8 @@ fn a_data_type_qname_needs_a_declared_prefix() {
 /// ROADMAP §5.1 rule 1: "Anything outside it raises `XSLT2-NOTIMPL` naming the
 /// milestone that owns it." The UCA collations belong to M2k (ICU/UCA
 /// collations behind a cargo feature), in the `(M<code>)` form the harness
-/// attributes.
+/// attributes — in a build without the `icu-collation` feature.
+#[cfg(not(feature = "icu-collation"))]
 #[test]
 fn uca_collations_are_not_implemented_and_owned_by_m2k() {
     for content in [

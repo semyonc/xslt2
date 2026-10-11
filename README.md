@@ -37,6 +37,40 @@ transform, serialize — the compiled stylesheet and the arena are `!Send`) on a
 `xslt2::run_on_large_stack(xslt2::DEFAULT_STACK_SIZE, || …)` (256 MiB), or set
 `TransformOptions::stack_limit` for a thread whose stack size you know.
 
+## Cargo features
+
+`icu-collation` (off by default) adds ICU4X 1.5's `icu_collator` with its compiled CLDR data (UCA 15.1) —
+the ICU4X line `regexml` already brings in, so nothing is built twice — and with it the UCA collations of
+F&O 3.1 §5.3.3, `http://www.w3.org/2013/collation/UCA?lang=…;strength=…` and the other parameters
+ICU4X 1.5 supports (all but `reorder`; `-u-` collation keywords in `lang` too), plus locale-tailored
+`xsl:sort lang` / `case-order`. ICU4X 1.5 exposes no collation elements, so under a UCA collation
+`contains()` and the other substring functions match collation-equal substrings cut at character
+boundaries (a contraction such as Slovak `ch` can be split, an expansion such as `ß` cannot). The
+search reads the collation data to tell which characters' weights cannot depend on their neighbours and
+narrows the candidates with it, so ordinary text of 100,000 characters is searched in milliseconds; a long
+run of characters that chain into contractions or prefix contexts (Danish `aaaa…`, Japanese `カーカー…`)
+is searched candidate by candidate within a work budget of about a second, beyond which the function
+raises FOCH0004 rather than answer late. `xsl:sort case-order` with a `lang` asking for primary or
+secondary strength (`-u-ks-level1`, `-u-ks-level2`) switches on a case level, so case is ordered as asked
+while accents stay as the language wants them. Without the feature the built-in collations are
+codepoint and HTML ASCII case-insensitive (plus any the host registers), a UCA URI reports
+`XSLT2-NOTIMPL`, and `xsl:sort lang` / `case-order` use a dependency-free case-order collation.
+
+A parameter a UCA URI leaves out takes the language's default where CLDR tailors one: `UCA?lang=th`
+ignores spaces and punctuation up to the tertiary level (Thai is `alternate=shifted`), `UCA?lang=fr-CA`
+compares accents backwards, `UCA?lang=da` sorts upper case first.
+
+**Enabling the feature changes existing results**, not only adds new ones: `xsl:sort lang="…"` or
+`case-order` without a `collation` attribute sorts with the language's UCA tailoring instead of the
+case-order collation — `('f', 'é', 'e')` with `lang="en"` sorts `e, f, é` without the feature and
+`e, é, f` with it. Cargo unifies features across a build, so if any crate in a build enables
+`icu-collation` on `xslt2`, every user of `xslt2` in that build gets it.
+
+```bash
+cargo test --features icu-collation
+cargo test --release --features icu-collation --test xslts -- -s ../../xslt30-test --skip unicode-90
+```
+
 ## Conformance
 
 The XSLT 2.0 test suite (XSLTS 1.0.4) was never published; the public W3C XSLT 3.0 suite

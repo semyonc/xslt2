@@ -35,8 +35,7 @@ use xsd_schema::xpath::XmlItem;
 use super::context::XsltContext;
 use super::{Frame, Transformation};
 use crate::collation::{
-    CaseOrder, CaseOrderCollation, Collation, CollationResolver, CODEPOINT_COLLATION_URI,
-    UCA_COLLATION_PREFIX, UCA_MILESTONE,
+    uca_not_implemented, Collation, CollationResolver, CODEPOINT_COLLATION_URI,
 };
 use crate::error::{codes, XsltError};
 use crate::model::*;
@@ -271,12 +270,15 @@ impl<'a, 't> Transformation<'a, 't> {
             // §13.1.3: "in the absence of a collation attribute, these
             // attributes provide input to an implementation-defined algorithm
             // to locate a suitable collation" — `CaseOrderCollation`, whatever
-            // the language, lower-first unless `case-order` says otherwise.
-            None if case_order.is_some() || lang.is_some() => {
-                KeyCollation::Other(Rc::new(CaseOrderCollation {
-                    case_order: case_order.unwrap_or(CaseOrder::LowerFirst),
-                }))
-            }
+            // the language, lower-first unless `case-order` says otherwise;
+            // with the `icu-collation` feature the UCA collation tailored for
+            // the language (`CollationRegistry::sort_collation`).
+            None if case_order.is_some() || lang.is_some() => KeyCollation::Other(
+                self.sheet
+                    .functions()
+                    .collations()
+                    .sort_collation(lang.as_deref(), case_order),
+            ),
             // "If none of the collation, lang or case-order attributes is
             // present, the collation is chosen in an implementation-defined
             // way": the codepoint collation. §3.6.1: "The
@@ -311,11 +313,8 @@ impl<'a, 't> Transformation<'a, 't> {
         if let Some(collation) = self.sheet.functions().collations().resolve(&uri) {
             return Ok(KeyCollation::Other(collation));
         }
-        if uri.starts_with(UCA_COLLATION_PREFIX) {
-            return Err(XsltError::not_implemented(
-                format!("the collation {uri}"),
-                UCA_MILESTONE,
-            ));
+        if let Some(missing) = uca_not_implemented(&uri) {
+            return Err(missing);
         }
         Err(XsltError::new(
             codes::XTDE1035,

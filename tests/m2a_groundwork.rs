@@ -480,6 +480,9 @@ fn every_notimpl_names_its_sub_milestone() {
         // `tests/m2f_keys.rs`.)
         // stylesheet.rs: a UCA collation (§9.5) — M2k's (ICU/UCA collations
         // behind a cargo feature), since M2d built the registry and html-ascii.
+        // A build with the `icu-collation` feature implements them
+        // (`tests/m2k_collations.rs`).
+        #[cfg(not(feature = "icu-collation"))]
         (
             r#"<xsl:template match="/" default-collation="http://www.w3.org/2013/collation/UCA?strength=secondary"><out/></xsl:template>"#
                 .to_string(),
@@ -487,6 +490,7 @@ fn every_notimpl_names_its_sub_milestone() {
             "M2k",
         ),
         // runtime/sort.rs: the same collation named by xsl:sort.
+        #[cfg(not(feature = "icu-collation"))]
         (
             template(
                 r#"<xsl:for-each select="(1, 2)"><xsl:sort collation="http://www.w3.org/2013/collation/UCA?lang=en"/></xsl:for-each>"#,

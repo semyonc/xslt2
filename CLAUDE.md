@@ -36,6 +36,7 @@ PSVI, `BufferDocument`). Separate git repository.
 | `src/store.rs` | `DocumentStore`: arena-allocated documents, URI identity, `generate-id()` |
 | `src/output.rs` | `xsl:output` merged by import precedence → `SerializeOptions` |
 | `src/functions.rs` | The §16 function library as an XPath catalog, plus the `use-when` evaluator |
+| `src/collation.rs`, `src/collation/uca.rs`, `src/collation/uca/search.rs` | The collation registry (`CollationResolver`): codepoint, HTML ASCII case-insensitive, host-registered; `CaseOrderCollation` for `xsl:sort lang` / `case-order`; with the `icu-collation` feature the F&O 3.1 §5.3.3 UCA URIs and locale-tailored sorting on ICU4X 1.5 (`uca.rs`) and the substring search under them (`uca/search.rs`) |
 | `src/regex.rs` | §15 regular expressions: the XPath 2.0 dialect check (a copy of `xsd-schema`'s private pre-pass) in front of `regexml`, and XTDE1140 / XTDE1145 / XTDE1150 |
 
 ## Build
@@ -43,12 +44,26 @@ PSVI, `BufferDocument`). Separate git repository.
 ```bash
 cargo build
 cargo clippy --all-targets         # 0 warnings expected
-cargo test                         # unit tests + every tests/*.rs except the W3C harness (it skips itself in debug): m0b…m2a, m2c, m2d_sorting, m2e_functions, m2f_keys, m2g_grouping, m2g_review, m2h_regex, m2i_core_defects, m2l_pattern_predicates, q33_depth, …
+cargo test                         # unit tests + every tests/*.rs except the W3C harness (it skips itself in debug): m0b…m2a, m2c, m2d_sorting, m2e_functions, m2f_keys, m2g_grouping, m2g_review, m2h_regex, m2i_core_defects, m2l_pattern_predicates, ns_inherit, q33_depth, …
                                    # + fn_error + m2b_namespaces + m2c_static_checks
                                    # (the W3C harness skips itself in a debug build)
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps   # must exit 0; the local regexml fork's own
                                                  # rustc warning is a dependency's and does not fail it
 ```
+
+The off-by-default **`icu-collation`** feature (ICU4X 1.5 `icu_collator`; UCA collation URIs, locale-tailored
+`xsl:sort lang` / `case-order` — DESIGN §9.5, M2k) is checked in both configurations: `cargo clippy --all-targets
+--features icu-collation`, `cargo test --features icu-collation` (runs `tests/m2k_collations.rs` and the UCA halves of
+`tests/m2k_review.rs` and `tests/m2k_review2.rs`; the default build runs `tests/m2k_feature_off.rs` instead), `RUSTDOCFLAGS='-D warnings' cargo
+doc --no-deps --features icu-collation`, and the harness with `cargo test --release --features icu-collation --test
+xslts -- …`. ICU must stay on the 1.5 line `regexml` uses: `cargo tree --features icu-collation -d` shows no second
+`icu_*` version. **The feature is not additive**: it changes `xsl:sort lang` / `case-order` results (UCA tailoring
+instead of `CaseOrderCollation`), and Cargo feature unification turns it on for every user of the crate in a build
+once any dependent enables it. A UCA URI's absent parameters take the language's CLDR defaults (Thai `alternate=shifted`,
+`fr-CA` `backwards`, Danish upper-first); substring functions under UCA match collation-equal substrings at character
+boundaries — `collation/uca/search.rs` reads the collation data to narrow the candidates (primary filter, count filter,
+pruning at safe boundaries) and gives up with FOCH0004 beyond a work budget (`search::BUDGET`, about a second); its
+differential test against the unpruned definition is `uca::tests::the_search_agrees_with_the_definition`.
 
 `src/error/codes.rs` was generated from the spec, but the generator is not in the repository: keep its
 rustdoc escapes (`\[xsl:…\]`, `<URL>`) when editing it by hand. Public docs must not link to private items

@@ -15,9 +15,10 @@
 //!   ([`HTML_ASCII_CASE_INSENSITIVE_URI`], [`HtmlAsciiCaseInsensitive`]);
 //! * every collation a host registers with
 //!   [`XsltFunctions::register_collation`](crate::XsltFunctions::register_collation).
-//!   A host collation should implement [`Collation::sort_key`]: an `xsl:key`
-//!   under a collation without one keeps all its strings in a single bucket,
-//!   so each `key()` lookup compares pairs (see `register_collation`).
+//!   A host collation should implement [`Collation::sort_key`]: under a
+//!   collation without one, `xsl:key` and `group-by` keep their strings in an
+//!   index ordered by `compare` (a binary search per lookup) instead of a
+//!   hash table, and `=` compares pairs (see `register_collation`).
 //!
 //! [`CollationRegistry`] holds them and implements the engine's
 //! [`CollationResolver`]; the compiler hands it, together with the
@@ -33,8 +34,52 @@
 //! `xsl:sort` without a `collation` attribute but with `lang` or `case-order`
 //! uses [`CaseOrderCollation`], this processor's implementation-defined answer
 //! to §13.1.3 in the absence of language-specific collation data (see there).
-//! The UCA collations of F&O 3.0 (`http://www.w3.org/2013/collation/UCA?…`)
-//! need locale data and are left to a later cargo feature.
+//!
+//! # The `icu-collation` cargo feature
+//!
+//! The UCA collations of F&O 3.1 §5.3.3
+//! (`http://www.w3.org/2013/collation/UCA?…`) need the Unicode Collation
+//! Algorithm and CLDR locale data, which this crate takes from ICU4X 1.5
+//! (`icu_collator`) behind the **off-by-default** `icu-collation` feature.
+//! With it:
+//!
+//! * the registry also recognizes the UCA collation URIs, with the parameters
+//!   `fallback`, `lang` (with its `-u-` collation keywords), `version` (up to
+//!   the data's UCA 15.1.0), `strength`, `maxVariable`, `alternate`
+//!   (`blanked` as UTS #10's shifted-at-tertiary), `backwards`,
+//!   `normalization`, `caseLevel`, `caseFirst` and `numeric`, separated by `;`
+//!   or `&` (`reorder` is not available in ICU4X 1.5: ignored unless the URI
+//!   says `fallback=no`, which makes the URI unrecognized);
+//! * `xsl:sort` with `lang` and/or `case-order` and no `collation` sorts with a
+//!   locale-tailored UCA collation instead of [`CaseOrderCollation`].
+//!
+//! A parameter a UCA URI leaves out takes the **language's** default where
+//! CLDR tailors it: `UCA?lang=th` ignores spaces and punctuation up to the
+//! tertiary level (Thai is `alternate=shifted`), `UCA?lang=fr-CA` compares
+//! accents backwards, `UCA?lang=da` puts upper case first.
+//!
+//! ICU4X 1.5 compares strings but exposes no collation elements, so the
+//! substring functions (`contains()`, `starts-with()`, `ends-with()`,
+//! `substring-before()`, `substring-after()`) match **collation-equal
+//! substrings cut at character boundaries** under a UCA collation — the
+//! leftmost minimal match of F&O 2.0 §7.5 / UTS #10 (`collation/uca.rs`
+//! documents what is matched and what character boundaries cannot express:
+//! contractions can be split, expansions cannot; `collation/uca/search.rs`
+//! how the search narrows the candidates with the collation data, and the
+//! work budget beyond which it raises FOCH0004). It has no sort key either,
+//! so `xsl:key` and `group-by` use an index ordered by `compare`, and `=`,
+//! `distinct-values()` and `index-of()` compare its strings pairwise.
+//!
+//! **Enabling the feature changes results.** `xsl:sort lang="…"` and
+//! `case-order` without a `collation` attribute sort with the UCA instead of
+//! [`CaseOrderCollation`] — `('f', 'é', 'e')` sorted with `lang="en"` is
+//! `e, f, é` without the feature and `e, é, f` with it — and UCA URIs that
+//! were `XSLT2-NOTIMPL` work. Cargo unifies features across a build, so a
+//! dependency that switches `icu-collation` on switches it on for every crate
+//! in the build that uses this one.
+//!
+//! Without the feature a UCA URI is a feature this build lacks, reported as
+//! `XSLT2-NOTIMPL` rather than as an unknown collation.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -43,20 +88,50 @@ use std::rc::Rc;
 
 pub use xsd_schema::xpath::collation::{Collation, CollationResolver, CODEPOINT_COLLATION_URI};
 
+use crate::error::XsltError;
+
+#[cfg(feature = "icu-collation")]
+mod uca;
+
 /// `http://www.w3.org/2005/xpath-functions/collation/html-ascii-case-insensitive`.
 pub const HTML_ASCII_CASE_INSENSITIVE_URI: &str =
     "http://www.w3.org/2005/xpath-functions/collation/html-ascii-case-insensitive";
 
-/// The prefix of the UCA collation URIs of F&O 3.0, which need locale data
-/// this processor does not carry yet.
+/// The scheme and path of the UCA collation URIs of F&O 3.1 §5.3.3, which
+/// need locale data: the `icu-collation` feature brings it.
 pub(crate) const UCA_COLLATION_PREFIX: &str = "http://www.w3.org/2013/collation/UCA";
 
 /// The owner of the UCA collations (`http://www.w3.org/2013/collation/UCA?…`),
-/// for the `XSLT2-NOTIMPL` they raise: roadmap milestone M2k, "ICU/UCA
-/// collations behind a cargo feature, after M2g" (DESIGN §9.5). Spelled as a
-/// bare milestone code, the form `(M2k)` that the conformance harness
-/// attributes to an owner.
+/// for the `XSLT2-NOTIMPL` they raise in a build without the `icu-collation`
+/// feature: roadmap milestone M2k, "ICU/UCA collations behind a cargo feature"
+/// (DESIGN §9.5). Spelled as a bare milestone code, the form `(M2k)` that the
+/// conformance harness attributes to an owner.
 pub(crate) const UCA_MILESTONE: &str = "M2k";
+
+/// Whether this build implements the UCA collations (the `icu-collation`
+/// cargo feature).
+pub(crate) const UCA_COLLATIONS_AVAILABLE: bool = cfg!(feature = "icu-collation");
+
+/// The error for a collation URI the registry did not recognize, when the
+/// reason is that **this build** lacks the feature rather than that the URI
+/// names no collation: without the `icu-collation` feature, a URI of the UCA
+/// family is `XSLT2-NOTIMPL` (M2k), not the context's "unrecognized
+/// collation" error — that would claim a conformance the build does not have.
+///
+/// With the feature every UCA URI the registry declines (`fallback=no` with a
+/// parameter it cannot honour) is simply unrecognized, as F&O 3.1 §5.3.3 asks:
+/// "the error code should be the same as if the collation URI were not
+/// recognized" — so this answers `None` and the caller raises its own code
+/// (XTSE0125, XTSE1210, XTDE1035, XTDE1110).
+pub(crate) fn uca_not_implemented(uri: &str) -> Option<XsltError> {
+    if UCA_COLLATIONS_AVAILABLE || !uri.starts_with(UCA_COLLATION_PREFIX) {
+        return None;
+    }
+    Some(XsltError::not_implemented(
+        format!("the collation {uri}"),
+        UCA_MILESTONE,
+    ))
+}
 
 /// The HTML ASCII case-insensitive collation.
 ///
@@ -112,7 +187,7 @@ impl Collation for HtmlAsciiCaseInsensitive {
 }
 
 /// Which case `xsl:sort` puts first among strings that differ only in case.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CaseOrder {
     /// `case-order="upper-first"`.
     UpperFirst,
@@ -129,8 +204,10 @@ pub enum CaseOrder {
 /// > attribute, these attributes provide input to an implementation-defined
 /// > algorithm to locate a suitable collation.
 ///
-/// Without language-specific collation data (ICU is a later, optional
-/// feature, milestone M2k) the same algorithm serves every `lang`:
+/// This is the algorithm of a build without the `icu-collation` feature, which
+/// has no language-specific collation data; with the feature a locale-tailored
+/// UCA collation replaces it (see the [module docs](self)). Here the same
+/// algorithm serves every `lang`:
 ///
 /// 1. strings are ordered first by their Unicode lower-case mapping, compared
 ///    codepoint by codepoint — so `MacAndrew` precedes `macintosh`;
@@ -197,6 +274,9 @@ impl Collation for CaseOrderCollation {
 pub struct CollationRegistry {
     host: HashMap<String, Rc<dyn Collation>>,
     html_ascii: Rc<dyn Collation>,
+    /// The UCA collations built so far, one per distinct tailoring.
+    #[cfg(feature = "icu-collation")]
+    uca: uca::UcaCollations,
 }
 
 impl Default for CollationRegistry {
@@ -211,6 +291,8 @@ impl CollationRegistry {
         Self {
             host: HashMap::new(),
             html_ascii: Rc::new(HtmlAsciiCaseInsensitive),
+            #[cfg(feature = "icu-collation")]
+            uca: uca::UcaCollations::default(),
         }
     }
 
@@ -235,6 +317,36 @@ impl CollationRegistry {
     pub fn recognizes(&self, uri: &str) -> bool {
         uri == CODEPOINT_COLLATION_URI || self.resolve(uri).is_some()
     }
+
+    /// The collation `xsl:sort` uses when it has `lang` and/or `case-order`
+    /// but no `collation` attribute (§13.1.3: "these attributes provide input
+    /// to an implementation-defined algorithm to locate a suitable
+    /// collation").
+    ///
+    /// `lang` is the attribute's effective value, already checked against
+    /// `xml:lang` and not empty. Without the `icu-collation` feature this is
+    /// [`CaseOrderCollation`], lower-first unless `case-order` says otherwise,
+    /// whatever the language; with it, the UCA collation tailored for `lang`
+    /// (the root collation when `lang` is absent or unknown to ICU4X) with
+    /// `caseFirst` set from `case-order` (the language's own default when it
+    /// is absent).
+    pub(crate) fn sort_collation(
+        &self,
+        lang: Option<&str>,
+        case_order: Option<CaseOrder>,
+    ) -> Rc<dyn Collation> {
+        #[cfg(feature = "icu-collation")]
+        {
+            self.uca.for_sort(lang, case_order)
+        }
+        #[cfg(not(feature = "icu-collation"))]
+        {
+            let _ = lang;
+            Rc::new(CaseOrderCollation {
+                case_order: case_order.unwrap_or(CaseOrder::LowerFirst),
+            })
+        }
+    }
 }
 
 impl CollationResolver for CollationRegistry {
@@ -242,7 +354,14 @@ impl CollationResolver for CollationRegistry {
         if let Some(collation) = self.host.get(uri) {
             return Some(Rc::clone(collation));
         }
-        (uri == HTML_ASCII_CASE_INSENSITIVE_URI).then(|| Rc::clone(&self.html_ascii))
+        if uri == HTML_ASCII_CASE_INSENSITIVE_URI {
+            return Some(Rc::clone(&self.html_ascii));
+        }
+        #[cfg(feature = "icu-collation")]
+        if uri.starts_with(UCA_COLLATION_PREFIX) {
+            return self.uca.for_uri(uri);
+        }
+        None
     }
 }
 
@@ -252,11 +371,12 @@ impl fmt::Debug for CollationRegistry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut host: Vec<&str> = self.host.keys().map(String::as_str).collect();
         host.sort_unstable();
+        let mut built_in = vec![CODEPOINT_COLLATION_URI, HTML_ASCII_CASE_INSENSITIVE_URI];
+        if UCA_COLLATIONS_AVAILABLE {
+            built_in.push("http://www.w3.org/2013/collation/UCA?…");
+        }
         f.debug_struct("CollationRegistry")
-            .field(
-                "built_in",
-                &[CODEPOINT_COLLATION_URI, HTML_ASCII_CASE_INSENSITIVE_URI],
-            )
+            .field("built_in", &built_in)
             .field("host", &host)
             .finish()
     }

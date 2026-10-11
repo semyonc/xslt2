@@ -3,7 +3,7 @@
 
 use super::checks::visit;
 use super::Builder;
-use crate::collation::{UCA_COLLATION_PREFIX, UCA_MILESTONE};
+use crate::collation::uca_not_implemented;
 use crate::error::{codes, XsltError};
 use crate::model::*;
 use crate::names::FN_NS;
@@ -233,11 +233,8 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         if self.functions.collations().recognizes(&uri) {
             return Ok(uri);
         }
-        if uri.starts_with(UCA_COLLATION_PREFIX) {
-            return Err(
-                XsltError::not_implemented(format!("the collation {uri}"), UCA_MILESTONE)
-                    .with_location(loc.clone()),
-            );
+        if let Some(missing) = uca_not_implemented(&uri) {
+            return Err(missing.with_location(loc.clone()));
         }
         Err(XsltError::new(
             codes::XTSE1210,

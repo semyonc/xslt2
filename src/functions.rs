@@ -195,19 +195,22 @@ impl XsltFunctions {
     ///
     /// `compare` must be a total order — consistent, antisymmetric and
     /// transitive — because `xsl:sort` hands it to the standard library's sort,
-    /// which may panic on a comparison function that is not one.
+    /// which may panic on a comparison function that is not one, and because
+    /// the `xsl:key` and `group-by` indexes of a collation without sort keys
+    /// are ordered by it (below).
     ///
     /// # Implement `sort_key` — keys and `=` need it to be fast
     ///
     /// [`Collation::sort_key`] is optional, but without it every lookup that
-    /// hashes strings under the collation degrades to comparing pairs:
+    /// hashes strings under the collation has to do without hashing:
     ///
-    /// * an `xsl:key` whose (effective) collation is this one keeps all its
-    ///   string values in **one bucket**, so each `key()` call compares the
-    ///   sought value with every string value of the index — N lookups over an
-    ///   N-node key cost O(N²) comparisons (the results stay correct);
+    /// * an `xsl:key` or `xsl:for-each-group group-by` whose (effective)
+    ///   collation is this one keeps its string values in an index **ordered
+    ///   by `compare`**, so each lookup is a binary search — O(log N)
+    ///   comparisons instead of a hash (the results are the same);
     /// * a general comparison `$a = $b` over large sequences under this
-    ///   collation is evaluated pair by pair instead of through a hash index.
+    ///   collation is evaluated pair by pair instead of through a hash index,
+    ///   and so is `distinct-values()`.
     ///
     /// A sort key is any byte string whose equality and order agree with
     /// `compare` (`sort_key(a).cmp(&sort_key(b)) == compare(a, b)`); the

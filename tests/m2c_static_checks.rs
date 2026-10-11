@@ -1007,14 +1007,20 @@ fn an_unrecognised_default_collation_is_a_static_error() {
     // A collation [Functions and Operators] defines but this processor has not
     // built is a **missing feature**, not a broken stylesheet: reporting it as
     // XTSE0125 would claim conformance the processor does not have. The UCA
-    // collations wait for M2k, the ICU/UCA cargo feature (§9.5).
-    let e = compile(&format!(
+    // collations need the `icu-collation` cargo feature (M2k, §9.5); with it
+    // the URI is accepted (`tests/m2k_collations.rs`).
+    let uca = format!(
         "<xsl:stylesheet version=\"2.0\" xmlns:xsl=\"{NS}\" \
            default-collation=\"http://www.w3.org/2013/collation/UCA?lang=en\">\
            <xsl:template match=\"doc\"><out/></xsl:template></xsl:stylesheet>"
-    ))
-    .expect_err("an unimplemented standard collation is not implemented");
-    assert!(e.is_not_implemented(), "{e}");
+    );
+    #[cfg(not(feature = "icu-collation"))]
+    {
+        let e = compile(&uca).expect_err("an unimplemented standard collation is not implemented");
+        assert!(e.is_not_implemented(), "{e}");
+    }
+    #[cfg(feature = "icu-collation")]
+    accepted(&uca);
 }
 
 // ═══ §3.7 — XTSE0150 ═════════════════════════════════════════════════════
