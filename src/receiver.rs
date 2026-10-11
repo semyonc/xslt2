@@ -16,6 +16,8 @@
 //! (`xsl:copy`, `xsl:copy-of`, §11.9) — never by the receiver guessing.
 
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use xsd_schema::document::{
     serialize, BufferDocNavigator, BufferDocument, BufferDocumentBuilder, BufferDocumentOptions,
@@ -86,21 +88,42 @@ pub(crate) fn namespace_nodes_of(
     nav: &Nav<'_>,
     scope: NamespaceAxisScope,
 ) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
+    namespace_nodes_and_undeclarations_of(nav, scope).0
+}
+
+/// [`namespace_nodes_of`], plus the prefixes the same walk found
+/// **undeclared** (`xmlns:p=""`) — the prefixed bindings that are absent from
+/// the element although an ancestor declares them. The default namespace is
+/// not among them: whether an element has a namespace node with no name is
+/// tracked separately (`Open::no_default`).
+///
+/// A deep copy needs both halves: the nodes to copy, and — because the walk
+/// dedups innermost-first — whether a prefix its original *parent* binds is
+/// missing from the original itself, which is the only way an element can
+/// lack a prefixed namespace node its parent has (§5.7.3: "XSLT 2.0 supports
+/// the creation of result trees that do not satisfy this constraint").
+fn namespace_nodes_and_undeclarations_of(
+    nav: &Nav<'_>,
+    scope: NamespaceAxisScope,
+) -> (Vec<(String, String)>, Vec<String>) {
+    let mut nodes: Vec<(String, String)> = Vec::new();
+    let mut undeclared: Vec<String> = Vec::new();
     let mut ns = nav.clone();
     if ns.move_to_first_namespace(scope) {
         loop {
             // `local_name()` of a namespace node is its prefix.
             let (prefix, uri) = (ns.local_name().to_string(), ns.value());
             if !uri.is_empty() {
-                out.push((prefix, uri));
+                nodes.push((prefix, uri));
+            } else if !prefix.is_empty() {
+                undeclared.push(prefix);
             }
             if !ns.move_to_next_namespace(scope) {
                 break;
             }
         }
     }
-    out
+    (nodes, undeclared)
 }
 
 /// A prefix for an element whose own one is taken by a namespace node it
@@ -314,6 +337,98 @@ struct Open {
     /// ([`Receiver::no_inherit_namespaces`]). `true` at the document level, so
     /// a top-level element is unaffected.
     inherit: bool,
+    /// The parent's instruction said `inherit-namespaces="no"`, so this element
+    /// gets none of the parent's namespace nodes: every prefixed binding in
+    /// scope at the parent is withheld from it at flush time
+    /// ([`withheld_bindings`](ComplexContentNormalizer::withheld_bindings)).
+    parent_withholds: bool,
+    /// The declarations written for this element — what it adds to (or, for
+    /// a withheld binding, removes from) the scope of its parent. Recorded at
+    /// flush time; read only to enumerate the bindings a child of a
+    /// non-inheriting element must not inherit.
+    declared: Vec<(String, String)>,
+    /// The prefixed bindings in scope at this element, its own declarations
+    /// included — what each child of a non-inheriting element withholds.
+    /// `None` until something needs it
+    /// ([`prefixed_scope_at`](ComplexContentNormalizer::prefixed_scope_at));
+    /// fixed once computed, because an element's `declared` is final before
+    /// its first child is flushed.
+    prefixed_scope: Option<PrefixedScope>,
+    /// The element is a deep copy of an existing element (§11.9.2), made by
+    /// [`copy_subtree`](ComplexContentNormalizer::copy_subtree) — the root of
+    /// the copy or an element below it. A copied element is not constructed
+    /// by a sequence constructor, so §5.7.1's inheritance rule does not start
+    /// at it: what its copied children get from it is decided by
+    /// [`fixup_name`](Self::fixup_name), [`fixup_nodes`](Self::fixup_nodes),
+    /// [`owns_default`](Self::owns_default) and the child's own
+    /// [`undeclared`](Self::undeclared).
+    copied: bool,
+    /// For a copied element (`copy-namespaces="yes"`): the prefixes the
+    /// original lacks although an ancestor of the original declares them.
+    /// Those its original parent binds are the ones the copy must not inherit
+    /// from the copy of that parent.
+    undeclared: Vec<String>,
+    /// For a copied element, recorded at flush time: the prefixed namespace
+    /// node its name needs is one of its own that namespace fixup produced —
+    /// not copied from the original. The binding is the name's (`name`), so
+    /// the commonest case costs no allocation.
+    fixup_name: bool,
+    /// For a copied element, recorded at flush time: the other namespace
+    /// nodes it has only because namespace fixup produced them, for an
+    /// attribute's name (or for a name §11.7 re-prefixed), prefix → URI.
+    ///
+    /// Its copied children inherit neither (§5.7.3: "the namespace fixup
+    /// process does not add a namespace node to an element merely because its
+    /// parent node in the result tree has such a namespace node").
+    fixup_nodes: Vec<(String, String)>,
+    /// For a copied element, recorded at flush time: it has a namespace node
+    /// with no name of its own — copied, or produced by fixup for an
+    /// unprefixed name in a namespace. A copied child without one of its own
+    /// then has none (`xmlns=""`).
+    owns_default: bool,
+}
+
+/// The prefixed namespace bindings in scope at an element, prefix → URI:
+/// innermost declaration first, one entry per prefix, `xml` and undeclared
+/// prefixes left out.
+///
+/// Shared, not copied, between an element and the descendants that declare
+/// no prefix of their own, so that carrying it down a chain of elements
+/// without declarations costs a reference count per element: what a
+/// non-inheriting element withholds from its children is found in time
+/// proportional to the bindings in scope, not to its depth (review R1).
+type PrefixedScope = Arc<[(String, String)]>;
+
+/// The [`PrefixedScope`] of an element that writes `declared`, given that of
+/// its parent, `outer`.
+///
+/// The element's own prefixed declarations come first — the first one per
+/// prefix, an undeclaration (`xmlns:p=""`) shadowing without an entry of its
+/// own — then the entries of `outer` whose prefix the element does not
+/// declare. That is the order a walk over the open elements' `declared`,
+/// innermost first, would give.
+fn with_declarations(outer: &PrefixedScope, declared: &[(String, String)]) -> PrefixedScope {
+    let mut own = declared
+        .iter()
+        .filter(|(prefix, _)| !prefix.is_empty() && prefix != "xml")
+        .peekable();
+    if own.peek().is_none() {
+        return Arc::clone(outer);
+    }
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut scope: Vec<(String, String)> = Vec::new();
+    for (prefix, uri) in own {
+        if seen.insert(prefix.as_str()) && !uri.is_empty() {
+            scope.push((prefix.clone(), uri.clone()));
+        }
+    }
+    scope.extend(
+        outer
+            .iter()
+            .filter(|(prefix, _)| !seen.contains(prefix.as_str()))
+            .cloned(),
+    );
+    scope.into()
 }
 
 impl Open {
@@ -470,6 +585,20 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         if !self.in_element() || self.stack.last().expect("checked").flushed {
             return Ok(());
         }
+        // The bindings this element must not inherit from its parent
+        // (`withheld_bindings`), taken out of scope *before* fixup runs, so that
+        // fixup (§5.7.3) re-declares on this element exactly the ones its own
+        // name, its attributes and its own namespace nodes need — "namespace
+        // nodes will still be added … as required by the namespace fixup
+        // process" — and the rest end up undeclared.
+        let (withheld, default_withheld) = self.withheld_bindings();
+        if !withheld.is_empty() {
+            let undeclarations: Vec<(String, String)> = withheld
+                .iter()
+                .map(|(prefix, _)| (prefix.clone(), String::new()))
+                .collect();
+            self.fixup.push_scope(&undeclarations);
+        }
         let open = self.stack.last_mut().expect("checked");
         open.flushed = true;
         let mut name = open.name.clone().unwrap_or_default();
@@ -483,7 +612,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         // shape that would contradict it — an unprefixed name *in* a namespace
         // has a default-namespace node by definition.
         let name_has_a_default = name.prefix.is_empty() && !name.uri.is_empty();
-        if open.no_default && !name_has_a_default {
+        if (open.no_default || default_withheld) && !name_has_a_default {
             keep.push((String::new(), String::new()));
         }
         let attrs: Vec<(Name, String, Option<NodeSchemaBinding>)> =
@@ -512,15 +641,76 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         let keep_refs: Vec<(&str, &str)> =
             keep.iter().map(|(p, u)| (p.as_str(), u.as_str())).collect();
         // Pushes the scope it computes; `end_element` pops it.
-        let (decls, fixed) = self.fixup.declarations_for(
+        let (mut decls, fixed) = self.fixup.declarations_for(
             (name.prefix.as_str(), name.uri.as_str()),
             &attr_names,
             &keep_refs,
         );
+        if !withheld.is_empty() {
+            // One scope per element, as `end_element` expects. A withheld
+            // binding that fixup did not re-declare becomes an undeclaration
+            // (`xmlns:p=""`, the tree's way of saying "no namespace node `p`" —
+            // the serializer never writes one). One it re-declared with the
+            // very URI the parent binds the prefix to is dropped instead,
+            // together with its undeclaration: inheriting the parent's binding
+            // gives the element the same namespace node, and re-declaring it
+            // on every element of a deep non-inheriting chain made the tree
+            // carry one declaration per prefix per level, which upstream's
+            // namespace axis walks once per ancestor (review N2).
+            self.fixup.pop_scope();
+            self.fixup.pop_scope();
+            let mut merged: Vec<(String, String)> = withheld
+                .iter()
+                .filter(|(prefix, _)| !decls.iter().any(|(declared, _)| declared == prefix))
+                .map(|(prefix, _)| (prefix.clone(), String::new()))
+                .collect();
+            decls.retain(|declaration| !withheld.contains(declaration));
+            merged.append(&mut decls);
+            self.fixup.push_scope(&merged);
+            decls = merged;
+        }
 
         self.out.start_element(&name, binding, nilled)?;
         for (prefix, uri) in &decls {
             self.out.namespace(prefix, uri)?;
+        }
+        let open = self.stack.last_mut().expect("checked");
+        open.declared = decls;
+        if open.copied {
+            // What a copied element has of its own besides the namespace nodes
+            // it copied: the nodes its (final) name and attribute names need,
+            // which fixup produced — or, for the default namespace, the one an
+            // unprefixed name in a namespace has by definition.
+            let copied_prefix = |namespaces: &[(String, String)], prefix: &str| -> bool {
+                namespaces.iter().any(|(copied, _)| copied == prefix)
+            };
+            open.owns_default = name_has_a_default || copied_prefix(&open.namespaces, "");
+            let name_is_own = !name.prefix.is_empty()
+                && !name.uri.is_empty()
+                && name.prefix != "xml"
+                && !copied_prefix(&open.namespaces, &name.prefix);
+            let name_kept = open
+                .name
+                .as_ref()
+                .is_some_and(|requested| requested.prefix == name.prefix);
+            open.fixup_name = name_is_own && name_kept;
+            let mut fixup_nodes: Vec<(String, String)> = Vec::new();
+            if name_is_own && !name_kept {
+                fixup_nodes.push((name.prefix.clone(), name.uri.clone()));
+            }
+            for (prefix, uri) in &fixed {
+                if prefix.is_empty()
+                    || uri.is_empty()
+                    || prefix == "xml"
+                    || (name_is_own && *prefix == name.prefix)
+                    || copied_prefix(&open.namespaces, prefix)
+                    || fixup_nodes.iter().any(|(seen, _)| seen == prefix)
+                {
+                    continue;
+                }
+                fixup_nodes.push((prefix.clone(), uri.clone()));
+            }
+            open.fixup_nodes = fixup_nodes;
         }
         for ((name, value, binding), (prefix, _)) in attrs.iter().zip(fixed.iter()) {
             let fixed_name = Name {
@@ -531,6 +721,148 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
             self.out.attribute(&fixed_name, value, *binding)?;
         }
         self.out.end_start_tag()
+    }
+
+    /// What the element being flushed must **not** inherit from its parent:
+    /// the prefixed bindings, each with the URI the parent binds it to, and
+    /// whether the parent's default namespace is withheld too.
+    ///
+    /// Two shapes withhold anything; everywhere else the element inherits
+    /// what is in scope at its parent, as the tree does by construction.
+    ///
+    /// **The parent's instruction said `inherit-namespaces="no"`** (§11.1.3,
+    /// §11.2, §11.9.1):
+    ///
+    /// > If the value is set to `no`, then these namespace nodes are not
+    /// > automatically copied to the children.
+    ///
+    /// Every prefixed binding in scope at the parent is withheld — including
+    /// those the parent itself inherited (review N5). The default namespace is
+    /// `no_default`'s business, set when the element was opened. The set is
+    /// the parent's [`PrefixedScope`], computed once per element and carried
+    /// down from its own parent's (review N3, R1), so finding it costs time
+    /// proportional to the bindings in scope, whatever the depth.
+    ///
+    /// **The element is a deep copy below the root of the copy** (§11.9.2).
+    /// Its parent is a copy too, and is not "the newly constructed element"
+    /// of §5.7.1's last rule — that is the element the copy is attached to,
+    /// whose namespace nodes reach the copied elements through the tree. What
+    /// the element must not get from its parent's copy is what the parent has
+    /// of its own and the original element did not have:
+    ///
+    /// - the parent's fixup-produced nodes (`fixup_name`, `fixup_nodes`,
+    ///   `owns_default`):
+    ///   with `copy-namespaces="no"` "none of the namespace nodes are copied:
+    ///   however, namespace nodes will still be created in the result tree as
+    ///   required by the namespace fixup process" — for each element's own
+    ///   names, and §5.7.3 adds that "the namespace fixup process does not add
+    ///   a namespace node to an element merely because its parent node in the
+    ///   result tree has such a namespace node" (review O1);
+    /// - with `copy-namespaces="yes"` ("all the namespace nodes of the
+    ///   original element are copied to the new element"), the parent's copied
+    ///   nodes the original element lacks — a child of an element built with
+    ///   `inherit-namespaces="no"`, which a copy must not hand those bindings
+    ///   back to (review N1). The only way an element lacks a prefixed binding
+    ///   its parent has is an undeclaration of its own (`undeclared`).
+    ///
+    /// An ordinary tree copied with `copy-namespaces="yes"` has neither, so
+    /// nothing is withheld and the copy is what it always was.
+    fn withheld_bindings(&mut self) -> (Vec<(String, String)>, bool) {
+        let depth = self.stack.len();
+        let parent_scope = if self.stack[depth - 1].parent_withholds {
+            Some(self.prefixed_scope_at(depth - 2))
+        } else {
+            None
+        };
+        let (element, parent) = (&self.stack[depth - 1], &self.stack[depth - 2]);
+        // A binding the element itself has with the same URI — one of its own
+        // namespace nodes, or the one its name needs — would only be
+        // re-declared by fixup and dropped again by the flush: it is left in
+        // scope instead, which is the same thing without the round trip.
+        // (Unless §11.7 is about to re-prefix the name, which happens only
+        // when one of its own nodes rebinds the name's prefix; then the name
+        // does not keep that prefix.)
+        let name = element.name.as_ref();
+        let renamed = name.is_some_and(|name| {
+            element
+                .namespaces
+                .iter()
+                .any(|(prefix, uri)| *prefix == name.prefix && *uri != name.uri)
+        });
+        let rebinds_identically = |prefix: &str, uri: &str| {
+            element
+                .namespaces
+                .iter()
+                .any(|(own, own_uri)| own == prefix && own_uri == uri)
+                || (!renamed && name.is_some_and(|name| name.prefix == prefix && name.uri == uri))
+        };
+        if let Some(parent_scope) = parent_scope {
+            let withheld = parent_scope
+                .iter()
+                .filter(|(prefix, uri)| !rebinds_identically(prefix, uri))
+                .cloned()
+                .collect();
+            return (withheld, false);
+        }
+        if !(element.copied && parent.copied) {
+            return (Vec::new(), false);
+        }
+        let mut withheld: Vec<(String, String)> = Vec::new();
+        if parent.fixup_name {
+            if let Some(own) = parent.name.as_ref() {
+                if !rebinds_identically(&own.prefix, &own.uri) {
+                    withheld.push((own.prefix.clone(), own.uri.clone()));
+                }
+            }
+        }
+        for (prefix, uri) in &parent.fixup_nodes {
+            if !rebinds_identically(prefix, uri) {
+                withheld.push((prefix.clone(), uri.clone()));
+            }
+        }
+        for prefix in &element.undeclared {
+            let parent_copied_it = parent.namespaces.iter().any(|(copied, _)| copied == prefix);
+            if !parent_copied_it || withheld.iter().any(|(seen, _)| seen == prefix) {
+                continue;
+            }
+            if let Some(uri) = self.fixup.in_scope(prefix).filter(|uri| !uri.is_empty()) {
+                withheld.push((prefix.clone(), uri.to_string()));
+            }
+        }
+        let default_withheld = parent.owns_default
+            && !element
+                .namespaces
+                .iter()
+                .any(|(prefix, _)| prefix.is_empty());
+        (withheld, default_withheld)
+    }
+
+    /// The [`PrefixedScope`] of the flushed container `self.stack[index]`.
+    ///
+    /// Computed on demand and kept on the container: the walk goes up only to
+    /// the nearest container that already knows its scope, and every one
+    /// passed on the way is given its own on the way down — the parent's,
+    /// shared, when it declares no prefix. Each container is computed at most
+    /// once while it is open, so a chain of non-inheriting elements without
+    /// declarations costs O(1) per element (review R1: re-reading every open
+    /// ancestor's `declared` for each parent made it quadratic in the depth),
+    /// and nothing is computed where no element says
+    /// `inherit-namespaces="no"`.
+    fn prefixed_scope_at(&mut self, index: usize) -> PrefixedScope {
+        let mut known = index;
+        while known > 0 && self.stack[known].prefixed_scope.is_none() {
+            known -= 1;
+        }
+        let (mut scope, first) = match &self.stack[known].prefixed_scope {
+            Some(scope) => (Arc::clone(scope), known + 1),
+            // The document level, which declares nothing.
+            None => (PrefixedScope::from(Vec::new()), known),
+        };
+        for open in &mut self.stack[first..=index] {
+            scope = with_declarations(&scope, &open.declared);
+            open.prefixed_scope = Some(Arc::clone(&scope));
+        }
+        scope
     }
 
     /// Records one attribute, last-wins on a duplicate expanded name.
@@ -665,12 +997,19 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         nav: &Nav<'t>,
         namespaces: CopyNamespaces,
     ) -> Result<(), XsltError> {
-        self.copy_subtree(nav, namespaces, false)
+        self.copy_subtree(nav, namespaces)
     }
 
     /// The recursive half of [`copy_node`](Self::copy_node).
     ///
-    /// `default_blocked` carries §5.7.1's last rule down the copied subtree:
+    /// Every element it opens is marked `copied`, so that the flush gives it
+    /// exactly the namespace nodes §11.9.2 does (`withheld_bindings` has the
+    /// rules): with `copy-namespaces="yes"` "all the namespace nodes of the
+    /// original element are copied to the new element" — and no binding the
+    /// original lacks comes back from the copy of its parent — and with `no`
+    /// "none of the namespace nodes are copied", only what fixup produces for
+    /// each element's own names. On top of that, §5.7.1's last rule hands the
+    /// copy the namespace nodes of the element it is attached to:
     ///
     /// > If the newly constructed node is an element node, and if namespaces
     /// > are inherited, then each namespace node of the newly constructed
@@ -683,28 +1022,22 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
     /// The copy's own elements are not newly constructed, so nothing
     /// propagates *from* them; what propagates is the namespace nodes of the
     /// element (or nothing, for a document node) the copy is being attached
-    /// to. Once an element inside the copy carries a default-namespace node of
-    /// its own, it is an "intermediate element" and the propagation stops
-    /// there — so a deeper element that has *no* default-namespace node must
-    /// end up with none, which is what `no_default` asks fixup for.
+    /// to — through the tree, which already stops at an element that has a
+    /// node of its own with the same name.
     ///
-    /// This is the whole difference between `namespace-3001` (a deep copy
-    /// attached to a document node: the inner `xmlns=""` survives) and
-    /// `namespace-3004` (the same deep copy attached to a literal result
-    /// element with a default namespace: the copy root inherits it, and the
-    /// undeclaration disappears).
-    fn copy_subtree(
-        &mut self,
-        nav: &Nav<'t>,
-        namespaces: CopyNamespaces,
-        default_blocked: bool,
-    ) -> Result<(), XsltError> {
+    /// For the default namespace this is the whole difference between
+    /// `namespace-3001` (a deep copy attached to a document node: the inner
+    /// `xmlns=""` survives, because its copied parent has a default namespace
+    /// of its own) and `namespace-3004` (the same deep copy attached to a
+    /// literal result element with a default namespace: the copy root has none
+    /// of its own and inherits that one, and the undeclaration disappears).
+    fn copy_subtree(&mut self, nav: &Nav<'t>, namespaces: CopyNamespaces) -> Result<(), XsltError> {
         match nav.node_type() {
             DomNodeType::Root => {
                 let mut child = nav.clone();
                 if child.move_to_first_child() {
                     loop {
-                        self.copy_subtree(&child, namespaces, default_blocked)?;
+                        self.copy_subtree(&child, namespaces)?;
                         if !child.move_to_next_sibling() {
                             break;
                         }
@@ -717,23 +1050,15 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                 let nilled = self.annotations == Annotations::Preserve
                     && matches!(nav.typed_value(), TypedValue::Nilled);
                 self.start_element(&Name::of(nav), binding, nilled)?;
+                self.top().copied = true;
                 // §11.9.2: with `copy-namespaces="no"` none of the namespace
                 // nodes are copied and fixup supplies what the names need.
-                let mut blocked = default_blocked;
                 if let Some(scope) = namespaces.scope() {
-                    let nodes = namespace_nodes_of(nav, scope);
-                    let has_default = nodes.iter().any(|(prefix, _)| prefix.is_empty());
+                    let (nodes, undeclared) = namespace_nodes_and_undeclarations_of(nav, scope);
                     for (prefix, uri) in &nodes {
                         self.namespace(prefix, uri)?;
                     }
-                    if has_default {
-                        blocked = true;
-                    } else if default_blocked {
-                        // An element above this one *inside the copy* has a
-                        // default-namespace node, so the attachment point's
-                        // default never reaches here: this element has none.
-                        self.namespace("", "")?;
-                    }
+                    self.top().undeclared = undeclared;
                 }
                 let mut attr = nav.clone();
                 if attr.move_to_first_attribute() {
@@ -748,7 +1073,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                 let mut child = nav.clone();
                 if child.move_to_first_child() {
                     loop {
-                        self.copy_subtree(&child, namespaces, blocked)?;
+                        self.copy_subtree(&child, namespaces)?;
                         if !child.move_to_next_sibling() {
                             break;
                         }
@@ -809,16 +1134,19 @@ impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
         parent.last_atomic = false;
         // §5.7.1: with `inherit-namespaces="no"` on the parent's instruction
         // this element gets none of the parent's namespace nodes, so it starts
-        // out with no namespace node with no name. A default namespace the
-        // parent declared therefore has to be undeclared here — the one part of
-        // the effect XML 1.0 output can express, as §11.1's own note says. A
-        // default namespace of this element's own clears the flag again.
-        let no_default = !parent.inherit;
+        // out with no namespace node with no name — a default namespace the
+        // parent declared has to be undeclared here, which a default namespace
+        // of this element's own clears again — and with none of the parent's
+        // prefixed ones either (`parent_withholds`, applied at flush time).
+        // Only the default-namespace half shows in XML 1.0 output (§5.7.3's
+        // note); the prefixed half shows on the `namespace` axis of the tree.
+        let parent_withholds = !parent.inherit;
         self.stack.push(Open {
             name: Some(name.clone()),
             binding,
             nilled,
-            no_default,
+            no_default: parent_withholds,
+            parent_withholds,
             ..Open::inheriting()
         });
         Ok(())
@@ -1114,7 +1442,10 @@ impl<'t> Receiver<'t> for ResultBuilder<'t> {
 /// reproduced deliberately: declarations are written **before** the attributes
 /// and **sorted by prefix** (`serialize.rs:847`, which sorts because "the
 /// `namespace::` axis has no defined order"), and `>` is always escaped in text
-/// (`serialize.rs:961`).
+/// (`serialize.rs:961`). A declaration is written only where it changes the
+/// scope written so far, and a prefixed undeclaration (`xmlns:p=""`, which a
+/// child of an `inherit-namespaces="no"` element carries in the tree) never is
+/// — upstream's `write_namespace_declarations` follows the same two rules.
 #[derive(Default)]
 pub struct EventSerializer {
     out: String,
@@ -1123,6 +1454,15 @@ pub struct EventSerializer {
     attrs: Vec<(Name, String)>,
     open: Vec<Name>,
     tag_open: bool,
+    /// The prefixes of the declarations written so far, innermost last — what
+    /// `end_element` takes back off `bound`.
+    written: Vec<String>,
+    /// For each prefix, the URIs its written declarations bind it to,
+    /// innermost last, so that asking what a prefix is bound to costs one
+    /// lookup however many declarations are in scope.
+    bound: HashMap<String, Vec<String>>,
+    /// Where each open element's declarations start in `written`.
+    marks: Vec<usize>,
 }
 
 impl EventSerializer {
@@ -1134,6 +1474,15 @@ impl EventSerializer {
     /// The XML written so far.
     pub fn into_string(self) -> String {
         self.out
+    }
+
+    /// Whether `prefix` is bound to `uri` by what has been written so far; the
+    /// empty prefix is bound to no namespace until something else is written.
+    fn is_written(&self, prefix: &str, uri: &str) -> bool {
+        match self.bound.get(prefix).and_then(|uris| uris.last()) {
+            Some(bound) => bound == uri,
+            None => prefix.is_empty() && uri.is_empty(),
+        }
     }
 
     fn close_tag(&mut self, self_closing: bool) {
@@ -1151,7 +1500,11 @@ impl EventSerializer {
         self.out.push('<');
         push_qname(&mut self.out, &name.prefix, &name.local);
         self.decls.sort_by(|(a, _), (b, _)| a.cmp(b));
+        self.marks.push(self.written.len());
         for (prefix, uri) in std::mem::take(&mut self.decls) {
+            if (!prefix.is_empty() && uri.is_empty()) || self.is_written(&prefix, &uri) {
+                continue;
+            }
             if prefix.is_empty() {
                 self.out.push_str(" xmlns=\"");
             } else {
@@ -1161,6 +1514,8 @@ impl EventSerializer {
             }
             push_attribute_value(&mut self.out, &uri);
             self.out.push('"');
+            self.bound.entry(prefix.clone()).or_default().push(uri);
+            self.written.push(prefix);
         }
         for (attr, value) in std::mem::take(&mut self.attrs) {
             self.out.push(' ');
@@ -1247,6 +1602,13 @@ impl<'t> Receiver<'t> for EventSerializer {
 
     fn end_element(&mut self) -> Result<(), XsltError> {
         self.flush();
+        if let Some(mark) = self.marks.pop() {
+            for prefix in self.written.drain(mark..) {
+                if let Some(uris) = self.bound.get_mut(&prefix) {
+                    uris.pop();
+                }
+            }
+        }
         let name = self.open.pop().unwrap_or_default();
         if self.tag_open {
             // Upstream always collapses an empty element to `<a/>`.

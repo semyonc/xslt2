@@ -547,9 +547,12 @@ fn inherit_namespaces_is_allowed_on_a_literal_result_element() {
 
 /// The part of `inherit-namespaces="no"` that XML 1.0 output *can* express: a
 /// child in a namespace no longer inherits the parent's default namespace, so
-/// the default has to be undeclared on it. (Prefixed bindings stay inherited
-/// whatever the attribute says — §11.1's own note: "namespace declarations
-/// written for the parent element will be inherited by the child".)
+/// the default has to be undeclared on it. (A prefixed binding cannot be
+/// undeclared in XML 1.0 output, so there the child looks as if it had
+/// inherited it — §5.7.3's note: "namespace declarations written for the
+/// parent element will be inherited by its child elements as if the
+/// corresponding namespace nodes were present on the child element". On the
+/// tree it is withheld as well: `tests/ns_inherit.rs`.)
 ///
 /// The child is built with `xsl:element`, which — unlike a literal result
 /// element — copies no namespace nodes from the stylesheet (§11.2), so the only
