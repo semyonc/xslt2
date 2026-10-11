@@ -152,12 +152,16 @@ cargo test --test xslts --release -- -l                 # list test-sets and cou
 cargo test --test xslts --release -- --self-test        # the harness's own checks
 ```
 
-`unicode-90` is left out of the figures above with `--skip unicode-90`: 1,444 of its cases evaluate
-`$validrange[not(. = $c)]` — a general comparison against a large sequence, repeated about 1.1
-million times over a 53 MB source — which takes 30–60 s per case. That is a performance limit,
-not a conformance answer (it needs a comparison index cached across evaluations); the other 16
-cases use XPath 3.0 syntax. The set is in the `misc/regex` family, outside the headline
-denominator.
+`unicode-90` is left out of the figures above with `--skip unicode-90`. Its 1,444 XSLT 2.0 cases check a
+Unicode general category against every code point: `$validrange[not(. = $c)]` compares each of the
+1.1 million legal code points with the category's code points read from a source of up to 51 MB. That
+general comparison used to take 30–60 s per case; `xsd-schema` now builds the comparison index once and
+reuses it across the evaluations of a loop-invariant operand (Wave A, A-5), and caches compiled regular
+expressions (A-6), so a single case takes 0.4–2 s. The set is still skipped because of its size: each of
+the 912 `fn:matches` cases builds the 1.1-million-integer range and makes about a million `matches()`
+calls, and the whole set does not finish in 30 minutes. That is a performance limit, not a conformance
+answer. The other 16 cases use XPath 3.0 syntax and are excluded. The set is in the `misc/regex` family,
+outside the headline denominator.
 
 Dependency policy: `tests/xslts/filter.rs`. Assertion semantics: `tests/xslts/compare.rs`
 (`assert` XPaths are evaluated with the `xsd-schema` engine over the re-parsed result). The
