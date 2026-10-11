@@ -48,13 +48,13 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 | | |
 |---|---|
 | XSLT 2.0-applicable | 6,619 |
-| excluded (documented in `tests/xslts/filter.rs`) | 61 |
-| runnable (dependencies satisfied) | 5,690 |
-| pass | 5,013 |
-| fail / wrongError / harnessError | 69 / 0 / 3 |
+| excluded (documented in `tests/xslts/filter.rs`) | 62 |
+| runnable (dependencies satisfied) | 5,689 |
+| pass | 5,014 |
+| fail / wrongError / harnessError | 67 / 0 / 3 |
 | not implemented (`XSLT2-NOTIMPL`, M2k–M4) | 605 |
-| pass rate over runnable | 88.10% |
-| headline (basic profile, non-regex families) | 3,770 / 4,210 = **89.6%** |
+| pass rate over runnable | 88.13% |
+| headline (basic profile, non-regex families) | 3,771 / 4,209 = **89.6%** |
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the
@@ -80,6 +80,10 @@ performance change) kept it there, and M2g (`xsl:for-each-group`, `../../XSLT2_M
 exclusions) took it to 4,864 of 5,719 on 2026-10-08, and M2h (`xsl:analyze-string`, `regex-group()`,
 `../../XSLT2_M2H_REPORT.md`) to 5,013 of 5,690 on 2026-10-10 — 29 `misc/regex-classes` general-category cases are
 excluded because their reference results pin Unicode 3.1 / 5.2 / 6.0 and the regex backend implements Unicode 15.1.
+On 2026-10-11 the harness began to evaluate assertions about the result tree as the catalog defines them —
+on a serialization with the default parameters (method xml, indent no), not on the stylesheet's indented
+output (`../../XSLT2_HARNESS_RESULT_TREE_REPORT.md`): 5,014 of 5,689 (`for-each-group-081a` passes;
+`for-each-group-085` is excluded — its expected result drops source whitespace that §6.6 and §4.4 keep).
 
 The sixteen test-sets M1 targets:
 

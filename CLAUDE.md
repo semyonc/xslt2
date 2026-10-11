@@ -92,6 +92,17 @@ python3 tools/suite_diff.py ../../baselines/<current baseline>.xml /tmp/new.xml 
 `tools/suite_diff.py` compares status **and** failure comment per case; a comment-only change is listed
 separately. Always pass `--skip unicode-90` (the set runs for hours).
 
+**What each assertion reads** (`tests/xslts/compare.rs`, module docs). The adapter keeps every result
+tree in two forms (`runner::ResultDocument`): `serialized`, written with the stylesheet's own
+`xsl:output`, which only `serialization-matches` and `assert-serialization` read; and `tree`, written with
+the catalog's default parameters (method xml, indent no, omit-xml-declaration yes), which every
+assertion about the tree reads — `assert`, `assert-xml`, `assert-string-value`, `assert-eq`,
+`assert-empty` — re-parsed with roxmltree, so `indent="yes"`, the text method or an output encoding
+never add or remove a node. A failure of the stylesheet's own serialization is still the run's error.
+`assert-string-value` normalizes unless `normalize-space="false"` (the catalog's `default="true"`), with
+XML whitespace only. `assert-true` / `-false` / `-count` / `-type` / `-deep-eq` / `-permutation` need a
+raw sequence result, which an XSLT 2.0 run never delivers: `harnessError`.
+
 `NOT-IMPL` is this processor's own `XSLT2-NOTIMPL` code: the case is runnable and fails, but it
 fails because a feature belongs to a later milestone, not because the answer is wrong. Dependency
 policy lives in `tests/xslts/filter.rs` (`dependency_supported`); the exclusion list (`EXCLUDED`)

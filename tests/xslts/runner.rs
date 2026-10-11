@@ -28,11 +28,40 @@ pub struct TestRun<'a> {
     pub strict_recoverable: bool,
 }
 
-/// A result tree, as the engine serialized it (default parameters unless the test's
-/// `<output>` says otherwise): method xml, indent no, omit-xml-declaration yes.
-#[derive(Debug, Clone, Default)]
+/// A result tree, in the two textual forms the catalog's assertions are defined over.
+///
+/// The harness cannot keep the tree itself — it lives in the engine's arena, which ends with
+/// the run — so it keeps two serializations of it, and each assertion reads the one the
+/// catalog (`admin/catalog-schema.xsd`) defines it over; see `compare::evaluate`.
+#[derive(Debug, Clone)]
 pub struct ResultDocument {
+    /// The tree as the stylesheet's own `xsl:output` serializes it, which is what
+    /// `serialization-matches` ("The result of the query must be serialized using the
+    /// serialization options specified within the query") and `assert-serialization` compare.
     pub serialized: String,
+    /// The tree written with the catalog's default serialization parameters — method `xml`,
+    /// indent `no`, omit-xml-declaration `yes`, nothing else — or why it could not be.
+    /// Every assertion about the result *tree* re-parses this text: `assert` is "evaluated
+    /// with the document node of the result document as the context item", and `assert-xml`
+    /// compares "a serialization of the expression result using the default serialization
+    /// parameters". Indentation, the text method or an output encoding of the stylesheet
+    /// never reach it, so a re-parse sees the tree's own nodes and nothing else — except
+    /// whitespace-only text directly under the document node, which no XML parse keeps.
+    pub tree: Result<String, String>,
+}
+
+impl ResultDocument {
+    /// A result whose two forms are the same text: an `xsl:message` document, which the
+    /// processor writes with the default parameters already (`xslt2::receiver::serialize_document`;
+    /// the catalog's `assert-message` asserts on the message "considered as an XML document"),
+    /// or a self-test fixture.
+    pub fn same(text: impl Into<String>) -> Self {
+        let text = text.into();
+        ResultDocument {
+            serialized: text.clone(),
+            tree: Ok(text),
+        }
+    }
 }
 
 #[derive(Debug, Default)]

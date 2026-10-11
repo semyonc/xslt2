@@ -506,7 +506,8 @@ fn one_or_all(mut list: Vec<Assertion>) -> Assertion {
     }
 }
 
-fn parse_assertion(n: Node) -> Assertion {
+/// One assertion element of a `<result>` (public for the self-tests).
+pub fn parse_assertion(n: Node) -> Assertion {
     use Assertion::*;
     match n.tag_name().name() {
         "all-of" => AllOf(parse_assertions(n)),
@@ -522,9 +523,12 @@ fn parse_assertion(n: Node) -> Assertion {
             ignore_prefixes: attr_bool(n, "ignore-prefixes").unwrap_or(false),
             xml_version: attr(n, "xml-version"),
         },
+        // `admin/catalog-schema.xsd`: `<xs:attribute name="normalize-space" type="xs:boolean"
+        // default="true"/>` — "If the normalize-space attribute is present with the value true
+        // (which is the default) …".
         "assert-string-value" => AssertStringValue {
             expected: text_of(n),
-            normalize_space: attr_bool(n, "normalize-space").unwrap_or(false),
+            normalize_space: attr_bool(n, "normalize-space").unwrap_or(true),
         },
         // `@code` is optional in the schema; keep an absent one distinguishable from the
         // documented `code="*"` ("any error code is allowed") instead of silently conflating

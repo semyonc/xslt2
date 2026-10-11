@@ -1,7 +1,21 @@
 //! Assertion evaluation (design sketch §2.4) against a `RunOutput`.
 //!
-//! `assert` XPaths are evaluated with the `xsd-schema` XPath 2.0 engine over the serialized
-//! result re-parsed with roxmltree (`RoXmlNavigator`), so the comparison is independent of the
+//! **Which text each assertion reads.** A `ResultDocument` holds the result tree twice: as the
+//! stylesheet's own `xsl:output` serializes it (`serialized`), and written with the catalog's
+//! default parameters, method xml, indent no, omit-xml-declaration yes (`tree`). The catalog
+//! (`admin/catalog-schema.xsd`) defines `serialization-matches` ("serialized using the
+//! serialization options specified within the query") and `assert-serialization` over the
+//! first; everything that is about the *tree* — `assert` ("evaluated with the document node of
+//! the result document as the context item"), `assert-xml` ("a serialization of the expression
+//! result using the default serialization parameters"), `assert-string-value`, `assert-eq`,
+//! `assert-empty` — reads the second, so `indent="yes"`, the text method or an output encoding
+//! never add or remove a node (`for-each-group-081a`). (`assert-true` / `assert-false` need a
+//! raw sequence result and are harness errors.) The re-parse keeps every node of the tree but
+//! one kind: whitespace-only text directly under the document node, which no XML parse keeps —
+//! as in `assert-xml`'s own parse-and-canonicalize definition.
+//!
+//! `assert` XPaths are evaluated with the `xsd-schema` XPath 2.0 engine over that text
+//! re-parsed with roxmltree (`RoXmlNavigator`), so the comparison is independent of the
 //! engine's own tree type. A result that is not a well-formed document (text only, several
 //! top-level elements) is re-parsed the same way and its document node rebuilt from the
 //! top-level nodes (see `ebv_over_serialized`). Assertions written with the XPath 3.0
@@ -384,21 +398,24 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
             };
             // The catalog default is ignore-prefixes="false" = full Canonical-XML equivalence.
             let strict = !*ignore_prefixes && !cx.lenient_xml;
-            match &out.primary {
-                None => Verdict::fail("no primary result"),
-                Some(p) => match compare_xml(&expected, &p.serialized, strict) {
+            match primary_tree(out) {
+                Err(v) => v,
+                Ok(tree) => match compare_xml(&expected, tree, strict) {
                     Ok(()) => Verdict::pass(),
                     Err(m) => Verdict::fail(m),
                 },
             }
         }
+        // "string-join(for $r in $result return string($r), " ")": the result is the document
+        // node, so this is its string value — the tree's text nodes, not the stylesheet's
+        // serialization (which may be indented, or written by the text method).
         AssertStringValue {
             expected,
             normalize_space: normalize,
-        } => match &out.primary {
-            None => Verdict::fail("no primary result"),
-            Some(p) => {
-                let actual = string_value_of(&p.serialized);
+        } => match primary_tree(out) {
+            Err(v) => v,
+            Ok(tree) => {
+                let actual = string_value_of(tree);
                 let (e, a) = if *normalize {
                     (normalize_space(expected), normalize_space(&actual))
                 } else {
@@ -415,6 +432,8 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
                 }
             }
         },
+        // The two serialization assertions — and only they — read the stylesheet's own
+        // serialization.
         SerializationMatches { regex, flags, file } => {
             let regex = match load_text(regex, file, cx) {
                 Ok(t) => t,
@@ -500,10 +519,10 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
             };
             let mut last = Verdict::fail("no message satisfied the assertion");
             for m in &out.messages {
+                // The processor writes a message document with the default parameters
+                // already, so both forms are the same text.
                 let view = RunOutput {
-                    primary: Some(ResultDocument {
-                        serialized: m.clone(),
-                    }),
+                    primary: Some(ResultDocument::same(m.clone())),
                     ..Default::default()
                 };
                 let v = evaluate(inner, &view, cx);
@@ -520,19 +539,23 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
         AssertWarning => {
             Verdict::harness("assert-warning: the harness does not capture processor warnings")
         }
-        AssertEmpty => match &out.primary {
-            None => Verdict::pass(),
-            // Only a trailing newline is forgiven: whitespace in the result is a text node,
-            // which is emphatically not an empty sequence.
-            Some(p) if trim_trailing_newlines(&p.serialized).is_empty() => Verdict::pass(),
-            Some(p) => Verdict::fail(format!(
-                "expected empty result, got {:?}",
-                clip(&p.serialized)
-            )),
+        AssertEmpty => match (&out.primary, primary_tree(out)) {
+            (None, _) => Verdict::pass(),
+            (_, Err(v)) => v,
+            // The default-parameter form adds nothing — no final newline, no declaration — so
+            // only an empty text is an empty result: whitespace, a newline included, is a text
+            // node, which is emphatically not an empty sequence.
+            (_, Ok("")) => Verdict::pass(),
+            (_, Ok(tree)) => Verdict::fail(format!("expected empty result, got {:?}", clip(tree))),
         },
-        AssertTrue => bool_result(out, true),
-        AssertFalse => bool_result(out, false),
-        // `$result` is the *document node* of the re-parsed serialization, so atomizing it
+        // "Asserts that the result of the test is the singleton boolean value true(). Note, the
+        // test expression must actually evaluate to true: this is not an assertion on the
+        // effective boolean value." The result of an XSLT 2.0 run is a document node, never a
+        // boolean; comparing its text with "true" would accept a document holding that word.
+        AssertTrue | AssertFalse => {
+            Verdict::harness(format!("<{}> needs a raw sequence result", a.label()))
+        }
+        // `$result` is the *document node* of the re-parsed result tree, so atomizing it
         // yields the result's string value: right for a text-only result, an honest failure
         // otherwise. The three below cannot be answered that way at all — see the audit in
         // `HARNESS_FIX_REPORT.md`.
@@ -636,20 +659,6 @@ fn eqname_namespace(expected: &str) -> Option<&str> {
         .map(|(ns, _)| ns)
 }
 
-fn bool_result(out: &RunOutput, want: bool) -> Verdict {
-    match &out.primary {
-        None => Verdict::fail("no primary result"),
-        Some(p) => {
-            let got = p.serialized.trim();
-            if got == if want { "true" } else { "false" } {
-                Verdict::pass()
-            } else {
-                Verdict::fail(format!("expected {want}, got {:?}", clip(got)))
-            }
-        }
-    }
-}
-
 fn xpath_over_result(
     out: &RunOutput,
     xpath: &str,
@@ -670,13 +679,28 @@ fn ebv_over_primary(
     cx: &CompareContext<'_>,
     false_message: impl FnOnce() -> String,
 ) -> Verdict {
-    let Some(p) = &out.primary else {
-        return Verdict::fail("no primary result");
+    let tree = match primary_tree(out) {
+        Ok(tree) => tree,
+        Err(v) => return v,
     };
-    match ebv_over_serialized(&p.serialized, xpath, ns, cx.entity_results) {
+    match ebv_over_serialized(tree, xpath, ns, cx.entity_results) {
         Ok(true) => Verdict::pass(),
         Ok(false) => Verdict::fail(false_message()),
         Err(v) => v,
+    }
+}
+
+/// The primary result tree written with the catalog's default serialization parameters
+/// (`ResultDocument::tree`): the text every assertion about the result tree re-parses. `Err`
+/// is the verdict when there is no primary result, or when the tree could not be written.
+fn primary_tree(out: &RunOutput) -> Result<&str, Verdict> {
+    match &out.primary {
+        None => Err(Verdict::fail("no primary result")),
+        Some(p) => p.tree.as_deref().map_err(|e| {
+            Verdict::harness(format!(
+                "the result tree cannot be written with the default serialization parameters: {e}"
+            ))
+        }),
     }
 }
 
@@ -690,8 +714,10 @@ fn is_not_well_formed(v: &Verdict) -> bool {
         .is_some_and(|m| m.starts_with(NOT_WELL_FORMED))
 }
 
-/// Re-parse a serialized result and evaluate `xpath` over its document node; `Err` is the
+/// Re-parse a serialized result tree and evaluate `xpath` over its document node; `Err` is the
 /// verdict when it cannot be evaluated (a `harnessError`, or the not-well-formed failure).
+/// The text is `ResultDocument::tree`, written with the default parameters, never the
+/// stylesheet's own serialization.
 ///
 /// The catalog evaluates `assert` "with the document node of the result document as the
 /// context item" (`admin/catalog-schema.xsd`). A result that is a well-formed document is
@@ -920,9 +946,14 @@ fn parseable_text(xml: &str) -> String {
 /// [`parseable_text`], and whether the wrapper was added.
 fn parse_text(xml: &str) -> (String, bool) {
     let mut s = xml.trim_start_matches('\u{feff}');
+    // Only an XML declaration — `'<?xml' VersionInfo …` (XML 1.0 [23]), so `<?xml` followed by
+    // whitespace — is dropped; `<?xml-stylesheet …?>` is a processing instruction, a node of
+    // the result.
     if let Some(rest) = s.strip_prefix("<?xml") {
-        if let Some(end) = rest.find("?>") {
-            s = &rest[end + 2..];
+        if rest.starts_with([' ', '\t', '\r', '\n']) {
+            if let Some(end) = rest.find("?>") {
+                s = &rest[end + 2..];
+            }
         }
     }
     if Document::parse(s).is_ok() {
@@ -1285,8 +1316,14 @@ fn string_value_of(serialized: &str) -> String {
     }
 }
 
+/// XPath `fn:normalize-space`: leading and trailing whitespace stripped, every run of
+/// whitespace replaced by one space — whitespace being the four XML characters (XML 1.0 [3]
+/// `S`), never `char::is_whitespace`, which would also erase a no-break space.
 pub fn normalize_space(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    s.split([' ', '\t', '\n', '\r'])
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn trim_trailing_newlines(s: &str) -> &str {
@@ -1358,9 +1395,7 @@ pub mod self_test {
 
     fn out(xml: &str) -> RunOutput {
         RunOutput {
-            primary: Some(ResultDocument {
-                serialized: xml.to_string(),
-            }),
+            primary: Some(ResultDocument::same(xml)),
             ..Default::default()
         }
     }
@@ -1645,6 +1680,11 @@ pub mod self_test {
     /// Task C: an assertion the harness cannot really check must never be reported as a pass.
     fn unverifiable_assertions_are_harness_errors() {
         let o = out("<a/>");
+        // A document node holding the text "true" is not the boolean `true()`.
+        for a in [Assertion::AssertTrue, Assertion::AssertFalse] {
+            check(evaluate(&a, &out("true"), &cx()), Outcome::HarnessError);
+            check(evaluate(&a, &out("false"), &cx()), Outcome::HarnessError);
+        }
         for a in [
             Assertion::AssertWarning,
             Assertion::AssertCount("2".into()),
@@ -1689,6 +1729,10 @@ pub mod self_test {
         );
         check(
             evaluate(&Assertion::AssertEmpty, &out("\n"), &cx()),
+            Outcome::Fail,
+        );
+        check(
+            evaluate(&Assertion::AssertEmpty, &out(""), &cx()),
             Outcome::Pass,
         );
         // A relative result-document URI matches only at a path-segment boundary.
@@ -1783,9 +1827,7 @@ pub mod self_test {
         let mut o = out("<a/>");
         o.secondary.push((
             "file:///tmp/out/x.xml".into(),
-            ResultDocument {
-                serialized: "<r>1</r>".into(),
-            },
+            ResultDocument::same("<r>1</r>"),
         ));
         o.messages.push("<m>hi</m>".into());
         let a = Assertion::AssertResultDocument {
@@ -2130,12 +2172,8 @@ pub mod self_test {
         }
         // A secondary result document is held to the same declaration.
         let mut o = out("<a/>");
-        o.secondary.push((
-            "file:///t/x.xml".into(),
-            ResultDocument {
-                serialized: "<r/>junk".into(),
-            },
-        ));
+        o.secondary
+            .push(("file:///t/x.xml".into(), ResultDocument::same("<r/>junk")));
         let rd = Assertion::AssertResultDocument {
             uri: "x.xml".into(),
             inner: Box::new(assert_("/r")),
@@ -2324,6 +2362,267 @@ pub mod self_test {
         }
     }
 
+    /// A result whose stylesheet serialization (`serialized`) differs from the tree written
+    /// with the default parameters (`tree`), as `engine::primary_result` reports it.
+    fn out_two(serialized: &str, tree: &str) -> RunOutput {
+        RunOutput {
+            primary: Some(ResultDocument {
+                serialized: serialized.into(),
+                tree: Ok(tree.into()),
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn matches_(regex: &str) -> Assertion {
+        Assertion::SerializationMatches {
+            regex: regex.into(),
+            flags: String::new(),
+            file: None,
+        }
+    }
+
+    fn serialization(expected: &str) -> Assertion {
+        Assertion::AssertSerialization {
+            expected: expected.into(),
+            file: None,
+            method: Some("xml".into()),
+            ignore_prefixes: false,
+        }
+    }
+
+    fn string_value(expected: &str, normalize_space: bool) -> Assertion {
+        Assertion::AssertStringValue {
+            expected: expected.into(),
+            normalize_space,
+        }
+    }
+
+    /// The catalog defines every assertion about the result tree over the tree — `assert`
+    /// "with the document node of the result document as the context item", `assert-xml` over
+    /// "the default serialization parameters method="xml" indent="no"" — and only
+    /// `serialization-matches` / `assert-serialization` over the stylesheet's own output.
+    fn tree_assertions_read_the_default_serialization() {
+        // for-each-group-081a: `indent="yes"` writes whitespace into `out` that the tree does
+        // not have; a re-parse of that text has text nodes the tree does not.
+        let indented = out_two(
+            "<out>\n  <test>true</test>\n</out>",
+            "<out><test>true</test></out>",
+        );
+        for x in [
+            "/out = 'true'",
+            "count(/out/node()) = 1",
+            "empty(/out/text())",
+            "$result/out/test = 'true'",
+        ] {
+            check(evaluate(&assert_(x), &indented, &cx()), Outcome::Pass);
+        }
+        check(
+            evaluate(
+                &assert_xml("<out><test>true</test></out>", false),
+                &indented,
+                &cx(),
+            ),
+            Outcome::Pass,
+        );
+        check(
+            evaluate(&string_value("true", false), &indented, &cx()),
+            Outcome::Pass,
+        );
+        let eq = Assertion::AssertEq {
+            xpath: "'true'".into(),
+            ns: vec![],
+        };
+        check(evaluate(&eq, &indented, &cx()), Outcome::Pass);
+        // … while the two serialization assertions still read the indented text.
+        check(
+            evaluate(&matches_("^<out>\\n  <test>"), &indented, &cx()),
+            Outcome::Pass,
+        );
+        check(
+            evaluate(&matches_("^<out><test>"), &indented, &cx()),
+            Outcome::Fail,
+        );
+        check(
+            evaluate(
+                &serialization("<out>\n  <test>true</test>\n</out>"),
+                &indented,
+                &cx(),
+            ),
+            Outcome::Pass,
+        );
+        check(
+            evaluate(
+                &serialization("<out><test>true</test></out>"),
+                &indented,
+                &cx(),
+            ),
+            Outcome::Fail,
+        );
+
+        // The text method writes the string value alone; the tree still has its element.
+        let text = out_two("true", "<out>true</out>");
+        check(
+            evaluate(&assert_("/out = 'true'"), &text, &cx()),
+            Outcome::Pass,
+        );
+        check(
+            evaluate(&assert_xml("<out>true</out>", false), &text, &cx()),
+            Outcome::Pass,
+        );
+        check(evaluate(&matches_("^true$"), &text, &cx()), Outcome::Pass);
+        check(
+            evaluate(&serialization("true"), &text, &cx()),
+            Outcome::Pass,
+        );
+
+        // A whitespace-only text node that IS in the tree is seen by every tree assertion —
+        // as it is in the tree, not as the stylesheet's indentation rewrote it.
+        let spaced = out_two("<out>\n  <t/>\n</out>", "<out> <t/> </out>");
+        for x in [
+            "count(/out/text()) = 2",
+            "/out/text()[1] = ' '",
+            "/out = '  '",
+            "/out/node()[2] is /out/t",
+        ] {
+            check(evaluate(&assert_(x), &spaced, &cx()), Outcome::Pass);
+        }
+        check(
+            evaluate(&assert_xml("<out><t/></out>", false), &spaced, &cx()),
+            Outcome::Fail,
+        );
+        check(
+            evaluate(&assert_xml("<out> <t/> </out>", false), &spaced, &cx()),
+            Outcome::Pass,
+        );
+        check(
+            evaluate(&string_value("  ", false), &spaced, &cx()),
+            Outcome::Pass,
+        );
+        check(
+            evaluate(&Assertion::AssertEmpty, &spaced, &cx()),
+            Outcome::Fail,
+        );
+
+        // A tree that could not be written is a harness error for every tree assertion, never
+        // a verdict; the serialization assertions are unaffected.
+        let unwritable = RunOutput {
+            primary: Some(ResultDocument {
+                serialized: "x".into(),
+                tree: Err("cannot write".into()),
+            }),
+            ..Default::default()
+        };
+        for a in [
+            assert_("true()"),
+            assert_xml("x", false),
+            string_value("x", false),
+            eq.clone(),
+            Assertion::AssertEmpty,
+            Assertion::Not(Box::new(assert_("false()"))),
+        ] {
+            let v = evaluate(&a, &unwritable, &cx());
+            check(v.clone(), Outcome::HarnessError);
+        }
+        check(
+            evaluate(&matches_("^x$"), &unwritable, &cx()),
+            Outcome::Pass,
+        );
+        check(
+            evaluate(&serialization("x"), &unwritable, &cx()),
+            Outcome::Pass,
+        );
+        let v = evaluate(&assert_("true()"), &unwritable, &cx());
+        assert!(
+            v.message
+                .unwrap_or_default()
+                .contains("default serialization parameters: cannot write"),
+            "the reason must be reported"
+        );
+    }
+
+    /// `assert-string-value/@normalize-space` defaults to true in the catalog schema
+    /// (`default="true"`), and normalization is XPath `fn:normalize-space`, whose whitespace
+    /// is the four XML characters only.
+    fn string_value_normalization_is_xpath_normalize_space() {
+        assert_eq!(normalize_space(" \t a \r\n b \n"), "a b");
+        assert_eq!(normalize_space("\u{a0}a\u{a0} b"), "\u{a0}a\u{a0} b");
+        assert_eq!(normalize_space("a\u{2003}b"), "a\u{2003}b");
+        assert_eq!(normalize_space(""), "");
+        let r = out("<d>a\u{a0}b</d>");
+        check(
+            evaluate(&string_value("a b", true), &r, &cx()),
+            Outcome::Fail,
+        );
+        check(
+            evaluate(&string_value(" a\u{a0}b ", true), &r, &cx()),
+            Outcome::Pass,
+        );
+        let parsed = |xml: &str| {
+            let doc = Document::parse(xml).expect("fixture parses");
+            crate::catalog::parse_assertion(doc.root_element())
+        };
+        let catalog = "http://www.w3.org/2012/10/xslt-test-catalog";
+        let default = parsed(&format!(
+            r#"<assert-string-value xmlns="{catalog}"> a  b </assert-string-value>"#
+        ));
+        assert!(
+            matches!(
+                &default,
+                Assertion::AssertStringValue {
+                    normalize_space: true,
+                    ..
+                }
+            ),
+            "normalize-space defaults to true: {default:?}"
+        );
+        let off = parsed(&format!(
+            r#"<assert-string-value xmlns="{catalog}" normalize-space="false">a</assert-string-value>"#
+        ));
+        assert!(
+            matches!(
+                &off,
+                Assertion::AssertStringValue {
+                    normalize_space: false,
+                    ..
+                }
+            ),
+            "normalize-space=\"false\" is honoured: {off:?}"
+        );
+    }
+
+    /// Only an XML declaration is dropped before a re-parse: `<?xml-stylesheet?>` is a node.
+    fn an_xml_stylesheet_instruction_is_not_an_xml_declaration() {
+        let pi = out(r#"<?xml-stylesheet href="a.css" type="text/css"?><out/>"#);
+        for x in [
+            "count(/processing-instruction('xml-stylesheet')) = 1",
+            "count(/node()) = 2",
+        ] {
+            check(evaluate(&assert_(x), &pi, &cx()), Outcome::Pass);
+        }
+        check(
+            evaluate(&assert_xml("<out/>", false), &pi, &cx()),
+            Outcome::Fail,
+        );
+        check(
+            evaluate(
+                &assert_xml(
+                    r#"<?xml-stylesheet href="a.css" type="text/css"?><out/>"#,
+                    false,
+                ),
+                &pi,
+                &cx(),
+            ),
+            Outcome::Pass,
+        );
+        // A real declaration is still not a node.
+        let decl = out(r#"<?xml version="1.0" encoding="UTF-8"?><out/>"#);
+        check(
+            evaluate(&assert_("count(/node()) = 1"), &decl, &cx()),
+            Outcome::Pass,
+        );
+    }
+
     /// The numbers `--self-test` reports.
     pub struct Summary {
         /// Self-test functions in this module (each holds several checks).
@@ -2361,6 +2660,9 @@ pub mod self_test {
             harness_refusals_are_harness_errors,
             crlf_rule_needs_inputs_that_cannot_produce_cr,
             xpath30_rewrites_respect_braced_uris_and_validity,
+            tree_assertions_read_the_default_serialization,
+            string_value_normalization_is_xpath_normalize_space,
+            an_xml_stylesheet_instruction_is_not_an_xml_declaration,
         ];
         for f in functions {
             f();

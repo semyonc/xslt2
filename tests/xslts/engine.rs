@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bumpalo::Bump;
+use xsd_schema::document::serialize::SerializeOptions;
 use xsd_schema::namespace::context::NamespaceContextSnapshot;
 use xsd_schema::namespace::NameTable;
 use xsd_schema::xpath::functions::XPathValue;
@@ -239,9 +240,9 @@ impl Job {
                 } else {
                     messages
                 };
-                match compiled.serialize_primary(&outcome) {
-                    Ok(serialized) => RunOutput {
-                        primary: Some(ResultDocument { serialized }),
+                match primary_result(&compiled, &outcome) {
+                    Ok(primary) => RunOutput {
+                        primary: Some(primary),
                         messages,
                         ..Default::default()
                     },
@@ -257,6 +258,44 @@ impl Job {
             },
         }
     }
+}
+
+/// The primary result in both forms `ResultDocument` keeps: serialized with the stylesheet's
+/// own `xsl:output` (`CompiledStylesheet::serialize_primary`), and written with the catalog's
+/// default parameters (`default_serialization`).
+///
+/// A failure of the stylesheet's serialization is still the run's error, as before: the
+/// harness always serializes the way the stylesheet asks, so an output the processor cannot
+/// write (an unimplemented method or encoding, a serialization error) ends the case.
+fn primary_result(
+    compiled: &xslt2::CompiledStylesheet<'_>,
+    outcome: &xslt2::Outcome<'_>,
+) -> Result<ResultDocument, XsltError> {
+    let serialized = compiled.serialize_primary(outcome)?;
+    let tree = match outcome.primary {
+        Some(doc) => default_serialization(doc),
+        // No primary result: `serialize_primary` wrote nothing either.
+        None => Ok(String::new()),
+    };
+    Ok(ResultDocument { serialized, tree })
+}
+
+/// A result tree written with the serialization parameters the catalog defines `assert-xml`
+/// over — "the default serialization parameters method="xml" indent="no"
+/// omit-xml-declaration="yes"" (`admin/catalog-schema.xsd`) — and nothing else of the
+/// stylesheet's `xsl:output`: no indentation, no text method, no encoding escapes.
+/// `xsd-schema`'s serializer with these options adds no whitespace and removes none, so a
+/// re-parse of the text has the tree's nodes — all but whitespace-only text directly under the
+/// document node, which no XML parse keeps (as in `assert-xml`'s parse-and-canonicalize
+/// definition).
+fn default_serialization(doc: &xsd_schema::document::BufferDocument<'_>) -> Result<String, String> {
+    let defaults = SerializeOptions {
+        xml_declaration: false,
+        standalone: None,
+        indent: None,
+    };
+    xsd_schema::document::serialize::to_string(&doc.create_navigator(), &defaults)
+        .map_err(|e| e.to_string())
 }
 
 fn failure(e: XsltError) -> RunOutput {
@@ -525,6 +564,50 @@ pub fn self_test() -> usize {
     check(
         matches!(&compiled, Err(e) if e.code == "XTSE0165" && !e.message.contains("element a")),
         "xsl:include of the test-set file does not compile the inline principal",
+    );
+
+    // The primary result in its two forms (`primary_result`), end to end through the public
+    // API: the stylesheet's `xsl:output` shapes `serialized` only; `tree` is the tree as it is.
+    let forms = |sheet: &str| {
+        let compiled = Compiler::new(&names, &functions)
+            .compile_str(sheet, "urn:harness-probe")
+            .expect("the probe stylesheet compiles");
+        let arena = Bump::new();
+        let run = compiled.transformation(&arena, TransformOptions::default());
+        let outcome = run
+            .transform_source("urn:harness-probe-source", "<in/>")
+            .expect("the probe stylesheet runs");
+        primary_result(&compiled, &outcome).expect("the probe result serializes")
+    };
+    let sheet = |output: &str| {
+        format!(
+            r#"<xsl:stylesheet version="2.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+                 {output}
+                 <xsl:template match="/">
+                   <out><test>true</test><ws><xsl:text>  </xsl:text></ws></out>
+                 </xsl:template>
+               </xsl:stylesheet>"#
+        )
+    };
+    let tree = "<out><test>true</test><ws>  </ws></out>";
+    let indented = forms(&sheet(r#"<xsl:output indent="yes"/>"#));
+    check(
+        indented.tree.as_deref() == Ok(tree),
+        "indent=\"yes\" does not reach the default-parameter form",
+    );
+    check(
+        indented.serialized.contains('\n') && indented.serialized != tree,
+        "indent=\"yes\" still shapes the stylesheet's own serialization",
+    );
+    let text = forms(&sheet(r#"<xsl:output method="text"/>"#));
+    check(
+        text.serialized == "true  " && text.tree.as_deref() == Ok(tree),
+        "the text method shapes the stylesheet's serialization only",
+    );
+    let declared = forms(&sheet(r#"<xsl:output omit-xml-declaration="no"/>"#));
+    check(
+        declared.serialized.starts_with("<?xml") && declared.tree.as_deref() == Ok(tree),
+        "the default form has no XML declaration",
     );
 
     // P2-3: a harness refusal is a harnessError, never an engine error that `<error
