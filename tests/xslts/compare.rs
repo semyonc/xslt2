@@ -704,7 +704,8 @@ fn ebv_over_primary(
         Ok(tree) => tree,
         Err(v) => return v,
     };
-    match ebv_over_serialized(tree, xpath, ns, cx.entity_results) {
+    let base_uri = out.primary.as_ref().and_then(|p| p.base_uri.as_deref());
+    match ebv_over_serialized(tree, base_uri, xpath, ns, cx.entity_results) {
         Ok(true) => Verdict::pass(),
         Ok(false) => Verdict::fail(false_message()),
         Err(v) => v,
@@ -756,8 +757,12 @@ fn is_not_well_formed(v: &Verdict) -> bool {
 /// is yes." Without it, a result that is not a well-formed document is not what the case
 /// expects, and that is a failure of every `assert` over it — otherwise a stray top-level node
 /// next to the expected element (`<out>ok</out>junk` against `/out = 'ok'`) would pass.
+///
+/// `base_uri` is the result document's base URI (`ResultDocument::base_uri`), given to the
+/// re-parsed document node.
 fn ebv_over_serialized(
     serialized: &str,
+    base_uri: Option<&str>,
     xpath: &str,
     ns: &NsBindings,
     entity_results: bool,
@@ -766,7 +771,11 @@ fn ebv_over_serialized(
     let doc = Document::parse(&text)
         .map_err(|e| Verdict::harness(format!("primary result is not parseable XML: {e}")))?;
     if !wrapped {
-        return eval_xpath(xpath, ns, RoXmlNavigator::new(&doc), ebv).map_err(Verdict::harness);
+        let nav = match base_uri {
+            Some(uri) => RoXmlNavigator::with_base_uri(&doc, uri),
+            None => RoXmlNavigator::new(&doc),
+        };
+        return eval_xpath(xpath, ns, nav, ebv).map_err(Verdict::harness);
     }
     if !entity_results {
         let top = doc.root_element().children().count();
@@ -784,8 +793,11 @@ fn ebv_over_serialized(
     }
     let arena = Bump::new();
     let names = NameTable::new();
-    let tree =
+    let mut tree =
         entity_document(&arena, &names, &text, doc.root_element()).map_err(Verdict::harness)?;
+    if let Some(uri) = base_uri {
+        tree.set_document_base_uri(Some(arena.alloc_str(uri)));
+    }
     eval_xpath(xpath, ns, BufferDocNavigator::new(&tree, tree.root()), ebv)
         .map_err(Verdict::harness)
 }
@@ -2145,6 +2157,7 @@ pub mod self_test {
                 tree: Ok("<a>x</a>".into()),
                 serialization_error: Some(xslt2::XsltError::new("SESU0007", "no such encoding")),
                 method: None,
+                base_uri: None,
             }),
             ..Default::default()
         };
@@ -2292,6 +2305,38 @@ pub mod self_test {
             inner: Box::new(assert_("/r")),
         };
         check(evaluate(&rd, &o, &cx()), Outcome::Fail);
+        // M3b: `assert` over a result document sees the document's base URI — the URI it was
+        // written to (XSLT 2.0 §19.1) — through `base-uri()`, with an `xml:base` resolved
+        // against it (`result-document-0102`); a result without one has none.
+        let mut based = ResultDocument::same(r#"<two><l xml:base="in/third.xml"/></two>"#);
+        based.base_uri = Some("file:///t/out/second.xml".into());
+        let o = RunOutput {
+            secondary: vec![("file:///t/out/second.xml".into(), based)],
+            ..Default::default()
+        };
+        for xpath in [
+            r#"base-uri(/) = "file:///t/out/second.xml""#,
+            r#"base-uri(/*) = "file:///t/out/second.xml""#,
+            r#"base-uri(/*/l) = "file:///t/out/in/third.xml""#,
+        ] {
+            let rd = Assertion::AssertResultDocument {
+                uri: "out/second.xml".into(),
+                inner: Box::new(assert_(xpath)),
+            };
+            check(evaluate(&rd, &o, &cx()), Outcome::Pass);
+        }
+        let o = RunOutput {
+            secondary: vec![(
+                "file:///t/out/second.xml".into(),
+                ResultDocument::same("<two/>"),
+            )],
+            ..Default::default()
+        };
+        let rd = Assertion::AssertResultDocument {
+            uri: "out/second.xml".into(),
+            inner: Box::new(assert_("empty(base-uri(/))")),
+        };
+        check(evaluate(&rd, &o, &cx()), Outcome::Pass);
         // Where the catalog's attribute is read: `<output well-formed="no"/>`, or the one
         // documented correction.
         let case = |name: &str, well_formed: Option<bool>| crate::catalog::TestCase {
@@ -2484,6 +2529,7 @@ pub mod self_test {
                 tree: Ok(tree.into()),
                 serialization_error: None,
                 method: None,
+                base_uri: None,
             }),
             ..Default::default()
         }
@@ -2627,6 +2673,7 @@ pub mod self_test {
                 tree: Err("cannot write".into()),
                 serialization_error: None,
                 method: None,
+                base_uri: None,
             }),
             ..Default::default()
         };

@@ -23,6 +23,10 @@ impl<'a, 't> Transformation<'a, 't> {
         cx: &XsltContext<'t>,
         code: &'static str,
     ) -> Result<XPathValue<Nav<'t>>, XsltError> {
+        // §19.1: "xsl:variable, xsl:param, xsl:with-param … always evaluate
+        // the instructions in their contained sequence constructor in
+        // temporary output state."
+        let cx = &*cx.temporary_output();
         let raw = match value {
             VarValue::Select(id) => self.eval_expr(*id, frame, cx)?,
             VarValue::Sequence(body) => {

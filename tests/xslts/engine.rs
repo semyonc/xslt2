@@ -65,6 +65,11 @@ struct Job {
     /// `<output serialize="yes"/>`: the case asks for the result to be serialized, so a
     /// failure of the stylesheet's serialization is the run's error.
     serialize: bool,
+    /// The base output URI (XSLT 2.0 §2.3) the run's `xsl:result-document` hrefs resolve
+    /// against: the test-set directory. The catalog (`admin/catalog-schema.xsd`,
+    /// `assert-result-document/@uri`): "It is supplied as a relative URI, interpreted as being
+    /// relative to an implementation defined base output URI as chosen by the test driver".
+    base_output_uri: String,
 }
 
 impl Job {
@@ -172,6 +177,9 @@ impl Job {
                 .as_ref()
                 .and_then(|o| o.serialize)
                 .unwrap_or(false),
+            // `path_to_uri` of a directory has no trailing slash, and without one a relative
+            // href would resolve against the directory's parent.
+            base_output_uri: format!("{}/", xslt2::resolver::path_to_uri(&run.base_dir)),
         })
     }
 
@@ -212,6 +220,7 @@ impl Job {
             initial_template: self.initial_template.clone(),
             initial_mode: self.initial_mode.clone().unwrap_or(ModeKey::Default),
             strict_recoverable: self.strict_recoverable,
+            base_output_uri: Some(self.base_output_uri.clone()),
             ..Default::default()
         };
         let mut transformation = compiled
@@ -250,9 +259,22 @@ impl Job {
                 } else {
                     messages
                 };
-                match primary_result(&compiled, &outcome, self.serialize) {
-                    Ok(primary) => RunOutput {
+                let results =
+                    primary_result(&compiled, &outcome, self.serialize).and_then(|primary| {
+                        let secondary = outcome
+                            .secondary
+                            .iter()
+                            .map(|tree| {
+                                secondary_result(&compiled, tree, self.serialize)
+                                    .map(|doc| (tree.uri.clone(), doc))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Ok((primary, secondary))
+                    });
+                match results {
+                    Ok((primary, secondary)) => RunOutput {
                         primary: Some(primary),
+                        secondary,
                         messages,
                         ..Default::default()
                     },
@@ -309,6 +331,35 @@ fn primary_result(
         tree,
         serialization_error,
         method,
+        base_uri: None,
+    })
+}
+
+/// A secondary result (`xsl:result-document`, XSLT 2.0 §19.1) in the same two forms as the
+/// primary, under the same policy: serialized with its own effective output definition
+/// (`CompiledStylesheet::serialize_secondary`) — a failure of which ends the case only when the
+/// case asks for serialization — and written with the catalog's default parameters. Its base
+/// URI is the URI it was written to, which `assert` over it can observe through `base-uri()`.
+fn secondary_result(
+    compiled: &xslt2::CompiledStylesheet<'_>,
+    result: &xslt2::SecondaryResult<'_>,
+    serialize: bool,
+) -> Result<ResultDocument, XsltError> {
+    let (serialized, serialization_error) = match compiled.serialize_secondary(result) {
+        Ok(text) => (text, None),
+        Err(e) if serialize => return Err(e),
+        Err(e) => (String::new(), Some(e)),
+    };
+    let method = compiled
+        .secondary_serialization_params(result)
+        .ok()
+        .map(|p| method_name(p.method).to_string());
+    Ok(ResultDocument {
+        serialized,
+        tree: default_serialization(result.document),
+        serialization_error,
+        method,
+        base_uri: Some(result.uri.clone()),
     })
 }
 
@@ -712,6 +763,64 @@ pub fn self_test() -> usize {
         xhtml_result("1.0").as_deref() == Some("xml")
             && xhtml_result("2.0").as_deref() == Some("xhtml"),
         "an XHTML result of a 1.0 stylesheet is recorded as the xml method",
+    );
+
+    // M3b: the base output URI is the test-set directory, so a relative href lands inside it,
+    // where `assert-result-document`'s relative `uri` expects it.
+    check(
+        job.base_output_uri == format!("{}/", file_uri("/suite/tests/fn/accessor")),
+        "the base output URI is the test-set directory",
+    );
+    // M3b: each secondary result in the same two forms as the primary, under the same F8
+    // policy, with its absolute URI as its base URI.
+    let secondary = |output: &str, serialize: bool| {
+        let compiled = Compiler::new(&names, &functions)
+            .compile_str(
+                &format!(
+                    r#"<xsl:stylesheet version="2.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+                         <xsl:template match="/">
+                           <xsl:result-document href="r.xml" {output}><r>x</r></xsl:result-document>
+                         </xsl:template>
+                       </xsl:stylesheet>"#
+                ),
+                "urn:harness-probe",
+            )
+            .expect("the probe stylesheet compiles");
+        let arena = Bump::new();
+        let options = TransformOptions {
+            base_output_uri: Some("file:///out/".into()),
+            ..Default::default()
+        };
+        let run = compiled.transformation(&arena, options);
+        let outcome = run
+            .transform_source("urn:harness-probe-source", "<in/>")
+            .expect("the probe stylesheet runs");
+        let tree = &outcome.secondary[0];
+        secondary_result(&compiled, tree, serialize).map(|r| (tree.uri.clone(), r))
+    };
+    check(
+        matches!(
+            secondary(r#"method="text""#, true),
+            Ok((uri, r)) if uri == "file:///out/r.xml"
+                && r.serialized == "x"
+                && r.tree.as_deref() == Ok("<r>x</r>")
+                && r.method.as_deref() == Some("text")
+                && r.base_uri.as_deref() == Some("file:///out/r.xml")
+        ),
+        "a secondary result is kept in both forms under its absolute URI",
+    );
+    check(
+        matches!(secondary(r#"encoding="XXX-xx""#, true), Err(e) if e.code == "SESU0007"),
+        "serialize=\"yes\": a secondary result's serialization failure is the run's error",
+    );
+    check(
+        matches!(
+            secondary(r#"encoding="XXX-xx""#, false),
+            Ok((_, r)) if r.serialized.is_empty()
+                && r.tree.as_deref() == Ok("<r>x</r>")
+                && r.serialization_error.as_ref().map(|e| e.code.as_str()) == Some("SESU0007")
+        ),
+        "serialize absent: a secondary result's tree survives a serialization failure",
     );
 
     // P2-3: a harness refusal is a harnessError, never an engine error that `<error

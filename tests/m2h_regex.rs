@@ -1431,7 +1431,8 @@ fn the_stack_guard_is_checked_before_a_computed_regex_is_compiled() {
 
 /// The 26 XSLT 2.0 instructions (the syntax summaries' "Category:
 /// instruction", `xsl:variable` included) and whether this processor runs
-/// them: all but `xsl:number` (M3c) and `xsl:result-document` (M3b).
+/// them: all but `xsl:number` (M3c). (`xsl:result-document` was false until
+/// M3b implemented it — `tests/m3b_result_documents.rs`.)
 const INSTRUCTIONS: [(&str, bool); 26] = [
     ("analyze-string", true),
     ("apply-imports", true),
@@ -1454,7 +1455,7 @@ const INSTRUCTIONS: [(&str, bool); 26] = [
     ("number", false),
     ("perform-sort", true),
     ("processing-instruction", true),
-    ("result-document", false),
+    ("result-document", true),
     ("sequence", true),
     ("text", true),
     ("value-of", true),
@@ -1464,7 +1465,7 @@ const INSTRUCTIONS: [(&str, bool); 26] = [
 /// R5. §18.1.1: "The function returns true if and only if … the
 /// expanded-QName identifies an instruction that the implementation
 /// supports." `xsl:for-each-group` and `xsl:perform-sort` run (M2g, M2d) but
-/// were answered false; the two that still raise `XSLT2-NOTIMPL` are false.
+/// were answered false; the one that still raises `XSLT2-NOTIMPL` is false.
 /// Declarations and subordinate elements are not instructions.
 #[test]
 fn element_available_is_true_for_every_implemented_instruction() {
@@ -1504,15 +1505,9 @@ fn element_available_is_true_for_every_implemented_instruction() {
         assert_eq!(out(&main), "<out>false</out>", "xsl:{name}");
     }
 
-    // The two answered false are the two that do not run yet.
+    // The one answered false is the one that does not run yet.
     assert_eq!(
         dynamic_error(&root(r#"<xsl:number value="1"/>"#)),
-        "XSLT2-NOTIMPL"
-    );
-    assert_eq!(
-        dynamic_error(&root(
-            r#"<xsl:result-document href="r.xml"><r/></xsl:result-document>"#
-        )),
         "XSLT2-NOTIMPL"
     );
 }

@@ -282,6 +282,7 @@ fn instruction_reaches_group(kind: &InstructionKind) -> bool {
         | InstructionKind::CopyOf { .. }
         | InstructionKind::Variable { .. }
         | InstructionKind::Message { .. }
+        | InstructionKind::ResultDocument(_)
         | InstructionKind::Fallback
         | InstructionKind::NotImplemented { .. } => false,
     }

@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 
 use crate::error::{codes, XsltError};
-use crate::names::{lexical_qname, QName};
+use crate::names::{lexical_qname, parse_yes_no, resolve_qname, split_qname, QName};
 use crate::serialize::CharacterMap;
 use crate::whitespace;
 
@@ -225,6 +225,117 @@ impl OutputDefinition {
     }
 }
 
+/// How the value of a serialization attribute joins an output definition.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Merge {
+    /// An `xsl:output` declaration at this import precedence (§20): the
+    /// declaration of highest precedence wins, and two of the same precedence
+    /// that disagree are remembered for XTSE1560.
+    Declaration(u32),
+    /// An attribute of `xsl:result-document` (§19.1): "the effective value of
+    /// an attribute actually present on this instruction takes precedence over
+    /// the value defined in the selected output definition".
+    Override,
+}
+
+fn put<T: PartialEq>(setting: &mut Setting<T>, value: T, merge: Merge) {
+    match merge {
+        Merge::Declaration(precedence) => setting.set_checked(value, precedence),
+        Merge::Override => *setting = Setting::overridden(value),
+    }
+}
+
+/// Parses one serialization attribute, named as `xsl:output` names it, and
+/// records its value in `target` (§20, §19.1).
+///
+/// `resolve` maps a prefix to its namespace URI in the scope of the element
+/// the attribute is on (`method`, `cdata-section-elements`). Returns `false`
+/// for a name that is not one of these attributes — `name`,
+/// `use-character-maps` and the standard attributes are the caller's — and
+/// errors with the codes a *written* value takes: XTSE0020 for a value outside
+/// the attribute's domain (§2.2), XTSE1570 / XTSE0280 for a bad `method`,
+/// XTSE0280 for an unbound prefix. A caller evaluating an attribute value
+/// template maps them to their dynamic counterparts.
+///
+/// `cdata-section-elements` is united with what `target` already holds,
+/// whatever `merge` says: §20 unites the declarations of a definition, and
+/// §19.1 unites the instruction's names with the definition's ("the value of
+/// the serialization parameter is the union of the expanded names of the
+/// elements named in this instruction and the elements named in the selected
+/// output definition").
+pub(crate) fn apply_serialization_attribute(
+    target: &mut OutputDefinition,
+    name: &str,
+    value: &str,
+    resolve: &dyn Fn(&str) -> Option<String>,
+    merge: Merge,
+) -> Result<bool, XsltError> {
+    match name {
+        "method" => put(&mut target.method, parse_method(value, resolve)?, merge),
+        "version" => put(&mut target.version, nmtoken(value, "version")?, merge),
+        "encoding" => put(&mut target.encoding, encoding_name(value)?, merge),
+        "indent" => put(&mut target.indent, parse_yes_no(value, "indent")?, merge),
+        "omit-xml-declaration" => put(
+            &mut target.omit_xml_declaration,
+            parse_yes_no(value, "omit-xml-declaration")?,
+            merge,
+        ),
+        "standalone" => {
+            let value = match whitespace::trim(value) {
+                "omit" => None,
+                other => Some(parse_yes_no(other, "standalone")?),
+            };
+            put(&mut target.standalone, value, merge);
+        }
+        "doctype-public" => put(&mut target.doctype_public, doctype_public(value)?, merge),
+        "doctype-system" => put(&mut target.doctype_system, doctype_system(value)?, merge),
+        "media-type" => put(&mut target.media_type, value.to_string(), merge),
+        "byte-order-mark" => put(
+            &mut target.byte_order_mark,
+            parse_yes_no(value, "byte-order-mark")?,
+            merge,
+        ),
+        "escape-uri-attributes" => put(
+            &mut target.escape_uri_attributes,
+            parse_yes_no(value, "escape-uri-attributes")?,
+            merge,
+        ),
+        "include-content-type" => put(
+            &mut target.include_content_type,
+            parse_yes_no(value, "include-content-type")?,
+            merge,
+        ),
+        "undeclare-prefixes" => put(
+            &mut target.undeclare_prefixes,
+            parse_yes_no(value, "undeclare-prefixes")?,
+            merge,
+        ),
+        "normalization-form" => put(
+            &mut target.normalization_form,
+            nmtoken(value, "normalization-form")?,
+            merge,
+        ),
+        // §20: "In the case of an unprefixed name, the default namespace (that
+        // is, the namespace declared using xmlns="uri") is used. Note: This
+        // differs from the rule for most other QNames used in a stylesheet."
+        // §19.1 says the same of `xsl:result-document`.
+        "cdata-section-elements" => {
+            for token in whitespace::tokens(value) {
+                let (prefix, local) = split_qname(token);
+                let name = if prefix.is_empty() {
+                    let local = resolve_qname(local, |_| None, codes::XTSE0020)?.local;
+                    QName::new(resolve("").unwrap_or_default(), local)
+                } else {
+                    resolve_qname(token, resolve, codes::XTSE0020)?
+                };
+                target.add_cdata_section_element(name);
+            }
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 /// Parses the `method` attribute (§20 \[ERR XTSE1570\]).
 ///
 /// > The value must (if present) be a valid QName. If the QName does not have
@@ -266,9 +377,89 @@ pub fn parse_method(
     }
 }
 
+/// An `xs:NMTOKEN` attribute value (`version`, `normalization-form`), else
+/// XTSE0020 — the stylesheet form of Serialization's SEPM0016 ("a parameter
+/// value is invalid for the given parameter"; §3: "It is the responsibility of
+/// the host language to specify how invalid values should be handled").
+fn nmtoken(value: &str, what: &str) -> Result<String, XsltError> {
+    let value = whitespace::trim(value);
+    let ok = !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '\u{B7}'));
+    if ok {
+        Ok(value.to_string())
+    } else {
+        Err(XsltError::new(
+            codes::XTSE0020,
+            format!("{what} must be an NMTOKEN, not {value:?}"),
+        ))
+    }
+}
+
+/// Serialization §3 `encoding`: "A string of Unicode characters in the range
+/// #x21 to #x7E (that is, printable ASCII characters)". Whether the name is one
+/// this serializer supports is decided when it serializes (SESU0007).
+fn encoding_name(value: &str) -> Result<String, XsltError> {
+    let value = whitespace::trim(value);
+    if !value.is_empty() && value.chars().all(|c| ('\u{21}'..='\u{7E}').contains(&c)) {
+        Ok(value.to_string())
+    } else {
+        Err(XsltError::new(
+            codes::XTSE0020,
+            format!("the encoding {value:?} is not a string of printable ASCII characters"),
+        ))
+    }
+}
+
+/// §20: "The value of doctype-public must conform to the rules for a
+/// PubidLiteral (see \[XML 1.0\])" — `PubidChar ::= #x20 | #xD | #xA |
+/// [a-zA-Z0-9] | [-'()+,./:=?;!*#@$_%]`.
+fn doctype_public(value: &str) -> Result<String, XsltError> {
+    let ok = value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || " \r\n-'()+,./:=?;!*#@$_%".contains(c));
+    if ok {
+        Ok(value.to_string())
+    } else {
+        Err(XsltError::new(
+            codes::XTSE0020,
+            format!(
+                "doctype-public {value:?} contains a character a public identifier cannot hold"
+            ),
+        ))
+    }
+}
+
+/// Serialization §3 `doctype-system`: "A string of Unicode characters that does
+/// not include both an apostrophe (#x27) and a quotation mark (#x22)
+/// character."
+fn doctype_system(value: &str) -> Result<String, XsltError> {
+    if value.contains('\'') && value.contains('"') {
+        Err(XsltError::new(
+            codes::XTSE0020,
+            format!("doctype-system {value:?} contains both kinds of quotation mark"),
+        ))
+    } else {
+        Ok(value.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parameter_domains() {
+        assert!(nmtoken("1.0", "version").is_ok());
+        assert_eq!(nmtoken("a b", "version").unwrap_err().code, "XTSE0020");
+        assert!(encoding_name("XXX-xx").is_ok());
+        assert_eq!(encoding_name("utf 8").unwrap_err().code, "XTSE0020");
+        assert!(doctype_public("-//W3C//DTD XHTML 1.0 Transitional//EN").is_ok());
+        assert_eq!(doctype_public("\u{A3}[~~~]").unwrap_err().code, "XTSE0020");
+        assert!(doctype_system("ABC\"DEF").is_ok());
+        assert_eq!(doctype_system("'\"").unwrap_err().code, "XTSE0020");
+    }
 
     #[test]
     fn a_higher_precedence_declaration_wins_whatever_the_order() {

@@ -58,6 +58,12 @@ pub struct ResultDocument {
     /// output method used for serialization, which affects the way in which the actual results
     /// can be compared with the expected results".
     pub method: Option<String>,
+    /// The base URI of the tree's document node, which the re-parse of `tree` gives the document
+    /// it evaluates `assert` over: for a secondary result, the URI it was written to (XSLT 2.0
+    /// §19.1: "The base URI of the document node at the root of the final result tree is based
+    /// on the effective value of the href attribute"), so that `base-uri()` sees it
+    /// (`result-document-0102`). `None` — no base URI — for the primary result and messages.
+    pub base_uri: Option<String>,
 }
 
 impl ResultDocument {
@@ -72,6 +78,7 @@ impl ResultDocument {
             tree: Ok(text),
             serialization_error: None,
             method: None,
+            base_uri: None,
         }
     }
 }

@@ -3,15 +3,17 @@
 Schema-aware XSLT 2.0 processor in Rust, built on the
 [`xsd-schema`](../xsd-schema) validator and its XPath 2.0 engine.
 
-Status: **M2 — full language, in progress** (M1, M2a–M2j, M2l done). Stylesheets are loaded,
+Status: **M3 — numbering, formatting, serialization, compatibility, in progress** (M1 and M2 done; M3a
+serialization and M3b result documents done). Stylesheets are loaded,
 compiled and run: the module graph with import precedence, the lexical static contexts of §5.4.1,
 template rules with the §6.4 priorities and conflict resolution, the built-in rules,
 `xsl:apply-imports` and `xsl:next-match`, variables and parameters (tunnel included), attribute
 value templates, attribute sets, the node constructors, `xsl:copy`/`xsl:copy-of`, `xsl:message`,
 `xsl:sort` / `xsl:perform-sort` with collations, `xsl:function`, `xsl:key` with `key()` and the `id()` /
-`key()` patterns, `xsl:for-each-group`, `xsl:analyze-string` with `regex-group()`, and the XML and text output methods.
-`xsl:number`, `format-number` and the HTML/XHTML output methods belong to later milestones and report the internal `XSLT2-NOTIMPL`
-code rather than a wrong answer.
+`key()` patterns, `xsl:for-each-group`, `xsl:analyze-string` with `regex-group()`, the XML, XHTML, HTML and text
+output methods with character maps and `disable-output-escaping`, and `xsl:result-document` (secondary results are
+returned in memory, `Outcome::secondary`; nothing is written to disk). `xsl:number` and `format-number` belong to
+later milestones and report the internal `XSLT2-NOTIMPL` code rather than a wrong answer.
 
 ```rust
 use xsd_schema::namespace::NameTable;
@@ -82,13 +84,13 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 | | |
 |---|---|
 | XSLT 2.0-applicable | 6,619 |
-| excluded (documented in `tests/xslts/filter.rs`) | 62 |
-| runnable (dependencies satisfied) | 5,689 |
-| pass | 5,014 |
-| fail / wrongError / harnessError | 67 / 0 / 3 |
-| not implemented (`XSLT2-NOTIMPL`, M2k–M4) | 605 |
-| pass rate over runnable | 88.13% |
-| headline (basic profile, non-regex families) | 3,771 / 4,209 = **89.6%** |
+| excluded (documented in `tests/xslts/filter.rs`) | 63 |
+| runnable (dependencies satisfied) | 5,688 |
+| pass | 5,286 |
+| fail / wrongError / harnessError | 37 / 0 / 3 |
+| not implemented (`XSLT2-NOTIMPL`: M2k without its feature, M3c–M4) | 362 |
+| pass rate over runnable | 92.93% |
+| headline (basic profile, non-regex families) | 3,827 / 4,209 = **90.9%** |
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the
@@ -117,7 +119,10 @@ excluded because their reference results pin Unicode 3.1 / 5.2 / 6.0 and the reg
 On 2026-10-11 the harness began to evaluate assertions about the result tree as the catalog defines them —
 on a serialization with the default parameters (method xml, indent no), not on the stylesheet's indented
 output (`../../XSLT2_HARNESS_RESULT_TREE_REPORT.md`): 5,014 of 5,689 (`for-each-group-081a` passes;
-`for-each-group-085` is excluded — its expected result drops source whitespace that §6.6 and §4.4 keep).
+`for-each-group-085` is excluded — its expected result drops source whitespace that §6.6 and §4.4 keep). M3a
+(serialization: the `xml`, `xhtml`, `html` and `text` methods, character maps, `disable-output-escaping`,
+`../../XSLT2_M3A_REPORT.md`) took it to 5,181 of 5,688 the same day (`character-map-026`, an XSLT 3.0 case, is
+excluded), and M3b (`xsl:result-document`, `../../XSLT2_M3B_REPORT.md`) to 5,286 on 2026-10-12.
 
 The sixteen test-sets M1 targets:
 
@@ -134,14 +139,13 @@ The sixteen test-sets M1 targets:
 | element | 19 | 18 | 1 | 0 | 0 | 0 | 94.7% |
 | version | 33 | 33 | 0 | 0 | 0 | 0 | 100.0% |
 | param | 25 | 25 | 0 | 0 | 0 | 0 | 100.0% |
-| attribute | 21 | 19 | 0 | 0 | 0 | 2 | 90.5% |
-| copy | 70 | 67 | 2 | 0 | 0 | 1 | 95.7% |
+| attribute | 21 | 21 | 0 | 0 | 0 | 0 | 100.0% |
+| copy | 70 | 68 | 2 | 0 | 0 | 0 | 97.1% |
 | sequence | 87 | 86 | 0 | 0 | 0 | 1 | 98.9% |
 | message | 26 | 24 | 2 | 0 | 0 | 0 | 92.3% |
-| output | 137 | 10 | 21 | 0 | 0 | 106 | 7.3% |
+| output | 137 | 137 | 0 | 0 | 0 | 0 | 100.0% |
 
-`output` is dominated by the `html`, `xhtml`, `doctype-*` and character-map serialization
-parameters, which are M3.
+`output` passes in full since M3a (serialization) and M3b (`xsl:result-document`).
 
 ```bash
 cargo test --test xslts --release                       # whole applicable suite

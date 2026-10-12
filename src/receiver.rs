@@ -1882,6 +1882,9 @@ pub struct SequenceCollector<'s, 't> {
     base_uri: Option<String>,
     /// How many containers (elements and document nodes) are open.
     depth: usize,
+    /// How many zero-length text nodes the sequence had that are not in
+    /// [`items`](Self::items) — see [`zero_length_text_nodes`](Self::zero_length_text_nodes).
+    zero_length_texts: usize,
 }
 
 /// What a construction group in a sequence produces (§6.3).
@@ -1911,7 +1914,50 @@ impl<'s, 't> SequenceCollector<'s, 't> {
             group: GroupKind::Element,
             base_uri: None,
             depth: 0,
+            zero_length_texts: 0,
         }
+    }
+
+    /// How many items of the sequence were zero-length text nodes, which
+    /// [`items`](Self::items) does not hold.
+    ///
+    /// §11.4: "It is possible to construct text nodes whose string value is
+    /// zero-length. A zero-length text node, when atomized, produces a
+    /// zero-length string. However, zero-length text nodes are ignored when
+    /// they appear in a sequence that is used to form the content of a node" —
+    /// so in a *sequence* (§11.4.2 `<xsl:text/>`, §11.4.3 `xsl:value-of`) such
+    /// a node is an item like any other. It cannot be kept as one: the
+    /// upstream `BufferDocumentBuilder` builds no text node with an empty
+    /// value (`text` only buffers, and `flush_text` adds a node only when the
+    /// buffer is not empty), so there is no `BufferDocument` node to point at.
+    /// Instead the collector counts them, and a caller that passes the
+    /// sequence on to another receiver unchanged — a template with `as`, the
+    /// sequence constructor of `xsl:perform-sort` — passes them on as
+    /// zero-length [`text`](Receiver::text) events after the items
+    /// ([`replay_zero_length_text_nodes`](Self::replay_zero_length_text_nodes)).
+    /// There §5.7.1 and §5.7.2 drop them, as the spec says, and the initial
+    /// template's result notes that it is not empty (§2.4).
+    ///
+    /// What this does not cover — a sequence that becomes an XPath value (a
+    /// variable, parameter or function result with `as`, a sort or key
+    /// value) — still loses them: `count()` of such a value, its type check
+    /// (`as="text()"`) and its atomization (`as="xs:string"`) see one item
+    /// fewer per zero-length text node.
+    pub(crate) fn zero_length_text_nodes(&self) -> usize {
+        self.zero_length_texts
+    }
+
+    /// Passes the zero-length text nodes of the sequence on to `out`, as
+    /// zero-length [`text`](Receiver::text) events — see
+    /// [`zero_length_text_nodes`](Self::zero_length_text_nodes).
+    pub(crate) fn replay_zero_length_text_nodes(
+        count: usize,
+        out: &mut dyn Receiver<'t>,
+    ) -> Result<(), XsltError> {
+        for _ in 0..count {
+            out.text("", false)?;
+        }
+        Ok(())
     }
 
     /// The items collected so far.
@@ -2245,7 +2291,10 @@ impl<'t> Receiver<'t> for SequenceCollector<'_, 't> {
             return nested.text(s, disable_escaping);
         }
         if s.is_empty() {
-            // §5.7.1: a zero-length text node is dropped.
+            // An item of the sequence that no `BufferDocument` can hold: it is
+            // counted instead (`zero_length_text_nodes`). Inside a
+            // construction group, above, it is content, where §5.7.1 drops it.
+            self.zero_length_texts += 1;
             return Ok(());
         }
         let s = s.to_string();

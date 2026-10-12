@@ -23,6 +23,7 @@ mod functions;
 mod grouping;
 mod keys;
 mod patterns;
+mod results;
 mod serialize;
 mod sort;
 mod variables;
@@ -30,6 +31,7 @@ mod variables;
 pub use content::SimpleDefault;
 pub use context::{Frame, XsltContext};
 pub use functions::XsltEvaluator;
+pub use results::SecondaryResult;
 pub(crate) use serialize::tree_context;
 pub use serialize::{
     serialize_result, serialize_result_to_bytes, source_options, unknown_location,
@@ -127,6 +129,41 @@ pub struct TransformOptions {
     pub stack_limit: Option<usize>,
     /// Where `document('')` and relative URIs resolve against.
     pub base_uri: Option<String>,
+    /// The base output URI (§2.3): "a URI to be used as the base URI when
+    /// resolving a relative URI allocated to a final result tree" — the `href`
+    /// of every `xsl:result-document` resolves against it, and it is the URI
+    /// of the primary result (§2.4 treats the tree created implicitly as an
+    /// `xsl:result-document href=""`). The run takes it without a fragment
+    /// identifier and with its `.` / `..` segments removed
+    /// ([`Outcome::base_output_uri`]).
+    ///
+    /// "The way in which a base output URI is established is
+    /// implementation-defined": `None` (the default) takes the base URI of the
+    /// principal stylesheet module ([`CompiledStylesheet::base_uri`]). That
+    /// one is always known — a run with no source document, or over a tree
+    /// built in memory, has no document URI to fall back on — and it makes the
+    /// URIs of a run's results depend on the stylesheet and its `href`s, not on
+    /// which document was transformed. This processor writes nothing anywhere
+    /// ([`Outcome::secondary`]); a host that writes the results out under
+    /// their URIs sets this option, or it would write the primary result over
+    /// the stylesheet.
+    ///
+    /// **Absolute or not.** The result URIs are absolute only when the base
+    /// output URI is (or an `href` is absolute itself). Nothing rejects a
+    /// relative or empty one, and both occur by default: a stylesheet compiled
+    /// with `Compiler::compile_str(text, "")` has the empty base URI, so the
+    /// primary result's URI is `""`, an `href="a.xml"` is `a.xml` and an
+    /// `href="../b.xml"` stays `../b.xml`; a relative base (`out/`) gives
+    /// relative URIs (`out/a.xml`). They are still the trees' identities —
+    /// XTDE1490 and [`Outcome::result_document`] work the same — but a host
+    /// that writes files resolves them against something of its own first.
+    ///
+    /// **A directory needs a trailing `/`.** RFC 3986 §5.2.3 merges a relative
+    /// `href` with "all but the last segment of the base URI's path", so
+    /// against `file:///o/out` the `href` `a.xml` is `file:///o/a.xml`, and
+    /// the primary result is `file:///o/out` itself; against `file:///o/out/`
+    /// it is `file:///o/out/a.xml`.
+    pub base_output_uri: Option<String>,
 }
 
 impl Default for TransformOptions {
@@ -139,6 +176,7 @@ impl Default for TransformOptions {
             max_recursion_depth: DEFAULT_MAX_RECURSION_DEPTH,
             stack_limit: None,
             base_uri: None,
+            base_output_uri: None,
         }
     }
 }
@@ -258,9 +296,42 @@ pub struct Message {
     pub terminate: bool,
 }
 
-/// What a run produced.
+/// What a run produced: its final result trees (§19.1) and its messages.
+///
+/// The **primary result** is the final result tree whose URI is the base
+/// output URI ([`base_output_uri`](Self::base_output_uri)): the tree the
+/// initial template's result builds, or — when that result is empty and an
+/// `xsl:result-document` created a tree at the base output URI — that tree
+/// (§2.4). Every other tree an `xsl:result-document` created is in
+/// [`secondary`](Self::secondary).
 pub struct Outcome<'t> {
-    /// The primary result tree.
+    /// The primary result tree; `None` only when the initial template's result
+    /// was empty, `xsl:result-document` was evaluated, and none of those
+    /// instructions wrote to the base output URI: then "An implicit result tree
+    /// is also created when the result sequence is empty, provided that no
+    /// xsl:result-document instruction has been evaluated" does not apply.
+    ///
+    /// "Empty" is §2.4's "If the result sequence is non-empty" read
+    /// literally: the result *sequence* counts, not the tree it builds. Any
+    /// item makes it non-empty — a zero-length text node (`<xsl:text/>`,
+    /// `<xsl:value-of select="''"/>`), a zero-length string
+    /// (`<xsl:sequence select="''"/>`), an empty document node
+    /// (`<xsl:document/>`) — even though §5.7.1 then leaves nothing of it in
+    /// the tree (§11.4: "zero-length text nodes are ignored when they appear
+    /// in a sequence that is used to form the content of a node"). So such an
+    /// initial template next to an `xsl:result-document` without `href` is
+    /// XTDE1490, two trees at the base output URI; `<xsl:sequence
+    /// select="()"/>` is not. The same holds when the zero-length text node
+    /// comes out of a template with an `as` attribute — the initial template
+    /// or one it calls or applies — or out of `xsl:perform-sort`'s sequence
+    /// constructor. (A variable, parameter or function result with `as` still
+    /// loses such a node — no tree this crate builds can hold a text node with
+    /// an empty value — so `<xsl:sequence select="$v"/>` over one does not
+    /// count.)
+    ///
+    /// The tree created implicitly has the base output URI as its document
+    /// node's base URI (none when the base output URI is empty), as a tree an
+    /// `xsl:result-document href=""` creates does (§2.4, §19.1).
     pub primary: Option<&'t BufferDocument<'t>>,
     /// `xsl:message` output, in order.
     pub messages: Vec<Message>,
@@ -270,6 +341,61 @@ pub struct Outcome<'t> {
     /// which only the serializer reads. Empty when the stylesheet disabled no
     /// escaping.
     pub disabled_escaping: crate::serialize::EscapingMarks,
+    /// The run's base output URI ([`TransformOptions::base_output_uri`], less
+    /// any fragment identifier, with its dot segments removed), which is the
+    /// URI of the primary result. Absolute only if the option (or the
+    /// stylesheet's base URI it defaults to) is; it may be empty.
+    pub base_output_uri: String,
+    /// The other final result trees, in the order their `xsl:result-document`
+    /// instructions were evaluated, each under its URI — `href` resolved
+    /// against the base output URI, so absolute when that is (see
+    /// [`TransformOptions::base_output_uri`] for a relative or empty one).
+    /// §19.1: "If the implementation provides an API to access final result
+    /// trees, then it must allow a final result tree to be identified by means
+    /// of this base URI"; see [`result_document`](Self::result_document).
+    /// Nothing is written anywhere: serializing a tree, and storing it, is the
+    /// host's business (`CompiledStylesheet::serialize_secondary`).
+    ///
+    /// **Memory.** Every result tree — and every temporary tree the run builds
+    /// (variables, `xsl:document`, messages) — costs about 118 KB of the run's
+    /// arena however small it is (the document builder reserves a 4,096-node
+    /// page and a 4,096-entry namespace page per tree), and the arena keeps it
+    /// until it is dropped; every secondary result is also kept here until the
+    /// run ends. Tens of thousands of result documents therefore need
+    /// gigabytes (10,000 trivial ones ≈ 1.2 GB). A streaming handler that lets
+    /// the host serialize and drop each tree as it completes is planned (M5).
+    pub secondary: Vec<SecondaryResult<'t>>,
+    /// The effective output definition of a primary result an
+    /// `xsl:result-document` created; `None` for the tree created implicitly,
+    /// which the unnamed output definition serializes (§20).
+    pub(crate) primary_output: Option<crate::output::OutputDefinition>,
+}
+
+impl<'t> Outcome<'t> {
+    /// The **secondary** result tree whose URI is `uri`: a URI as in
+    /// [`SecondaryResult::uri`] (resolved, not relative to anything), compared
+    /// as XTDE1490 compares two result URIs — after escaping the characters a
+    /// URI may not contain (as `fn:iri-to-uri` does) and RFC 3986 §6.2.2
+    /// syntax-based normalization (case of the scheme and host, percent-encoding,
+    /// dot segments). So `file:///o/./a%2Exml` finds the tree at
+    /// `file:///o/a.xml`, and `file:///o/a%20b.xml` the one at
+    /// `file:///o/a b.xml`; `file:///o//a.xml` does not find `file:///o/a.xml`.
+    ///
+    /// The primary result is not among them, whichever instruction made it:
+    /// its URI is [`base_output_uri`](Self::base_output_uri), its tree
+    /// [`primary`](Self::primary), and `result_document(&outcome.base_output_uri)`
+    /// is `None`. (A tree of its own type rather than a [`SecondaryResult`]:
+    /// it keeps its marks in [`disabled_escaping`](Self::disabled_escaping) and
+    /// its output definition in `CompiledStylesheet::primary_output_definition`.)
+    pub fn result_document(&self, uri: &str) -> Option<&SecondaryResult<'t>> {
+        if let Some(tree) = self.secondary.iter().find(|tree| tree.uri == uri) {
+            return Some(tree);
+        }
+        let key = crate::resolver::syntax_normalized(uri);
+        self.secondary
+            .iter()
+            .find(|tree| crate::resolver::syntax_normalized(&tree.uri) == key)
+    }
 }
 /// How a template was entered, which decides the code a missing required
 /// parameter reports (§10.1.1).
@@ -335,6 +461,12 @@ pub struct Transformation<'a, 't> {
     clock: std::cell::OnceCell<Option<(DateTimeValue, TimezoneOffset)>>,
     #[allow(clippy::type_complexity)]
     message_sink: Option<Box<dyn Fn(&Message)>>,
+    /// The final result trees `xsl:result-document` created during the
+    /// current run, and the URIs taken (§19.1).
+    results: RefCell<results::FinalResults<'t>>,
+    /// Whether anything has been written to the primary result: the initial
+    /// template's result sequence is non-empty (§2.4).
+    primary_written: std::cell::Cell<bool>,
 }
 
 impl<'a> CompiledStylesheet<'a> {
@@ -370,6 +502,8 @@ impl<'a> CompiledStylesheet<'a> {
             stack: std::cell::Cell::new(StackGuard::default()),
             clock: std::cell::OnceCell::new(),
             message_sink: None,
+            results: RefCell::new(results::FinalResults::default()),
+            primary_written: std::cell::Cell::new(false),
         }
     }
 }
@@ -504,13 +638,36 @@ impl<'a, 't> Transformation<'a, 't> {
             n
         });
 
+        // §2.3: "The way in which a base output URI is established is
+        // implementation-defined" — see `TransformOptions::base_output_uri`.
+        //
+        // Taken as `href=""` resolves against it — without a fragment
+        // identifier — so that it is exactly the URI of the primary result,
+        // which §2.4 treats as an `xsl:result-document href=""`; no other
+        // reference resolves differently against the two (RFC 3986 §5.2.2
+        // never reads the base's fragment). And with its dot segments removed
+        // (§5.2.4), as every non-empty `href` resolved against it has them
+        // removed — §5.2.2 copies the base's path unchanged for an empty
+        // reference — so that the primary result, XTDE1490 and
+        // `Outcome::base_output_uri` see one spelling of it.
+        let base_output_uri = crate::resolver::normalize_uri(&crate::resolver::resolve_uri(
+            self.options
+                .base_output_uri
+                .as_deref()
+                .unwrap_or_else(|| self.sheet.base_uri()),
+            "",
+        ));
+        *self.results.borrow_mut() = results::FinalResults::new(base_output_uri.clone());
+        self.primary_written.set(false);
+
         let builder = ResultBuilder::new(
             self.store.borrow().arena(),
             self.store.borrow().names(),
             None,
         )?;
         // The primary result is written in final output state (§19.1), so
-        // `disable-output-escaping` is honoured here and nowhere else (§20.2).
+        // `disable-output-escaping` is honoured here (§20.2) — and in the
+        // trees `xsl:result-document` creates, each in its own builder.
         let mut out = ComplexContentNormalizer::new(builder).honouring_disabled_escaping();
         out.start_document()?;
 
@@ -522,8 +679,17 @@ impl<'a, 't> Transformation<'a, 't> {
             cx.current = cx.item.clone();
         }
         cx.mode = self.options.initial_mode.clone();
+        // §19.1: "The instructions in the initial template are evaluated in
+        // final output state."
+        cx.final_output = true;
 
-        let result = self.run_entry(&mut cx, &mut out);
+        let result = self.run_entry(
+            &mut cx,
+            &mut results::InitialResult {
+                out: &mut out,
+                written: &self.primary_written,
+            },
+        );
         match result {
             Ok(()) => {}
             Err(e) if e.is_termination() => {
@@ -537,13 +703,29 @@ impl<'a, 't> Transformation<'a, 't> {
         }
 
         out.end_document()?;
-        let (doc, disabled_escaping) = out.into_inner().finish_with_marks()?;
+        let (mut doc, disabled_escaping) = out.into_inner().finish_with_marks()?;
+        // §2.4 makes the tree created implicitly an `xsl:result-document
+        // href=""`, and §19.1: "The base URI of the document node at the root
+        // of the final result tree is based on the effective value of the href
+        // attribute. If the effective value is a relative URI, then it is
+        // resolved relative to the base output URI."
+        if !base_output_uri.is_empty() {
+            doc.set_document_base_uri(Some(self.store.borrow().intern_uri(&base_output_uri)));
+        }
         let id = self.store.borrow_mut().insert(doc, None);
-        let primary = self.store.borrow().get(id).map(|d| d.doc);
+        let implicit = self.store.borrow().get(id).expect("just inserted").doc;
+        let delivered = self.deliver((implicit, disabled_escaping))?;
+        let (primary, disabled_escaping) = match delivered.primary {
+            Some((doc, marks)) => (Some(doc), marks),
+            None => (None, crate::serialize::EscapingMarks::default()),
+        };
         Ok(Outcome {
             primary,
             messages: self.take_messages(),
             disabled_escaping,
+            base_output_uri,
+            secondary: delivered.secondary,
+            primary_output: delivered.primary_output,
         })
     }
 

@@ -147,18 +147,23 @@ impl<'a, 't> Transformation<'a, 't> {
             // result of sorting its initial sequence using its contained sort
             // key specification."
             InstructionKind::PerformSort { select, sort, body } => {
-                let items = match select {
-                    Some(id) => self.eval_expr(*id, frame, cx)?.into_vec(),
+                let (items, zero_length_texts) = match select {
+                    Some(id) => (self.eval_expr(*id, frame, cx)?.into_vec(), 0),
                     None => {
                         let mut collector = SequenceCollector::new(&self.store);
                         self.eval_body(body, frame, cx, &mut collector)?;
-                        collector.into_items()
+                        let zero_length_texts = collector.zero_length_text_nodes();
+                        (collector.into_items(), zero_length_texts)
                     }
                 };
                 for item in self.sort_sequence(items, sort, frame, cx)? {
                     out.append_item(&item)?;
                 }
-                Ok(())
+                // The zero-length text nodes the collector could not keep (see
+                // `SequenceCollector::zero_length_text_nodes`), after the
+                // sorted items: wherever they land they are either dropped
+                // (§5.7.1, §5.7.2) or only counted (§2.4).
+                SequenceCollector::replay_zero_length_text_nodes(zero_length_texts, out)
             }
 
             InstructionKind::Variable {
@@ -403,10 +408,16 @@ impl<'a, 't> Transformation<'a, 't> {
                 // "The temporary tree rooted at this document node forms the
                 // result tree", so the content is written in temporary output
                 // state (§19.1) and `disable-output-escaping` is ignored in it
-                // (§20.2), wherever the children end up.
+                // (§20.2), wherever the children end up — and an
+                // xsl:result-document in it is XTDE1480.
                 out.start_document()?;
                 out.document_base_uri(&self.sheet.static_contexts.get(instruction.ctx).base_uri)?;
-                self.eval_body(body, frame, cx, &mut TemporaryOutputState::new(out))?;
+                self.eval_body(
+                    body,
+                    frame,
+                    &cx.temporary_output(),
+                    &mut TemporaryOutputState::new(out),
+                )?;
                 out.end_document()
             }
 
@@ -470,6 +481,8 @@ impl<'a, 't> Transformation<'a, 't> {
                 }
                 Ok(())
             }
+
+            InstructionKind::ResultDocument(rd) => self.result_document(instruction, rd, frame, cx),
 
             // §18.2.3: an xsl:fallback that is reached normally does nothing.
             InstructionKind::Fallback => Ok(()),

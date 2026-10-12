@@ -357,6 +357,10 @@ impl<'a, 't> Transformation<'a, 't> {
         let position = inner.position;
         inner.current_rule = None;
         inner.mode = ModeKey::Default;
+        // §19.1: "… xsl:sort, and xsl:message always evaluate the
+        // instructions in their contained sequence constructor in temporary
+        // output state."
+        inner.final_output = false;
         let value = match &key.value {
             ValueSource::Select(id) => self.eval_expr(*id, frame, &inner)?,
             ValueSource::Content(body) => {

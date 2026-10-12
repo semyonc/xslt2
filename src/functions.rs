@@ -1276,10 +1276,11 @@ pub fn element_available(uri: &str, local: &str) -> bool {
 
 /// The XSLT 2.0 instructions this processor recognises but does not run yet:
 /// each compiles to an `XSLT2-NOTIMPL` instruction (`compile/instructions.rs`)
-/// — `xsl:number` (M3c) and `xsl:result-document` (M3b). Remove a name here
-/// when its milestone implements it: `tests/m2h_regex.rs` pins the answer for
-/// all 26 instructions and checks that these two still raise `XSLT2-NOTIMPL`.
-const NOT_YET_IMPLEMENTED_INSTRUCTIONS: &[&str] = &["number", "result-document"];
+/// — `xsl:number` (M3c). Remove a name here when its milestone implements it:
+/// `tests/m2h_regex.rs` pins the answer for all 26 instructions and checks
+/// that this one still raises `XSLT2-NOTIMPL` (`xsl:result-document` left the
+/// list with M3b).
+const NOT_YET_IMPLEMENTED_INSTRUCTIONS: &[&str] = &["number"];
 
 /// §18.1.1: whether one of the processor's own functions of this name is
 /// available — at `arity`, or at any arity when `arity` is `None`.

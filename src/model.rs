@@ -580,6 +580,8 @@ pub enum InstructionKind {
         matching: Option<Body>,
         non_matching: Option<Body>,
     },
+    /// `xsl:result-document` (§19.1).
+    ResultDocument(Box<ResultDocument>),
     /// `xsl:fallback` outside an unknown extension instruction: ignored
     /// (§18.2.3 "the xsl:fallback instruction … is ignored").
     Fallback,
@@ -590,6 +592,49 @@ pub enum InstructionKind {
         feature: String,
         milestone: &'static str,
     },
+}
+
+/// The `format` attribute of `xsl:result-document` (§19.1): which output
+/// definition controls the serialization of the tree.
+pub enum ResultFormat {
+    /// Written without an expression: expanded and checked against the named
+    /// output definitions when the stylesheet is compiled, so an unknown name
+    /// is XTDE1460 signalled statically ("If the processor is able to detect
+    /// the error statically (for example, when the format attribute contains
+    /// no curly brackets), then the processor may optionally signal this as a
+    /// static error").
+    Named(QName),
+    /// An attribute value template, expanded and checked when the instruction
+    /// is evaluated.
+    Computed(Avt),
+}
+
+/// `xsl:result-document` (§19.1).
+///
+/// > The `xsl:result-document` instruction is used to create a final result
+/// > tree. … A document node is created, and the sequence obtained by
+/// > evaluating the sequence constructor is used to construct the content of
+/// > the document, as described in 5.7.1 Constructing Complex Content.
+///
+/// `validation` and `type` are the static checker's (`compile/checks.rs`): a
+/// basic processor accepts only `validation="strip"`, which is what an
+/// untyped tree is already (XTSE1660 otherwise).
+pub struct ResultDocument {
+    /// `None` selects the unnamed output definition: "If the format attribute
+    /// is omitted, the unnamed output definition is used".
+    pub format: Option<ResultFormat>,
+    /// `None` is the default, "the zero-length string".
+    pub href: Option<Avt>,
+    /// The serialization attributes written on the instruction, each under the
+    /// name `xsl:output` gives it (`output-version` is `version`), in a fixed
+    /// order. A value with no expression was checked when the stylesheet was
+    /// compiled (XTSE0020).
+    pub serialization: Vec<(&'static str, Avt)>,
+    /// `use-character-maps` (not an attribute value template): "the character
+    /// maps referenced in this instruction supplement and take precedence over
+    /// those defined in the selected output definition".
+    pub use_character_maps: Vec<QName>,
+    pub body: Body,
 }
 
 /// One template rule or named template (§6, §10.1).
@@ -1090,22 +1135,39 @@ impl<'a> CompiledStylesheet<'a> {
 }
 
 impl CompiledStylesheet<'_> {
-    /// Serializes a run's primary result with the unnamed output definition
-    /// (§20: "It is also used when serializing the final result tree that is
-    /// created implicitly"), as characters: the encoding decides what is
-    /// escaped and what the XML declaration says, and a byte order mark is a
-    /// leading U+FEFF (see [`crate::serialize`]).
+    /// The output definition a run's primary result is serialized with, and
+    /// whether the tree is the one created implicitly.
+    fn primary_output<'o>(
+        &'o self,
+        outcome: &'o crate::runtime::Outcome<'_>,
+    ) -> (&'o OutputDefinition, bool) {
+        match &outcome.primary_output {
+            Some(definition) => (definition, false),
+            None => (&self.output, true),
+        }
+    }
+
+    /// Serializes a run's primary result (§20), as characters: the encoding
+    /// decides what is escaped and what the XML declaration says, and a byte
+    /// order mark is a leading U+FEFF (see [`crate::serialize`]).
+    ///
+    /// The tree created implicitly is serialized with the unnamed output
+    /// definition (§20: "It is also used when serializing the final result
+    /// tree that is created implicitly"); a primary result an
+    /// `xsl:result-document` created at the base output URI, with that
+    /// instruction's effective output definition (§19.1).
     pub fn serialize_primary(
         &self,
         outcome: &crate::runtime::Outcome<'_>,
     ) -> Result<String, crate::XsltError> {
+        let (definition, implicit) = self.primary_output(outcome);
         match outcome.primary {
             Some(doc) => crate::runtime::serialize_result(
                 self,
-                &self.output,
+                definition,
                 doc,
                 Some(&outcome.disabled_escaping),
-                true,
+                implicit,
             ),
             None => Ok(String::new()),
         }
@@ -1117,36 +1179,99 @@ impl CompiledStylesheet<'_> {
         &self,
         outcome: &crate::runtime::Outcome<'_>,
     ) -> Result<Vec<u8>, crate::XsltError> {
+        let (definition, implicit) = self.primary_output(outcome);
         match outcome.primary {
             Some(doc) => crate::runtime::serialize_result_to_bytes(
                 self,
-                &self.output,
+                definition,
                 doc,
                 Some(&outcome.disabled_escaping),
-                true,
+                implicit,
             ),
             None => Ok(Vec::new()),
         }
     }
 
+    /// The output definition [`Self::serialize_primary`] writes a run's
+    /// primary result with — the counterpart of
+    /// [`SecondaryResult::output`](crate::runtime::SecondaryResult::output):
+    /// for a primary result an `xsl:result-document` created at the base
+    /// output URI, that instruction's effective output definition (§19.1); for
+    /// the tree created implicitly, the unnamed output definition (§20).
+    /// `None` when there is no primary result.
+    pub fn primary_output_definition<'o>(
+        &'o self,
+        outcome: &'o crate::runtime::Outcome<'_>,
+    ) -> Option<&'o OutputDefinition> {
+        outcome.primary.map(|_| self.primary_output(outcome).0)
+    }
+
     /// The serialization parameters [`Self::serialize_primary`] writes a run's
-    /// primary result with: the unnamed output definition resolved against
-    /// the tree, §20's default method included (an XHTML result of a 1.0
-    /// stylesheet is `xml`). `None` when there is no primary result; an error
-    /// is the one `serialize_primary` would report for the parameters.
+    /// primary result with: its output definition resolved against the tree,
+    /// §20's default method included (an XHTML result that a 1.0 stylesheet
+    /// creates implicitly is `xml`). `None` when there is no primary result;
+    /// an error is the one `serialize_primary` would report for the
+    /// parameters.
     pub fn primary_serialization_params(
         &self,
         outcome: &crate::runtime::Outcome<'_>,
     ) -> Result<Option<crate::serialize::SerializationParams>, crate::XsltError> {
+        let (definition, implicit) = self.primary_output(outcome);
         match outcome.primary {
             Some(doc) => crate::serialize::SerializationParams::resolve(
-                &self.output,
+                definition,
                 &doc.create_navigator(),
-                crate::runtime::tree_context(self, true),
+                crate::runtime::tree_context(self, implicit),
             )
             .map(Some),
             None => Ok(None),
         }
+    }
+
+    /// Serializes a secondary result (§19.1) with its effective output
+    /// definition ([`SecondaryResult::output`](crate::runtime::SecondaryResult::output))
+    /// and its `disable-output-escaping` marks, as characters, like
+    /// [`Self::serialize_primary`].
+    pub fn serialize_secondary(
+        &self,
+        result: &crate::runtime::SecondaryResult<'_>,
+    ) -> Result<String, crate::XsltError> {
+        crate::runtime::serialize_result(
+            self,
+            &result.output,
+            result.document,
+            Some(&result.disabled_escaping),
+            false,
+        )
+    }
+
+    /// [`Self::serialize_secondary`] followed by the encoding phase: the
+    /// octets in the effective output definition's encoding.
+    pub fn serialize_secondary_to_bytes(
+        &self,
+        result: &crate::runtime::SecondaryResult<'_>,
+    ) -> Result<Vec<u8>, crate::XsltError> {
+        crate::runtime::serialize_result_to_bytes(
+            self,
+            &result.output,
+            result.document,
+            Some(&result.disabled_escaping),
+            false,
+        )
+    }
+
+    /// The serialization parameters [`Self::serialize_secondary`] writes a
+    /// secondary result with: its effective output definition resolved against
+    /// the tree (§20's default method for an explicit `xsl:result-document`).
+    pub fn secondary_serialization_params(
+        &self,
+        result: &crate::runtime::SecondaryResult<'_>,
+    ) -> Result<crate::serialize::SerializationParams, crate::XsltError> {
+        crate::serialize::SerializationParams::resolve(
+            &result.output,
+            &result.document.create_navigator(),
+            crate::runtime::tree_context(self, false),
+        )
     }
 
     /// A character map by name, expanded (§20.1) — what an

@@ -436,13 +436,10 @@ fn every_notimpl_names_its_sub_milestone() {
         // compile/instructions.rs: the instruction table. (`xsl:sort` and
         // `xsl:perform-sort` were M2d's rows until M2d implemented them;
         // `xsl:for-each-group` was M2g's until M2g — `tests/m2g_grouping.rs`;
-        // `xsl:analyze-string` was M2h's until M2h — `tests/m2h_regex.rs`.)
+        // `xsl:analyze-string` was M2h's until M2h — `tests/m2h_regex.rs`;
+        // `xsl:result-document` was M3b's until M3b —
+        // `tests/m3b_result_documents.rs`.)
         (template(r#"<xsl:number/>"#), "xsl:number", "M3c"),
-        (
-            template(r#"<xsl:result-document href="x.xml"/>"#),
-            "xsl:result-document",
-            "M3b",
-        ),
         // compile/declarations.rs: the declaration table.
         // (xsl:key was NOT-IMPL until M2f — `tests/m2f_keys.rs`.)
         // (xsl:function was NOT-IMPL until M2e — `tests/m2e_functions.rs`.)

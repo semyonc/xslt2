@@ -1432,6 +1432,7 @@ pub(super) fn visit(body: &Body, f: &mut impl FnMut(&Instruction)) {
             | InstructionKind::Document { body }
             | InstructionKind::Copy { body, .. }
             | InstructionKind::Message { body, .. } => visit(body, f),
+            InstructionKind::ResultDocument(rd) => visit(&rd.body, f),
             InstructionKind::Choose { whens, otherwise } => {
                 for (_, body) in whens {
                     visit(body, f);

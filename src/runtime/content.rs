@@ -63,6 +63,10 @@ impl<'a, 't> Transformation<'a, 't> {
         default: SimpleDefault,
     ) -> Result<String, XsltError> {
         let separator = separator.unwrap_or_else(|| default.text().to_string());
+        // §19.1: "xsl:attribute, xsl:comment, xsl:processing-instruction,
+        // xsl:namespace, xsl:value-of … always evaluate the instructions in
+        // their contained sequence constructor in temporary output state."
+        let cx = &*cx.temporary_output();
         match value {
             ValueSource::Select(id) => {
                 let value = self.eval_expr(*id, frame, cx)?;
@@ -100,6 +104,9 @@ impl<'a, 't> Transformation<'a, 't> {
             let store = self.store.borrow();
             (store.arena(), store.names())
         };
+        // §19.1: "… and xsl:message always evaluate the instructions in their
+        // contained sequence constructor in temporary output state."
+        let cx = &*cx.temporary_output();
         let builder = ResultBuilder::new(arena, names, None)?;
         let mut out = ComplexContentNormalizer::new(builder);
         out.start_document()?;

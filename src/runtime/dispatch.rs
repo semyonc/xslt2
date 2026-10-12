@@ -402,12 +402,16 @@ impl<'a, 't> Transformation<'a, 't> {
         if rule.as_type.is_some() {
             let mut collector = SequenceCollector::new(&self.store);
             self.eval_body(&rule.body, &mut frame, &inner, &mut collector)?;
+            let zero_length_texts = collector.zero_length_text_nodes();
             let value = XPathValue::from_sequence(collector.into_items());
             let value = self.convert(value, rule.as_type.as_ref(), codes::XTTE0505)?;
             for item in value.into_vec() {
                 out.append_item(&item)?;
             }
-            return Ok(());
+            // The zero-length text nodes of the result, which the collector
+            // could not keep as items: in content they vanish (§5.7.1), but
+            // they still make the initial template's result non-empty (§2.4).
+            return SequenceCollector::replay_zero_length_text_nodes(zero_length_texts, out);
         }
         self.eval_body(&rule.body, &mut frame, &inner, out)
     }

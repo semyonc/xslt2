@@ -210,7 +210,9 @@ pub fn has_scheme(uri: &str) -> bool {
 /// that has nothing to remove is kept rather than dropped. Whenever the result
 /// has a scheme, §5.2.4 applies as written — rule A: "If the input buffer
 /// begins with a prefix of "../" or "./", then remove that prefix from the
-/// input buffer" — so `urn:a` + `../b` is `urn:b`, not `urn:../b`.
+/// input buffer" — so `urn:a` + `../b` is `urn:b`, not `urn:../b`; and rule C
+/// leaves the `/` of a removed first segment in a rootless path, so
+/// `example:x/y` + `../c` is `example:/c`.
 pub fn resolve_uri(base: &str, reference: &str) -> String {
     let r = UriParts::parse(reference);
     let b = UriParts::parse(base);
@@ -260,16 +262,135 @@ pub fn resolve_uri(base: &str, reference: &str) -> String {
 }
 
 /// Removes `.` and `..` segments from the path of `uri` (RFC 3986 §5.2.4),
-/// keeping its scheme, authority, query and fragment intact. A leading `..`
-/// of a relative path, which has nothing to remove, is kept.
+/// keeping its scheme, authority, query and fragment intact — the same
+/// removal [`resolve_uri`] applies to a resolved path, so that a URI and the
+/// resolution of `"./x"` against it agree on the spelling of their common
+/// part. A leading `..` of a relative path, which has nothing to remove, is
+/// kept when `uri` has no scheme; with a scheme, §5.2.4 applies as written and
+/// drops it.
 pub fn normalize_uri(uri: &str) -> String {
     let parts = UriParts::parse(uri);
-    let path = remove_dot_segments(parts.path, Dots::KeepLeading);
+    let path = remove_dot_segments(parts.path, Dots::of(&parts));
     UriParts {
         path: &path,
         ..parts
     }
     .recompose()
+}
+
+/// The form in which the URIs of two final result trees are compared (§19.1:
+/// "[ERR XTDE1490] It is a non-recoverable dynamic error for a transformation
+/// to generate two or more final result trees with the same URI").
+///
+/// Two steps, each of which changes the spelling of a URI but not the URI:
+///
+/// 1. The characters a URI may not contain — a space, `<`, `>`, `"`, `{`,
+///    `}`, `|`, `\`, `^`, `` ` ``, controls and every non-ASCII character —
+///    are percent-encoded (as UTF-8) the way `fn:iri-to-uri` does it. §5.8:
+///    "If the URI reference is relative, then it is resolved … according to
+///    the rules of \[RFC3986\], after first escaping all characters that need
+///    to be escaped to make it a valid RFC3986 URI reference", which is also
+///    how XLink §5.4 (cited there) maps an `href` to a URI; so `a b.xml` and
+///    `a%20b.xml` are one URI.
+/// 2. RFC 3986 §6.2.2, "Syntax-Based Normalization": the scheme and the host
+///    in lower case (§6.2.2.1), percent-encodings with upper-case hex digits
+///    (§6.2.2.1), percent-encoded unreserved characters (`ALPHA`, `DIGIT`,
+///    `-`, `.`, `_`, `~`) decoded (§6.2.2.2), and `.` / `..` segments removed
+///    (§6.2.2.3) — in that order, so `%2E%2E` is a `..` segment.
+///
+/// Nothing else: an empty segment stays (`sub//a.xml` is not `sub/a.xml`,
+/// RFC 3986 keeps the two apart), the case of the path stays, and §6.2.3's
+/// scheme-based rules (`file://localhost/` for `file:///`, a default port)
+/// are not applied.
+pub(crate) fn syntax_normalized(uri: &str) -> String {
+    let escaped = xsd_schema::xpath::string_ops::iri_to_uri(uri);
+    let parts = UriParts::parse(&escaped);
+    let scheme = parts.scheme.map(str::to_ascii_lowercase);
+    let authority = parts.authority.map(normalized_authority);
+    let path = remove_dot_segments(&normalized_percent_encoding(parts.path), Dots::of(&parts));
+    let query = parts.query.map(normalized_percent_encoding);
+    let fragment = parts.fragment.map(normalized_percent_encoding);
+    UriParts {
+        scheme: scheme.as_deref(),
+        authority: authority.as_deref(),
+        path: &path,
+        query: query.as_deref(),
+        fragment: fragment.as_deref(),
+    }
+    .recompose()
+}
+
+/// RFC 3986 §6.2.2.1 and §6.2.2.2 for one component: every percent-encoded
+/// unreserved character decoded, every other percent-encoding in upper case.
+/// `text` is ASCII ([`syntax_normalized`] escapes everything else first); a
+/// `%` that does not start a percent-encoding is kept as it is.
+fn normalized_percent_encoding(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(byte) = percent_encoded(bytes, i) {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                out.push(byte as char);
+            } else {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+            i += 3;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The octet `%XX` at `bytes[i..]` encodes, if a percent-encoding starts there.
+fn percent_encoded(bytes: &[u8], i: usize) -> Option<u8> {
+    if bytes.get(i) != Some(&b'%') {
+        return None;
+    }
+    let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u8::from_str_radix(hex, 16).ok()
+}
+
+/// RFC 3986 §6.2.2 for an authority (`[ userinfo "@" ] host [ ":" port ]`,
+/// §3.2): percent-encodings normalized throughout, the host in lower case.
+/// The user information is case-sensitive and keeps its case.
+fn normalized_authority(authority: &str) -> String {
+    let (userinfo, host_port) = match authority.rfind('@') {
+        Some(at) => (Some(&authority[..at]), &authority[at + 1..]),
+        None => (None, authority),
+    };
+    // An IP literal (`[…]`, §3.2.2) contains colons of its own.
+    let port_at = match host_port.rfind(']') {
+        Some(close) => host_port[close..].find(':').map(|i| close + i),
+        None => host_port.rfind(':'),
+    };
+    let (host, port) = host_port.split_at(port_at.unwrap_or(host_port.len()));
+    let mut out = String::with_capacity(authority.len());
+    if let Some(userinfo) = userinfo {
+        out.push_str(&normalized_percent_encoding(userinfo));
+        out.push('@');
+    }
+    // Lower case outside the percent-encodings, whose hex digits stay upper
+    // case.
+    let host = normalized_percent_encoding(host);
+    let bytes = host.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if percent_encoded(bytes, i).is_some() {
+            out.push_str(&host[i..i + 3]);
+            i += 3;
+        } else {
+            out.push(bytes[i].to_ascii_lowercase() as char);
+            i += 1;
+        }
+    }
+    out.push_str(port);
+    out
 }
 
 /// The five components of a URI reference (RFC 3986 §3, parsed as Appendix B
@@ -399,24 +520,133 @@ fn merge_paths(base: &UriParts<'_>, reference: &str) -> String {
     }
 }
 
-/// What [`remove_dot_segments`] does with a `..` that has no segment before
-/// it to remove, in a path that does not start with `/`.
+/// How [`remove_dot_segments`] treats a path that does not start with `/`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Dots {
-    /// RFC 3986 §5.2.4 as written (rule A drops a leading `../`): for a path
-    /// that belongs to a URI with a scheme.
+    /// RFC 3986 §5.2.4 as written, for a path that belongs to a URI with a
+    /// scheme: rule A drops a leading `../`, and a `..` that removes the first
+    /// segment of a rootless path leaves its `/` behind (`a/../c` is `/c`).
     Rfc3986,
-    /// Keep it: a relative reference resolved against nothing absolute, which
-    /// is outside RFC 3986, must not lose its way up (`../a` stays `../a`).
+    /// A relative reference resolved against nothing absolute, which is
+    /// outside RFC 3986: it stays relative and keeps its way up (`../a` stays
+    /// `../a`, `a/../c` is `c`).
     KeepLeading,
 }
 
-/// RFC 3986 §5.2.4, "Remove Dot Segments", as a segment stack: a `.` is
-/// dropped, a `..` removes the segment before it, and either one in the
-/// **last** position leaves the path ending in `/`. Empty segments (`a//b`)
-/// are kept. A `..` with nothing to remove is dropped in an absolute path and
-/// under [`Dots::Rfc3986`], and kept under [`Dots::KeepLeading`].
+impl Dots {
+    /// The policy for the path of `uri`: RFC 3986's when it has a scheme.
+    fn of(uri: &UriParts<'_>) -> Self {
+        if uri.scheme.is_some() {
+            Dots::Rfc3986
+        } else {
+            Dots::KeepLeading
+        }
+    }
+}
+
+/// RFC 3986 §5.2.4, "Remove Dot Segments", under the policy `dots`.
+///
+/// Under [`Dots::Rfc3986`] — the path of a URI with a scheme — it is the
+/// RFC's own two-buffer algorithm, step for step ([`rfc3986_dot_segments`]).
+/// Under [`Dots::KeepLeading`] — a path with no scheme anywhere, outside RFC
+/// 3986 — it is the segment stack [`relative_dot_segments`], which keeps a
+/// relative path relative.
 fn remove_dot_segments(path: &str, dots: Dots) -> String {
+    match dots {
+        Dots::Rfc3986 => rfc3986_dot_segments(path),
+        Dots::KeepLeading => relative_dot_segments(path),
+    }
+}
+
+/// RFC 3986 §5.2.4 transcribed: an input buffer holding the path and an
+/// output buffer, initially empty; "While the input buffer is not empty, loop
+/// as follows":
+///
+/// > A. If the input buffer begins with a prefix of "../" or "./", then
+/// >    remove that prefix from the input buffer; otherwise,
+/// > B. if the input buffer begins with a prefix of "/./" or "/.", where "."
+/// >    is a complete path segment, then replace that prefix with "/" in the
+/// >    input buffer; otherwise,
+/// > C. if the input buffer begins with a prefix of "/../" or "/..", where
+/// >    ".." is a complete path segment, then replace that prefix with "/" in
+/// >    the input buffer and remove the last segment and its preceding "/" (if
+/// >    any) from the output buffer; otherwise,
+/// > D. if the input buffer consists only of "." or "..", then remove that
+/// >    from the input buffer; otherwise,
+/// > E. move the first path segment in the input buffer to the end of the
+/// >    output buffer, including the initial "/" character (if any) and any
+/// >    subsequent characters up to, but not including, the next "/" character
+/// >    or the end of the input buffer.
+///
+/// For an absolute path this is what a segment stack computes. For a
+/// **rootless** one (`example:a/../c`, the path of a URI with a scheme and no
+/// authority, §3.3) it is not: step E moves `a` without a slash, step C
+/// replaces `/../` by `/` and removes `a`, and step E then moves `/c` — so
+/// `a/../c` is `/c` and `a/..` is `/`, where a stack gives `c` and the empty
+/// path.
+///
+/// B and C replace a prefix by its own last character, so the input buffer is
+/// always a suffix of `path` — except after `/.` or `/..` at the very end,
+/// where it is `/`.
+fn rfc3986_dot_segments(path: &str) -> String {
+    /// C's "remove the last segment and its preceding "/" (if any) from the
+    /// output buffer".
+    fn remove_last_segment(output: &mut String) {
+        let at = output.rfind('/').unwrap_or(0);
+        output.truncate(at);
+    }
+
+    let mut input = path;
+    let mut output = String::with_capacity(path.len());
+    while !input.is_empty() {
+        if let Some(rest) = input.strip_prefix("../") {
+            // A
+            input = rest;
+        } else if let Some(rest) = input.strip_prefix("./") {
+            // A
+            input = rest;
+        } else if input.starts_with("/./") {
+            // B: "/./" becomes "/".
+            input = &input[2..];
+        } else if input == "/." {
+            // B
+            input = "/";
+        } else if input.starts_with("/../") {
+            // C: "/../" becomes "/".
+            input = &input[3..];
+            remove_last_segment(&mut output);
+        } else if input == "/.." {
+            // C
+            input = "/";
+            remove_last_segment(&mut output);
+        } else if input == "." || input == ".." {
+            // D
+            input = "";
+        } else {
+            // E
+            let start = usize::from(input.starts_with('/'));
+            let end = input[start..].find('/').map_or(input.len(), |i| start + i);
+            output.push_str(&input[..end]);
+            input = &input[end..];
+        }
+    }
+    output
+}
+
+/// Dot-segment removal for a path with no scheme anywhere ([`Dots::KeepLeading`]),
+/// as a segment stack: a `.` is dropped, a `..` removes the segment before it,
+/// and either one in the **last** position leaves the path ending in `/`.
+/// Empty segments (`a//b`) are kept.
+///
+/// A `..` with nothing to remove is dropped in an absolute path (where this is
+/// exactly RFC 3986 §5.2.4) and **kept** in a relative one: such a path is a
+/// relative reference still to be resolved against some base, and has to
+/// keep meaning what it meant — `../a` stays `../a`. For the same reason
+/// `a/../c` is `c`, not the `/c` §5.2.4 makes of it under a scheme
+/// ([`rfc3986_dot_segments`]): against a base directory `/d/`, `a/../c` and
+/// `c` both name `/d/c`, while `/c`, an absolute-path reference, would name
+/// `/c`.
+fn relative_dot_segments(path: &str) -> String {
     let absolute = path.starts_with('/');
     let body = if absolute { &path[1..] } else { path };
     let segments: Vec<&str> = body.split('/').collect();
@@ -429,7 +659,7 @@ fn remove_dot_segments(path: &str, dots: Dots) -> String {
                 Some(&previous) if previous != ".." => {
                     out.pop();
                 }
-                _ if absolute || dots == Dots::Rfc3986 => {}
+                _ if absolute => {}
                 _ => out.push(".."),
             },
             other => {
@@ -619,6 +849,157 @@ mod tests {
         assert_eq!(normalize_uri("../a/b"), "../a/b");
         assert_eq!(normalize_uri("../../a"), "../../a");
         assert_eq!(normalize_uri("/a/../../b"), "/b");
+    }
+
+    /// With a scheme, `normalize_uri` removes dot segments exactly as
+    /// `resolve_uri` does for a resolved path (§5.2.4 rule A drops a leading
+    /// `../`), so a base and `href="./x"` resolved against it agree.
+    #[test]
+    fn normalize_uri_follows_resolution_for_a_uri_with_a_scheme() {
+        assert_eq!(
+            normalize_uri("file:///o/x/../main.xml"),
+            "file:///o/main.xml"
+        );
+        assert_eq!(normalize_uri("urn:../b"), "urn:b");
+        assert_eq!(resolve_uri("urn:../b", "./b"), "urn:b");
+        assert_eq!(normalize_uri("../b"), "../b");
+    }
+
+    /// RFC 3986 §5.2.4's two published traces, and the rootless paths where a
+    /// segment stack and the RFC's buffers part ways (review 2, F2): step C
+    /// replaces `/../` by `/` in the input buffer, so the slash before the
+    /// next segment survives the removal of the first one.
+    #[test]
+    fn dot_segments_under_a_scheme_follow_rfc_3986_step_by_step() {
+        for (path, expected) in [
+            // The two examples §5.2.4 traces.
+            ("/a/b/c/./../../g", "/a/g"),
+            ("mid/content=5/../6", "mid/6"),
+            // Rootless, the first segment removed.
+            ("a/../c", "/c"),
+            ("a/..", "/"),
+            ("a/b/../../c", "/c"),
+            ("a/../../c", "/c"),
+            ("./a/../c", "/c"),
+            // Rootless, the first segment kept, or a leading `../` (rule A).
+            ("a/./c", "a/c"),
+            ("a/b/../c", "a/c"),
+            ("a/.", "a/"),
+            ("../a", "a"),
+            ("./../a", "a"),
+            (".", ""),
+            ("..", ""),
+            ("", ""),
+            // Not dot segments.
+            (".a/..", "/"),
+            ("..a/b", "..a/b"),
+            ("a/.b", "a/.b"),
+            // Absolute paths and empty segments.
+            ("/..", "/"),
+            ("/a/..", "/"),
+            ("/a//../b", "/a/b"),
+            ("//..", "/"),
+        ] {
+            assert_eq!(rfc3986_dot_segments(path), expected, "{path:?}");
+            assert_eq!(
+                remove_dot_segments(path, Dots::Rfc3986),
+                expected,
+                "{path:?}"
+            );
+        }
+        // Every function that removes dot segments under a scheme agrees, so a
+        // reported URI and its comparison key cannot part.
+        assert_eq!(normalize_uri("example:a/../c"), "example:/c");
+        assert_eq!(normalize_uri("example:a/.."), "example:/");
+        assert_eq!(resolve_uri("file:///o/", "example:a/../c"), "example:/c");
+        assert_eq!(resolve_uri("example:x/y", "../c"), "example:/c");
+        assert_eq!(syntax_normalized("example:a/../c"), "example:/c");
+        assert_eq!(syntax_normalized("example:a/%2E%2E/c"), "example:/c");
+        assert_ne!(
+            syntax_normalized("example:a/%2E%2E/c"),
+            syntax_normalized("example:c")
+        );
+        // With no scheme anywhere the path is a relative reference and stays
+        // one: `a/../c` names what `c` names against any base directory.
+        assert_eq!(normalize_uri("a/../c"), "c");
+        assert_eq!(resolve_uri("x/y", "../c"), "c");
+        assert_eq!(syntax_normalized("a/%2E%2E/c"), "c");
+        assert_eq!(normalize_uri("a/../../c"), "../c");
+    }
+
+    /// For an absolute path the segment stack and the RFC's buffers agree:
+    /// every path of up to five segments drawn from `a`, `b`, `.`, `..` and
+    /// the empty segment.
+    #[test]
+    fn dot_segments_of_an_absolute_path_agree_under_both_policies() {
+        let pieces = ["a", "b", ".", "..", ""];
+        let mut paths = vec![String::new()];
+        for _ in 0..5 {
+            let longer: Vec<String> = paths
+                .iter()
+                .flat_map(|path| pieces.iter().map(move |piece| format!("{path}/{piece}")))
+                .collect();
+            for path in &longer {
+                assert_eq!(
+                    relative_dot_segments(path),
+                    rfc3986_dot_segments(path),
+                    "{path:?}"
+                );
+            }
+            paths = longer;
+        }
+    }
+
+    /// RFC 3986 §6.2.2 plus the escaping of §5.8 / `fn:iri-to-uri`: each pair
+    /// is one URI; the second list are different URIs.
+    #[test]
+    fn syntax_normalization_equates_spellings_of_one_uri_only() {
+        for (a, b) in [
+            // §6.2.2.1: scheme and host are case-insensitive.
+            ("FILE:///o/a.xml", "file:///o/a.xml"),
+            ("http://Example.COM/a", "http://example.com/a"),
+            // §6.2.2.1: hex digits of a percent-encoding in upper case.
+            ("file:///o/%c3%a9.xml", "file:///o/%C3%A9.xml"),
+            // §6.2.2.2: percent-encoded unreserved characters decoded.
+            ("file:///o/a%2Exml", "file:///o/a.xml"),
+            ("file:///o/%7Ea%2D%5F", "file:///o/~a-_"),
+            ("file:///o/%41.xml", "file:///o/A.xml"),
+            // §6.2.2.3: dot segments, also percent-encoded ones.
+            ("file:///o/./x/../a.xml", "file:///o/a.xml"),
+            ("file:///o/x/%2E%2E/a.xml", "file:///o/a.xml"),
+            // §5.8: characters a URI may not contain are escaped first.
+            ("file:///o/a b.xml", "file:///o/a%20b.xml"),
+            ("file:///o/\u{e9}.xml", "file:///o/%C3%A9.xml"),
+            // Query, fragment, user information and port are normalized too,
+            // but only the host is case-folded.
+            (
+                "http://U%3asr@EXAMPLE.com:8080/p?q=%7e#f%2e",
+                "http://U%3Asr@example.com:8080/p?q=~#f.",
+            ),
+            ("http://[FE80::1]:80/a", "http://[fe80::1]:80/a"),
+            // No scheme: a leading `..` stays.
+            ("../a/./b", "../a/b"),
+            ("", ""),
+        ] {
+            assert_eq!(syntax_normalized(a), syntax_normalized(b), "{a} / {b}");
+        }
+        for (a, b) in [
+            // RFC 3986 keeps empty segments: different paths.
+            ("file:///o/sub//a.xml", "file:///o/sub/a.xml"),
+            // The path is case-sensitive.
+            ("file:///o/A.xml", "file:///o/a.xml"),
+            // Reserved characters stay encoded (`%2F` is not `/`).
+            ("file:///o/a%2Fb", "file:///o/a/b"),
+            // §6.2.3 (scheme-based) is not applied.
+            ("file://localhost/o/a.xml", "file:///o/a.xml"),
+            ("http://example.com:80/", "http://example.com/"),
+            // The user information keeps its case.
+            ("http://U@h/", "http://u@h/"),
+        ] {
+            assert_ne!(syntax_normalized(a), syntax_normalized(b), "{a} / {b}");
+        }
+        assert_eq!(syntax_normalized("FILE:///o/a%2exml"), "file:///o/a.xml");
+        assert_eq!(syntax_normalized("a%zz%"), "a%zz%");
     }
 
     #[test]

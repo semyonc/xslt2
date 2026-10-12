@@ -7,8 +7,8 @@ use xsd_schema::navigator::{DomNavigator, DomNodeType};
 
 use super::Builder;
 use crate::error::{codes, Location, XsltError};
-use crate::names::{parse_yes_no, resolve_qname, split_qname, QName, XSLT_NS};
-use crate::output::{parse_method, OutputDefinition};
+use crate::names::{resolve_qname, QName, XSLT_NS};
+use crate::output::{apply_serialization_attribute, Merge, OutputDefinition};
 use crate::receiver::Nav;
 use crate::serialize::CharacterMap;
 use crate::stylesheet::{attr_local, attributes, Module, ModuleId, StaticContextId};
@@ -49,76 +49,6 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             }
             match local.as_str() {
                 "name" => {}
-                "method" => target.method.set_checked(
-                    parse_method(&value, |p| sc.resolve_prefix(p)).map_err(at)?,
-                    precedence,
-                ),
-                "version" => target
-                    .version
-                    .set_checked(nmtoken(&value, "version").map_err(at)?, precedence),
-                "encoding" => target
-                    .encoding
-                    .set_checked(encoding_name(&value).map_err(at)?, precedence),
-                "indent" => target
-                    .indent
-                    .set_checked(parse_yes_no(&value, "indent").map_err(at)?, precedence),
-                "omit-xml-declaration" => target.omit_xml_declaration.set_checked(
-                    parse_yes_no(&value, "omit-xml-declaration").map_err(at)?,
-                    precedence,
-                ),
-                "standalone" => {
-                    let value = match whitespace::trim(&value) {
-                        "omit" => None,
-                        other => Some(parse_yes_no(other, "standalone").map_err(at)?),
-                    };
-                    target.standalone.set_checked(value, precedence);
-                }
-                "doctype-public" => target
-                    .doctype_public
-                    .set_checked(doctype_public(&value).map_err(at)?, precedence),
-                "doctype-system" => target
-                    .doctype_system
-                    .set_checked(doctype_system(&value).map_err(at)?, precedence),
-                "media-type" => target.media_type.set_checked(value, precedence),
-                "byte-order-mark" => target.byte_order_mark.set_checked(
-                    parse_yes_no(&value, "byte-order-mark").map_err(at)?,
-                    precedence,
-                ),
-                "escape-uri-attributes" => target.escape_uri_attributes.set_checked(
-                    parse_yes_no(&value, "escape-uri-attributes").map_err(at)?,
-                    precedence,
-                ),
-                "include-content-type" => target.include_content_type.set_checked(
-                    parse_yes_no(&value, "include-content-type").map_err(at)?,
-                    precedence,
-                ),
-                "undeclare-prefixes" => target.undeclare_prefixes.set_checked(
-                    parse_yes_no(&value, "undeclare-prefixes").map_err(at)?,
-                    precedence,
-                ),
-                "normalization-form" => target.normalization_form.set_checked(
-                    nmtoken(&value, "normalization-form").map_err(at)?,
-                    precedence,
-                ),
-                // §20: "In the case of an unprefixed name, the default namespace
-                // (that is, the namespace declared using xmlns="uri") is used.
-                // Note: This differs from the rule for most other QNames used in
-                // a stylesheet."
-                "cdata-section-elements" => {
-                    for token in whitespace::tokens(&value) {
-                        let (prefix, local) = split_qname(token);
-                        let name = if prefix.is_empty() {
-                            let local = resolve_qname(local, |_| None, codes::XTSE0020)
-                                .map_err(at)?
-                                .local;
-                            QName::new(sc.resolve_prefix("").unwrap_or_default(), local)
-                        } else {
-                            resolve_qname(token, |p| sc.resolve_prefix(p), codes::XTSE0020)
-                                .map_err(at)?
-                        };
-                        target.add_cdata_section_element(name);
-                    }
-                }
                 "use-character-maps" => {
                     let names = whitespace::tokens(&value)
                         .map(|t| resolve_qname(t, |p| sc.resolve_prefix(p), codes::XTSE0020))
@@ -126,6 +56,18 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                         .map_err(at)?;
                     target.use_character_maps.insert((precedence, order), names);
                 }
+                // Every other serialization attribute (`version` included,
+                // which is also a standard attribute: on `xsl:output` it is the
+                // serialization parameter).
+                other
+                    if apply_serialization_attribute(
+                        target,
+                        other,
+                        &value,
+                        &|p| sc.resolve_prefix(p),
+                        Merge::Declaration(precedence),
+                    )
+                    .map_err(at)? => {}
                 other if super::attributes::STANDARD_ATTRS.contains(&other) => {}
                 // §3.9: "if an element has an attribute that XSLT 2.0 does not
                 // allow the element to have, then the attribute must be
@@ -398,89 +340,4 @@ fn expand_for(definition: &OutputDefinition, maps: &HashMap<QName, CharacterMap>
         }
     }
     map
-}
-
-/// An `xs:NMTOKEN` attribute value (`version`, `normalization-form`), else
-/// XTSE0020 — the stylesheet form of Serialization's SEPM0016 ("a parameter
-/// value is invalid for the given parameter"; §3: "It is the responsibility of
-/// the host language to specify how invalid values should be handled").
-fn nmtoken(value: &str, what: &str) -> Result<String, XsltError> {
-    let value = whitespace::trim(value);
-    let ok = !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '\u{B7}'));
-    if ok {
-        Ok(value.to_string())
-    } else {
-        Err(XsltError::new(
-            codes::XTSE0020,
-            format!("{what} must be an NMTOKEN, not {value:?}"),
-        ))
-    }
-}
-
-/// Serialization §3 `encoding`: "A string of Unicode characters in the range
-/// #x21 to #x7E (that is, printable ASCII characters)". Whether the name is one
-/// this serializer supports is decided when it serializes (SESU0007).
-fn encoding_name(value: &str) -> Result<String, XsltError> {
-    let value = whitespace::trim(value);
-    if !value.is_empty() && value.chars().all(|c| ('\u{21}'..='\u{7E}').contains(&c)) {
-        Ok(value.to_string())
-    } else {
-        Err(XsltError::new(
-            codes::XTSE0020,
-            format!("the encoding {value:?} is not a string of printable ASCII characters"),
-        ))
-    }
-}
-
-/// §20: "The value of doctype-public must conform to the rules for a
-/// PubidLiteral (see \[XML 1.0\])" — `PubidChar ::= #x20 | #xD | #xA |
-/// [a-zA-Z0-9] | [-'()+,./:=?;!*#@$_%]`.
-fn doctype_public(value: &str) -> Result<String, XsltError> {
-    let ok = value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || " \r\n-'()+,./:=?;!*#@$_%".contains(c));
-    if ok {
-        Ok(value.to_string())
-    } else {
-        Err(XsltError::new(
-            codes::XTSE0020,
-            format!(
-                "doctype-public {value:?} contains a character a public identifier cannot hold"
-            ),
-        ))
-    }
-}
-
-/// Serialization §3 `doctype-system`: "A string of Unicode characters that does
-/// not include both an apostrophe (#x27) and a quotation mark (#x22)
-/// character."
-fn doctype_system(value: &str) -> Result<String, XsltError> {
-    if value.contains('\'') && value.contains('"') {
-        Err(XsltError::new(
-            codes::XTSE0020,
-            format!("doctype-system {value:?} contains both kinds of quotation mark"),
-        ))
-    } else {
-        Ok(value.to_string())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parameter_domains() {
-        assert!(nmtoken("1.0", "version").is_ok());
-        assert_eq!(nmtoken("a b", "version").unwrap_err().code, "XTSE0020");
-        assert!(encoding_name("XXX-xx").is_ok());
-        assert_eq!(encoding_name("utf 8").unwrap_err().code, "XTSE0020");
-        assert!(doctype_public("-//W3C//DTD XHTML 1.0 Transitional//EN").is_ok());
-        assert_eq!(doctype_public("\u{A3}[~~~]").unwrap_err().code, "XTSE0020");
-        assert!(doctype_system("ABC\"DEF").is_ok());
-        assert_eq!(doctype_system("'\"").unwrap_err().code, "XTSE0020");
-    }
 }

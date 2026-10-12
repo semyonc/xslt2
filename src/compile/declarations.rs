@@ -138,6 +138,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         }
         self.check_attribute_set_references()?;
         self.finish_output_definitions()?;
+        self.check_result_document_references()?;
         Ok(())
     }
 

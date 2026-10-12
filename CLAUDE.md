@@ -25,13 +25,13 @@ PSVI, `BufferDocument`). Separate git repository.
 | `src/error.rs`, `src/error/codes.rs` | `XsltError`, the 163 Appendix E codes, the two internal ones |
 | `src/names.rs` | `QName`, prefix resolution, the `yes`/`no` spelling of §3.5 |
 | `src/whitespace.rs` | XML whitespace (§4): the only four characters XSLT calls whitespace. Never use `char::is_whitespace`, `str::trim*` or `split_whitespace` on XSLT or XPath values |
-| `src/resolver.rs` | `Resolver` (file, in-memory), URI arithmetic, non-UTF-8 decoding |
+| `src/resolver.rs` | `Resolver` (file, in-memory), URI arithmetic, non-UTF-8 decoding; `syntax_normalized` (RFC 3986 §6.2.2 after `iri-to-uri` escaping — the form result URIs are compared in, XTDE1490); dot segments: RFC 3986 §5.2.4's two-buffer algorithm transcribed under a scheme (`example:a/../c` → `example:/c`), a segment stack keeping a relative path relative without one (`a/../c` → `c`, `../a` kept) |
 | `src/stylesheet.rs` | §3.10 module graph, import precedence, §5.4.1 lexical static contexts, §4.2 whitespace |
 | `src/model.rs` | The `Instruction` tree (§7.4), declaration tables (§7.3), `CompiledStylesheet` |
 | `src/pattern.rs` | Pattern grammar (§5.5.2), the §6.4 default priorities, the dispatch-index key |
 | `src/compile/checks.rs` | The **static-checking table**: one `ElementSpec` row per XSLT 2.0 element (category, required/optional attributes, AVTs, content model) transcribed from the spec's syntax summaries, and the single pass that validates a module against it before compilation. A new element = a new row here |
-| `src/compile/` | `Compiler`: modules → declarations and instructions. `mod.rs` (builder core), `declarations`, `output` (`xsl:output`, `xsl:character-map`), `instructions`, `literal`, `expressions`, `avt`, `patterns`, `modes`, `attributes`, `tree`, `functions` (`xsl:function`), `keys` (`xsl:key`), `grouping` (`xsl:for-each-group`), `analyze` (`xsl:analyze-string`). Walk stylesheet children **only** through `Module::children()` / `Builder::children()` — it applies §3.12 `use-when` exclusion by construction |
-| `src/runtime/` | `Transformation`: `mod.rs` (entry points), `context` (§5.4), `dispatch` (§6), `patterns`, `eval` (instructions), `content`, `variables`, `documents` (loading, §4.4 admission), `functions` (the §16 evaluator), `expressions`, `serialize` (a result tree through `src/serialize/`), `sort` (`xsl:sort`, `xsl:perform-sort`), `calls` (stylesheet functions), `keys` (key indexes), `grouping` (`xsl:for-each-group`), `analyze` (`xsl:analyze-string`, the run's regex cache) |
+| `src/compile/` | `Compiler`: modules → declarations and instructions. `mod.rs` (builder core), `declarations`, `output` (`xsl:output`, `xsl:character-map`), `instructions`, `literal`, `expressions`, `avt`, `patterns`, `modes`, `attributes`, `tree`, `functions` (`xsl:function`), `keys` (`xsl:key`), `grouping` (`xsl:for-each-group`), `analyze` (`xsl:analyze-string`), `result_document` (`xsl:result-document`: written attribute values, the static XTDE1460 / XTSE1590). Walk stylesheet children **only** through `Module::children()` / `Builder::children()` — it applies §3.12 `use-when` exclusion by construction |
+| `src/runtime/` | `Transformation`: `mod.rs` (entry points), `context` (§5.4; the §19.1 output state is `XsltContext::final_output`: only the initial context is final, `empty()` contexts are temporary, and the listed constructs clear it for their content), `dispatch` (§6), `patterns`, `eval` (instructions), `content`, `variables`, `documents` (loading, §4.4 admission), `functions` (the §16 evaluator), `expressions`, `serialize` (a result tree through `src/serialize/`), `sort` (`xsl:sort`, `xsl:perform-sort`), `calls` (stylesheet functions), `keys` (key indexes), `grouping` (`xsl:for-each-group`), `analyze` (`xsl:analyze-string`, the run's regex cache), `results` (`xsl:result-document`, the base output URI, XTDE1480 / XTDE1490, the §2.4 primary result; `SecondaryResult`) |
 | `src/receiver.rs` | `Receiver`, `ComplexContentNormalizer` (§5.7.1), `ResultBuilder`, `SequenceCollector`, `TemporaryOutputState` (the content of `xsl:document`: d-o-e dropped, §11.5/§20.2) |
 | `src/store.rs` | `DocumentStore`: arena-allocated documents, URI identity, `generate-id()` |
 | `src/output.rs` | `OutputDefinition`: the `xsl:output` attributes merged by import precedence (§20), `cdata-section-elements` united, `use-character-maps` concatenated and expanded; `compile/output.rs` reads `xsl:output` / `xsl:character-map` (XTSE1560, XTSE1570, XTSE1580, XTSE1590, XTSE1600, XTSE0020 parameter domains) |
@@ -47,6 +47,7 @@ cargo build
 cargo clippy --all-targets         # 0 warnings expected
 cargo test                         # unit tests + every tests/*.rs except the W3C harness (it skips itself in debug): m0b…m2a, m2c, m2d_sorting, m2e_functions, m2f_keys, m2g_grouping, m2g_review, m2h_regex, m2i_core_defects, m2l_pattern_predicates, ns_inherit, q33_depth, …
                                    # + fn_error + m2b_namespaces + m2c_static_checks + m3a_serialization + m3a_review + m3a_review2
+                                   # + m3b_result_documents + m3b_review + m3b_review2
                                    # (tests/common/mod.rs: `common::body` drops the default XML
                                    # declaration for the tests written before M3a)
                                    # (the W3C harness skips itself in a debug build)
@@ -120,6 +121,11 @@ never add or remove a node. A failure of the stylesheet's own serialization is t
 when the case asks for serialization (`<output serialize="yes"/>`; the catalog's default is `no`);
 otherwise the tree assertions still run and only the serialization assertions see the failure (M3a).
 An `assert-serialization` without `method` is compared under the method the stylesheet used.
+Secondary results (`xsl:result-document`) are kept the same way in `RunOutput::secondary`, each under the
+absolute URI it was written to, with the same serialization-failure policy; the adapter sets the base output
+URI to the test-set directory (with a trailing slash), and `assert-result-document`'s relative `uri` matches
+the tail of that absolute URI at a path-segment boundary. An `assert` over a secondary result sees its URI as
+the re-parsed document's base URI (`base-uri()`, `result-document-0102`).
 `assert-string-value` normalizes unless `normalize-space="false"` (the catalog's `default="true"`), with
 XML whitespace only. `assert-true` / `-false` / `-count` / `-type` / `-deep-eq` / `-permutation` need a
 raw sequence result, which an XSLT 2.0 run never delivers: `harnessError`.
@@ -136,10 +142,36 @@ let names = NameTable::new();
 let functions = XsltFunctions::new();
 let sheet = Compiler::new(&names, &functions).compile_file(Path::new("a.xsl"))?;
 let arena = bumpalo::Bump::new();
-let run = sheet.transformation(&arena, TransformOptions::default());
+let options = TransformOptions {
+    base_output_uri: Some("file:///…/out/".into()), // default: the principal stylesheet module's URI
+    ..Default::default()
+};
+let run = sheet.transformation(&arena, options);
 let outcome = run.transform_uri("file:///…/in.xml")?;
-println!("{}", sheet.serialize_primary(&outcome)?);
+println!("{}", sheet.serialize_primary(&outcome)?);      // an xsl:result-document's format if one made it
+for tree in &outcome.secondary {                          // every other xsl:result-document, in evaluation order
+    println!("{}: {}", tree.uri, sheet.serialize_secondary(tree)?);   // or serialize_secondary_to_bytes
+}
 ```
+
+Nothing is written to disk: `Outcome::secondary` holds each tree with its URI (`href` resolved against the base
+output URI — absolute only when that is: `compile_str(text, "")` and no option give an empty base, relative result
+URIs and the primary at `""`; a directory base needs its trailing `/`, or RFC 3986 replaces its last segment), its
+escaping marks and its effective `OutputDefinition`; `Outcome::result_document(uri)` finds a secondary one by any
+RFC 3986 §6.2.2 spelling of its URI (the primary is `outcome.primary`, at `outcome.base_output_uri`;
+`sheet.primary_output_definition(&outcome)` is its definition). `outcome.primary` is `None` when the initial
+template's result was empty, some `xsl:result-document` was evaluated, and none of them wrote to the base output URI
+(§2.4); with no `xsl:result-document` at all an empty result is an empty document. Any item counts as a non-empty
+result — `<xsl:text/>` and `<xsl:document/>` too — so next to an `xsl:result-document` without `href` it is XTDE1490,
+also when the zero-length text node comes out of a template with `as` or `xsl:perform-sort`. A `BufferDocument` cannot
+hold a text node with an empty value (upstream `BufferDocumentBuilder` adds one only for non-empty text), so `SequenceCollector` counts
+such nodes instead of keeping them (`zero_length_text_nodes`) and those two pass them on as zero-length `text` events;
+a typed variable, parameter or function result still loses them (`count()`, `as="text()"` see one item fewer).
+
+**Memory**: every result tree (and every temporary tree) costs about 118 KB of the run's arena however small it is
+(the upstream `BufferDocumentBuilder` reserves a 4,096-node page and a 4,096-entry namespace page per tree), kept until
+the arena is dropped — tens of thousands of result documents need gigabytes (10,000 ≈ 1.2 GB). The fix is upstream
+(xsd-schema Wave B); the streaming result-document handler, which lets a host drop each tree, is planned for M5.
 
 A deeply recursive stylesheet needs `xslt2::run_on_large_stack(DEFAULT_STACK_SIZE, || …)` around
 the whole job (compile included): everything involved is `!Send`, so the closure has to own it.

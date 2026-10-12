@@ -141,6 +141,29 @@ pub struct XsltContext<'t> {
     /// specifier evaluated for a `key()` call sees the call's
     /// (`Transformation::key_lookup`).
     pub(crate) captured: Option<Rc<CapturedSubstrings>>,
+    /// Whether instructions are evaluated in final output state (§19.1):
+    ///
+    /// > The instructions in the initial template are evaluated in final
+    /// > output state. An instruction is evaluated in the same output state as
+    /// > its calling instruction, except that xsl:variable, xsl:param,
+    /// > xsl:with-param, xsl:attribute, xsl:comment, xsl:processing-instruction,
+    /// > xsl:namespace, xsl:value-of, xsl:function, xsl:key, xsl:sort, and
+    /// > xsl:message always evaluate the instructions in their contained
+    /// > sequence constructor in temporary output state.
+    ///
+    /// A context built from [`empty`](Self::empty) is in temporary output
+    /// state — a stylesheet function's body, a key specifier, a global
+    /// variable, a pattern — and only the run's initial context is set to
+    /// final; everything else inherits the caller's state through the clones
+    /// of this context, which is what makes the state follow
+    /// `xsl:apply-templates` and `xsl:call-template` dynamically. The
+    /// constructs §19.1 lists clear it for their sequence constructor
+    /// ([`temporary_output`](Self::temporary_output)), and so does
+    /// `xsl:document`, whose content is a temporary tree (§11.5: "The
+    /// temporary tree rooted at this document node forms the result tree";
+    /// temporary output state "applies when instructions are writing to a
+    /// temporary tree or any other non-final destination").
+    pub(crate) final_output: bool,
 }
 
 impl<'t> XsltContext<'t> {
@@ -155,6 +178,20 @@ impl<'t> XsltContext<'t> {
             tunnel: Rc::new(TunnelMap::default()),
             group: None,
             captured: None,
+            final_output: false,
+        }
+    }
+
+    /// This context in temporary output state (§19.1): itself when it already
+    /// is, a copy otherwise — so the copy is only made in final output state.
+    pub(super) fn temporary_output(&self) -> std::borrow::Cow<'_, Self> {
+        if self.final_output {
+            std::borrow::Cow::Owned(Self {
+                final_output: false,
+                ..self.clone()
+            })
+        } else {
+            std::borrow::Cow::Borrowed(self)
         }
     }
 

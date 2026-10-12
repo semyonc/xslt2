@@ -20,6 +20,7 @@ mod literal;
 mod modes;
 mod output;
 mod patterns;
+pub(crate) mod result_document;
 mod tree;
 
 use std::collections::HashMap;
@@ -186,6 +187,9 @@ struct Builder<'a, 'm, 't> {
     /// Every name a `use-attribute-sets` / `xsl:use-attribute-sets` attribute
     /// mentions, for the static half of XTSE0710 (§10.2).
     attr_set_refs: Vec<QName>,
+    /// The names every `xsl:result-document` refers to, for the static checks
+    /// that need every declaration (§19.1).
+    result_document_refs: Vec<result_document::ResultDocumentReferences>,
     /// Every `xsl:function` declaration, from the pre-pass (§10.3).
     function_decls: Vec<functions::FunctionDecl<'t>>,
     /// The compiled winners, indexed by `StylesheetFunctionId`; `None` until
@@ -245,6 +249,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             decl_order: 0,
             aliases: HashMap::new(),
             attr_set_refs: Vec::new(),
+            result_document_refs: Vec::new(),
             function_decls: Vec::new(),
             functions_table: Vec::new(),
             losing_function_bodies: Vec::new(),
