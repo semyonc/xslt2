@@ -589,8 +589,8 @@ fn the_grouping_functions_in_a_pattern_are_static_errors() {
 }
 
 /// The `count` and `from` patterns of `xsl:number` are patterns too
-/// (`error-1060a`, `error-1070a`): the two rules are reported although the
-/// instruction itself is M3c's.
+/// (`error-1060a`, `error-1070a`): the two rules hold for them (reported before
+/// M3c implemented the instruction, and since then by the pattern compiler).
 #[test]
 fn the_grouping_functions_in_an_xsl_number_pattern_are_static_errors() {
     let count = root(r#"<xsl:number count="p[exists(current-group())]"/>"#);

@@ -283,6 +283,7 @@ fn instruction_reaches_group(kind: &InstructionKind) -> bool {
         | InstructionKind::Variable { .. }
         | InstructionKind::Message { .. }
         | InstructionKind::ResultDocument(_)
+        | InstructionKind::Number(_)
         | InstructionKind::Fallback
         | InstructionKind::NotImplemented { .. } => false,
     }

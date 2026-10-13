@@ -22,6 +22,7 @@ mod expressions;
 mod functions;
 mod grouping;
 mod keys;
+mod number;
 mod patterns;
 mod results;
 mod serialize;
@@ -439,6 +440,9 @@ pub struct Transformation<'a, 't> {
     /// The sibling sequences positional pattern predicates were evaluated
     /// against, per predicate and parent (§5.5.3), remembered for the run.
     placements: RefCell<patterns::PlacementCache>,
+    /// What each `xsl:number` instruction's last evaluation counted
+    /// (`runtime/number.rs`), by `NumberInstruction::memo_slot`.
+    number_memos: RefCell<HashMap<usize, number::NumberMemo<'t>>>,
     messages: RefCell<Vec<Message>>,
     /// Where an XSLT error raised inside the XPath engine is parked: an
     /// `XPathError` has no "host error with a code" variant, so the evaluator
@@ -491,6 +495,7 @@ impl<'a> CompiledStylesheet<'a> {
             regexes: RefCell::new(analyze::RegexCache::default()),
             id_key_selections: RefCell::new(HashMap::new()),
             placements: RefCell::new(patterns::PlacementCache::default()),
+            number_memos: RefCell::new(HashMap::new()),
             messages: RefCell::new(Vec::new()),
             parked_error: RefCell::new(None),
             params: RefCell::new(HashMap::new()),

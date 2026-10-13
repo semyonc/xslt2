@@ -4,16 +4,17 @@ Schema-aware XSLT 2.0 processor in Rust, built on the
 [`xsd-schema`](../xsd-schema) validator and its XPath 2.0 engine.
 
 Status: **M3 — numbering, formatting, serialization, compatibility, in progress** (M1 and M2 done; M3a
-serialization and M3b result documents done). Stylesheets are loaded,
+serialization, M3b result documents and M3c numbering done). Stylesheets are loaded,
 compiled and run: the module graph with import precedence, the lexical static contexts of §5.4.1,
 template rules with the §6.4 priorities and conflict resolution, the built-in rules,
 `xsl:apply-imports` and `xsl:next-match`, variables and parameters (tunnel included), attribute
 value templates, attribute sets, the node constructors, `xsl:copy`/`xsl:copy-of`, `xsl:message`,
 `xsl:sort` / `xsl:perform-sort` with collations, `xsl:function`, `xsl:key` with `key()` and the `id()` /
 `key()` patterns, `xsl:for-each-group`, `xsl:analyze-string` with `regex-group()`, the XML, XHTML, HTML and text
-output methods with character maps and `disable-output-escaping`, and `xsl:result-document` (secondary results are
-returned in memory, `Outcome::secondary`; nothing is written to disk). `xsl:number` and `format-number` belong to
-later milestones and report the internal `XSLT2-NOTIMPL` code rather than a wrong answer.
+output methods with character maps and `disable-output-escaping`, `xsl:result-document` (secondary results are
+returned in memory, `Outcome::secondary`; nothing is written to disk), and `xsl:number` (every level, Unicode
+decimal-digit families, English words and ordinals). `format-number` and `format-date` belong to a later milestone
+and report the internal `XSLT2-NOTIMPL` code rather than a wrong answer.
 
 ```rust
 use xsd_schema::namespace::NameTable;
@@ -86,11 +87,11 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 | XSLT 2.0-applicable | 6,619 |
 | excluded (documented in `tests/xslts/filter.rs`) | 63 |
 | runnable (dependencies satisfied) | 5,688 |
-| pass | 5,286 |
-| fail / wrongError / harnessError | 37 / 0 / 3 |
-| not implemented (`XSLT2-NOTIMPL`: M2k without its feature, M3c–M4) | 362 |
-| pass rate over runnable | 92.93% |
-| headline (basic profile, non-regex families) | 3,827 / 4,209 = **90.9%** |
+| pass | 5,455 |
+| fail / wrongError / harnessError | 38 / 0 / 3 |
+| not implemented (`XSLT2-NOTIMPL`: M2k without its feature, M3d–M4) | 192 |
+| pass rate over runnable | 95.90% |
+| headline (basic profile, non-regex families) | 3,991 / 4,209 = **94.8%** |
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the
@@ -122,7 +123,8 @@ output (`../../XSLT2_HARNESS_RESULT_TREE_REPORT.md`): 5,014 of 5,689 (`for-each-
 `for-each-group-085` is excluded — its expected result drops source whitespace that §6.6 and §4.4 keep). M3a
 (serialization: the `xml`, `xhtml`, `html` and `text` methods, character maps, `disable-output-escaping`,
 `../../XSLT2_M3A_REPORT.md`) took it to 5,181 of 5,688 the same day (`character-map-026`, an XSLT 3.0 case, is
-excluded), and M3b (`xsl:result-document`, `../../XSLT2_M3B_REPORT.md`) to 5,286 on 2026-10-12.
+excluded), M3b (`xsl:result-document`, `../../XSLT2_M3B_REPORT.md`) to 5,286 on 2026-10-12, and M3c
+(`xsl:number`, `../../XSLT2_M3C_REPORT.md`) to 5,455 on 2026-10-13.
 
 The sixteen test-sets M1 targets:
 
@@ -131,7 +133,7 @@ The sixteen test-sets M1 targets:
 | template | 6 | 6 | 0 | 0 | 0 | 0 | 100.0% |
 | built-in-templates | 4 | 4 | 0 | 0 | 0 | 0 | 100.0% |
 | choose | 54 | 53 | 0 | 0 | 0 | 1 | 98.1% |
-| call-template | 35 | 33 | 0 | 0 | 1 | 1 | 94.3% |
+| call-template | 35 | 34 | 0 | 0 | 1 | 0 | 97.1% |
 | lre | 26 | 26 | 0 | 0 | 0 | 0 | 100.0% |
 | variable | 101 | 101 | 0 | 0 | 0 | 0 | 100.0% |
 | include | 14 | 13 | 1 | 0 | 0 | 0 | 92.9% |

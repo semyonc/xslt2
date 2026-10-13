@@ -272,7 +272,7 @@ impl<'a, 't> Transformation<'a, 't> {
 
     /// Whether every variable the expression `id` reads is a global variable
     /// or parameter.
-    fn reads_only_globals(&self, id: ExprId) -> bool {
+    pub(super) fn reads_only_globals(&self, id: ExprId) -> bool {
         let compiled = self.sheet.expr(id);
         compiled.vars.iter().enumerate().all(|(slot, location)| {
             matches!(location, VarLocation::Global(_))

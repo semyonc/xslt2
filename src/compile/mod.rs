@@ -18,6 +18,7 @@ mod instructions;
 mod keys;
 mod literal;
 mod modes;
+mod number;
 mod output;
 mod patterns;
 pub(crate) mod result_document;
@@ -199,6 +200,9 @@ struct Builder<'a, 'm, 't> {
     /// higher import precedence: never called, but checked (§2.9).
     losing_function_bodies: Vec<Body>,
     function_handles: HashMap<xsd_schema::xpath::functions::FunctionHandle, StylesheetFunctionId>,
+    /// How many `xsl:number` instructions have been compiled: each gets the
+    /// next slot of the run's numbering memo (`NumberInstruction::memo_slot`).
+    number_instructions: usize,
 }
 
 /// One winning `xsl:namespace-alias` declaration (§11.1.4).
@@ -254,6 +258,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             functions_table: Vec::new(),
             losing_function_bodies: Vec::new(),
             function_handles: HashMap::new(),
+            number_instructions: 0,
         }
     }
 

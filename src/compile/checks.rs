@@ -1484,6 +1484,7 @@ pub(super) fn visit(body: &Body, f: &mut impl FnMut(&Instruction)) {
             InstructionKind::Text { .. }
             | InstructionKind::Sequence { .. }
             | InstructionKind::CopyOf { .. }
+            | InstructionKind::Number(_)
             | InstructionKind::Fallback
             | InstructionKind::NotImplemented { .. } => {}
         }

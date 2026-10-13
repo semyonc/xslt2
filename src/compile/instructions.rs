@@ -422,21 +422,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             )
             .with_location(loc)),
             "for-each-group" => self.for_each_group(nav, module_id, ctx, &loc),
-            "number" => {
-                // xsl:number is M3c's; its `count` and `from` patterns are
-                // patterns all the same, so the two §14 rules that hold for
-                // every pattern (XTSE1060, XTSE1070) are checked here already.
-                for attribute in ["count", "from"] {
-                    if let Some(text) = attr_local(nav, attribute) {
-                        self.reject_grouping_functions_in(&text, ctx)
-                            .map_err(|e| e.with_location(loc.clone()))?;
-                    }
-                }
-                Ok(InstructionKind::NotImplemented {
-                    feature: "xsl:number".to_string(),
-                    milestone: "M3c",
-                })
-            }
+            "number" => self.number(nav, ctx, &loc),
             "analyze-string" => self.analyze_string(nav, module_id, ctx, &loc),
             "result-document" => self.result_document(nav, module_id, ctx, &loc),
             other => {

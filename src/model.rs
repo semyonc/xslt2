@@ -582,6 +582,8 @@ pub enum InstructionKind {
     },
     /// `xsl:result-document` (§19.1).
     ResultDocument(Box<ResultDocument>),
+    /// `xsl:number` (§12).
+    Number(Box<NumberInstruction>),
     /// `xsl:fallback` outside an unknown extension instruction: ignored
     /// (§18.2.3 "the xsl:fallback instruction … is ignored").
     Fallback,
@@ -635,6 +637,71 @@ pub struct ResultDocument {
     /// those defined in the selected output definition".
     pub use_character_maps: Vec<QName>,
     pub body: Body,
+}
+
+/// `xsl:number` (§12).
+///
+/// > The `xsl:number` instruction performs two tasks: firstly, determining a
+/// > place marker (this is a sequence of integers, to allow for hierarchic
+/// > numbering schemes such as 1.12.2 or 3(c)ii), and secondly, formatting the
+/// > place marker for output as a text node in the result sequence.
+///
+/// The six conversion attributes of §12.3 are attribute value templates; a
+/// value written without an expression was checked when the stylesheet was
+/// compiled (XTSE0020), a computed one is checked when the instruction is
+/// evaluated (XTDE0030).
+pub struct NumberInstruction {
+    pub source: NumberSource,
+    /// `format`; `None` when absent (the default `1`).
+    pub(crate) format: Option<NumberFormatSource>,
+    pub lang: Option<Avt>,
+    pub letter_value: Option<Avt>,
+    pub ordinal: Option<Avt>,
+    pub grouping_separator: Option<Avt>,
+    pub grouping_size: Option<Avt>,
+    /// Backwards-compatible behaviour is enabled for the instruction (§12.1,
+    /// DESIGN §9.10 row 7): only the first item of `value`, an empty `value`
+    /// is `NaN`, and a value that cannot be converted to an integer is
+    /// formatted as `NaN` instead of raising XTDE0980.
+    pub backwards_compatible: bool,
+    /// The instruction's slot in the run's numbering memo (`runtime/number.rs`),
+    /// one per `xsl:number` of the stylesheet.
+    pub memo_slot: usize,
+}
+
+/// Where the place marker of `xsl:number` comes from (§12).
+pub enum NumberSource {
+    /// `value` (§12.1): "The place marker to be formatted may be specified by
+    /// an expression."
+    Value(ExprId),
+    /// §12.2: "the position of a selected node within the tree that contains
+    /// it". `select` absent: the context node.
+    Node {
+        select: Option<ExprId>,
+        level: NumberLevel,
+        /// `None`: "the pattern that matches any node with the same node kind
+        /// as the selected node and, if the selected node has an expanded-QName,
+        /// with the same expanded-QName as the selected node".
+        count: Option<PatternId>,
+        /// `None`: only "the root node of a tree" matches.
+        from: Option<PatternId>,
+    },
+}
+
+/// The `level` attribute of `xsl:number` (§12.2; default `single`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NumberLevel {
+    Single,
+    Multiple,
+    Any,
+}
+
+/// The `format` attribute of `xsl:number`.
+pub(crate) enum NumberFormatSource {
+    /// Written without an expression: split into tokens once, by the compiler.
+    Fixed(crate::numbering::NumberFormat),
+    /// An attribute value template, expanded and split at every evaluation.
+    Computed(Avt),
 }
 
 /// One template rule or named template (§6, §10.1).

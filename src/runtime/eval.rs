@@ -484,6 +484,8 @@ impl<'a, 't> Transformation<'a, 't> {
 
             InstructionKind::ResultDocument(rd) => self.result_document(instruction, rd, frame, cx),
 
+            InstructionKind::Number(number) => self.number(number, frame, cx, out),
+
             // §18.2.3: an xsl:fallback that is reached normally does nothing.
             InstructionKind::Fallback => Ok(()),
 

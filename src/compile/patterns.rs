@@ -66,28 +66,6 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     }
 }
 
-impl<'a, 'm, 't> Builder<'a, 'm, 't> {
-    /// XTSE1060 / XTSE1070 for a pattern this processor does not compile yet —
-    /// the `count` and `from` patterns of `xsl:number`, whose instruction is
-    /// M3c's (see [`reject_grouping_functions`]).
-    ///
-    /// Only these two rules are checked: a source that does not even compile
-    /// as an expression is left to the instruction's own compiler, which will
-    /// report the pattern's other static errors with it.
-    pub(super) fn reject_grouping_functions_in(
-        &mut self,
-        source: &str,
-        ctx: StaticContextId,
-    ) -> Result<(), XsltError> {
-        let visible = self.visible_vars(ctx);
-        let names: Vec<&str> = visible.iter().map(|(n, _)| n.as_str()).collect();
-        match XPathExpr::compile_with_vars(source, self.compile_context(ctx), &names) {
-            Ok(whole) => reject_grouping_functions(&whole, source),
-            Err(_) => Ok(()),
-        }
-    }
-}
-
 /// The two §14 functions that have no meaning in a pattern.
 ///
 /// > \[§14.1\] \[ERR XTSE1060\] It is a static error if the current-group

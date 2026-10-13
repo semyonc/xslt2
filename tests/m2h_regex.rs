@@ -1431,8 +1431,9 @@ fn the_stack_guard_is_checked_before_a_computed_regex_is_compiled() {
 
 /// The 26 XSLT 2.0 instructions (the syntax summaries' "Category:
 /// instruction", `xsl:variable` included) and whether this processor runs
-/// them: all but `xsl:number` (M3c). (`xsl:result-document` was false until
-/// M3b implemented it — `tests/m3b_result_documents.rs`.)
+/// them: all of them since M3c. (`xsl:result-document` was false until M3b
+/// implemented it — `tests/m3b_result_documents.rs`; `xsl:number` until M3c —
+/// `tests/m3c_numbering.rs`.)
 const INSTRUCTIONS: [(&str, bool); 26] = [
     ("analyze-string", true),
     ("apply-imports", true),
@@ -1452,7 +1453,7 @@ const INSTRUCTIONS: [(&str, bool); 26] = [
     ("message", true),
     ("namespace", true),
     ("next-match", true),
-    ("number", false),
+    ("number", true),
     ("perform-sort", true),
     ("processing-instruction", true),
     ("result-document", true),
@@ -1505,11 +1506,8 @@ fn element_available_is_true_for_every_implemented_instruction() {
         assert_eq!(out(&main), "<out>false</out>", "xsl:{name}");
     }
 
-    // The one answered false is the one that does not run yet.
-    assert_eq!(
-        dynamic_error(&root(r#"<xsl:number value="1"/>"#)),
-        "XSLT2-NOTIMPL"
-    );
+    // The last one answered false until M3c runs now.
+    assert_eq!(out(&root(r#"<xsl:number value="1"/>"#)), "<out>1</out>");
 }
 
 /// R5. §3.12 `use-when`: guarding code with `element-available()` keeps it
@@ -1522,7 +1520,10 @@ fn use_when_element_available_keeps_working_code() {
            <s xsl:use-when="element-available('xsl:perform-sort')"><xsl:perform-sort select="3, 1, 2"><xsl:sort select="."/></xsl:perform-sort></s>
            <n xsl:use-when="element-available('xsl:number')"><xsl:number value="1"/></n>"#,
     );
-    assert_eq!(out(&main), "<out><g><k>1</k><k>2</k></g><s>1 2 3</s></out>");
+    assert_eq!(
+        out(&main),
+        "<out><g><k>1</k><k>2</k></g><s>1 2 3</s><n>1</n></out>"
+    );
 }
 
 /// R7. §15.1: "[ERR XTSE1130] It is a static error if the xsl:analyze-string
