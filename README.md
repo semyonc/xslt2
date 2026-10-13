@@ -13,7 +13,8 @@ value templates, attribute sets, the node constructors, `xsl:copy`/`xsl:copy-of`
 `key()` patterns, `xsl:for-each-group`, `xsl:analyze-string` with `regex-group()`, the XML, XHTML, HTML and text
 output methods with character maps and `disable-output-escaping`, `xsl:result-document` (secondary results are
 returned in memory, `Outcome::secondary`; nothing is written to disk), and `xsl:number` (every level, Unicode
-decimal-digit families, English words and ordinals). `format-number` and `format-date` belong to a later milestone
+decimal-digit families, seventeen sequences of consecutive Unicode characters — circled, parenthesized, `1.`-style
+digits and the like —, English words and ordinals). `format-number` and `format-date` belong to a later milestone
 and report the internal `XSLT2-NOTIMPL` code rather than a wrong answer.
 
 ```rust
@@ -86,12 +87,12 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 |---|---|
 | XSLT 2.0-applicable | 6,619 |
 | excluded (documented in `tests/xslts/filter.rs`) | 63 |
-| runnable (dependencies satisfied) | 5,688 |
-| pass | 5,455 |
+| runnable (dependencies satisfied) | 5,793 |
+| pass | 5,560 |
 | fail / wrongError / harnessError | 38 / 0 / 3 |
 | not implemented (`XSLT2-NOTIMPL`: M2k without its feature, M3d–M4) | 192 |
-| pass rate over runnable | 95.90% |
-| headline (basic profile, non-regex families) | 3,991 / 4,209 = **94.8%** |
+| pass rate over runnable | 95.98% |
+| headline (basic profile, non-regex families) | 4,096 / 4,314 = **94.9%** |
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the
@@ -124,7 +125,9 @@ output (`../../XSLT2_HARNESS_RESULT_TREE_REPORT.md`): 5,014 of 5,689 (`for-each-
 (serialization: the `xml`, `xhtml`, `html` and `text` methods, character maps, `disable-output-escaping`,
 `../../XSLT2_M3A_REPORT.md`) took it to 5,181 of 5,688 the same day (`character-map-026`, an XSLT 3.0 case, is
 excluded), M3b (`xsl:result-document`, `../../XSLT2_M3B_REPORT.md`) to 5,286 on 2026-10-12, and M3c
-(`xsl:number`, `../../XSLT2_M3C_REPORT.md`) to 5,455 on 2026-10-13.
+(`xsl:number`, `../../XSLT2_M3C_REPORT.md`) to 5,455 on 2026-10-13, and its follow-up (seventeen numbering sequences of
+consecutive code points; the harness now asks the processor about the `combinations_for_numbering` dependency and
+its `range`, `../../XSLT2_M3C_FOLLOWUP_REPORT.md`) to 5,560 of 5,793 the same day.
 
 The sixteen test-sets M1 targets:
 

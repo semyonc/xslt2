@@ -244,6 +244,9 @@ fn run_suite() {
         xsd11: opts.xsd11,
         strict_recoverable: opts.strict,
         run_excluded: opts.all,
+        // The processor itself answers `combinations_for_numbering`, also under `--stub`: the
+        // dependency is about the processor, whichever engine runs the cases.
+        numbering: engine::numbering_probe,
     };
     let engine: Box<dyn Engine> = if opts.stub {
         Box::new(StubEngine)

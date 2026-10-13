@@ -508,6 +508,73 @@ fn mode_of(name: &CatalogQName) -> Option<ModeKey> {
     }
 }
 
+thread_local! {
+    /// The answers of [`numbering_probe`], per request, for the run (the whole harness runs on
+    /// one thread).
+    static NUMBERING_ANSWERS: std::cell::RefCell<
+        std::collections::HashMap<crate::filter::NumberingRequest, Result<(), String>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Asks the processor, through the public API, whether it formats every number of `request`
+/// with the numbering sequence of the request's token: compiles and runs
+/// `<xsl:number value="." format="{token}" letter-value="…"/>` for each of them, and answers
+/// `Err` naming the first number that came out as the token `1` would write it (XSLT 2.0 §12.3:
+/// an unsupported token "must use a format token of 1", and "Numbers that fall outside this
+/// range must be formatted using the format token 1"). The `filter::Policy::numbering` of a
+/// real run; each request is asked once.
+pub fn numbering_probe(request: &crate::filter::NumberingRequest) -> Result<(), String> {
+    if let Some(answer) = NUMBERING_ANSWERS.with(|a| a.borrow().get(request).cloned()) {
+        return answer;
+    }
+    let answer = ask_numbering(request);
+    NUMBERING_ANSWERS.with(|a| a.borrow_mut().insert(request.clone(), answer.clone()));
+    answer
+}
+
+fn ask_numbering(request: &crate::filter::NumberingRequest) -> Result<(), String> {
+    let numbers: Vec<String> = request.numbers.iter().map(u64::to_string).collect();
+    let letter_value = match &request.letter_value {
+        Some(value) => format!(r#" letter-value="{value}""#),
+        None => String::new(),
+    };
+    let select = numbers.join(", ");
+    let token = request.token as u32;
+    let sheet = format!(
+        r#"<xsl:stylesheet version="2.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+             <xsl:output method="text"/>
+             <xsl:template match="/">
+               <xsl:for-each select="({select})"><xsl:number value="." format="&#x{token:X};"{letter_value}/>|</xsl:for-each>
+             </xsl:template>
+           </xsl:stylesheet>"#
+    );
+    let names = NameTable::new();
+    let functions = XsltFunctions::new();
+    let failed = |e: XsltError| format!("the probe stylesheet failed: {} {}", e.code, e.message);
+    let compiled = Compiler::new(&names, &functions)
+        .compile_str(&sheet, "urn:harness-numbering-probe")
+        .map_err(failed)?;
+    let arena = Bump::new();
+    let run = compiled.transformation(&arena, TransformOptions::default());
+    let outcome = run
+        .transform_source("urn:harness-numbering-probe-source", "<probe/>")
+        .map_err(failed)?;
+    let text = compiled.serialize_primary(&outcome).map_err(failed)?;
+    let formatted: Vec<&str> = text.split('|').collect();
+    if formatted.len() != numbers.len() + 1 {
+        return Err(format!(
+            "the probe wrote {text:?} for {} numbers",
+            numbers.len()
+        ));
+    }
+    match numbers.iter().zip(&formatted).find(|(n, f)| n == f) {
+        Some((n, _)) => Err(format!(
+            "the processor formats {n} with the token 1 (U+{token:04X} gives {n:?})"
+        )),
+        None => Ok(()),
+    }
+}
+
 /// The adapter's own checks, run by `--self-test`: how catalog sources are named and served,
 /// and that what the harness refuses is a `harnessError`. Returns the number of checks.
 pub fn self_test() -> usize {
@@ -875,5 +942,137 @@ pub fn self_test() -> usize {
             "a case with source/@select is a harnessError",
         );
     }
+
+    // M3c follow-up: `combinations_for_numbering` is asked of the processor, number by number
+    // (`numbering_probe`), and the dependency's `range` must lie inside what it supports.
+    use crate::catalog::Dependency;
+    use crate::filter::{
+        applicability, numbering_request, range_numbers, Applicability, NumberingRequest, Policy,
+    };
+    let ask = |token: char, numbers: std::ops::RangeInclusive<u64>| {
+        numbering_probe(&NumberingRequest {
+            token,
+            letter_value: None,
+            numbers: numbers.collect(),
+        })
+    };
+    check(
+        ask('\u{2460}', 0..=50).is_ok(),
+        "the probe: circled digits 0 to 50",
+    );
+    check(
+        matches!(ask('\u{2460}', 0..=51), Err(m) if m.contains("formats 51 ")),
+        "the probe names the first number formatted with the token 1 (circled 51)",
+    );
+    check(
+        matches!(ask('\u{2474}', 0..=20), Err(m) if m.contains("formats 0 ")),
+        "the probe: parenthesized digits have no zero",
+    );
+    check(
+        ask('\u{2474}', 1..=20).is_ok() && ask('\u{1D360}', 1..=9).is_ok(),
+        "the probe: parenthesized 1 to 20, counting rods 1 to 9",
+    );
+    check(
+        ask('\u{1D360}', 1..=10).is_err() && ask('\u{B9}', 1..=1).is_err(),
+        "the probe: counting rods stop at 9; superscript one is not a sequence",
+    );
+    check(
+        numbering_probe(&NumberingRequest {
+            token: '\u{3B1}',
+            letter_value: Some("traditional".into()),
+            numbers: vec![1],
+        })
+        .is_err(),
+        "the probe: Greek alpha with letter-value is the token 1 (user decision)",
+    );
+    check(
+        range_numbers(Some("0 to 20")) == Ok((0..=20).collect())
+            && range_numbers(Some(" 1 \n to  9 ")) == Ok((1..=9).collect()),
+        "a range \"a to b\" is every number from a to b",
+    );
+    check(
+        matches!(range_numbers(None), Ok(n) if n.len() == 1001 && n[..1000] == *(1..=1000).collect::<Vec<u64>>() && n[1000] == u64::from(u32::MAX))
+            && range_numbers(None) == range_numbers(Some("unbounded")),
+        "an absent range is unbounded: 1 to 1000 and 2^32 - 1",
+    );
+    check(
+        range_numbers(Some("0 to 100000")).is_ok_and(|n| n.len() == 1001 && n[1000] == 100000),
+        "a range longer than 1000 is sampled, its ends included",
+    );
+    for bad in ["9 to 1", "1-9", "to 9", "1 to", "a to b", ""] {
+        check(range_numbers(Some(bad)).is_err(), bad);
+    }
+    let numbering = |value: &str, range: Option<&str>, satisfied: bool| Dependency {
+        kind: "combinations_for_numbering".into(),
+        value: value.into(),
+        satisfied,
+        range: range.map(str::to_string),
+    };
+    check(
+        numbering_request(&numbering(
+            "GREEK SMALL LETTER ALPHA (TRADITIONAL)",
+            None,
+            true,
+        ))
+        .is_ok_and(|r| r.token == '\u{3B1}' && r.letter_value.as_deref() == Some("traditional")),
+        "a parenthesized qualifier is the letter-value",
+    );
+    check(
+        matches!(numbering_request(&numbering("KLINGON DIGIT ONE", Some("1 to 9"), true)), Err(m) if m.contains("KLINGON")),
+        "an unknown name is refused, named",
+    );
+    let policy = Policy {
+        schema_aware: false,
+        xsd11: false,
+        strict_recoverable: false,
+        run_excluded: false,
+        numbering: numbering_probe,
+    };
+    let with = |dependency: Dependency| TestCase {
+        name: "numbering-probe".into(),
+        description: String::new(),
+        dependencies: vec![dependency],
+        environment: None,
+        test: TestSpec::default(),
+        result: Assertion::AllOf(Vec::new()),
+        line: 0,
+    };
+    let verdict = |value: &str, range: Option<&str>, satisfied: bool| {
+        applicability(&set, &with(numbering(value, range, satisfied)), &policy)
+    };
+    for (value, range) in [
+        ("CIRCLED DIGIT ONE", "0 to 50"),
+        ("CIRCLED DIGIT ONE", "1 to 9"),
+        ("DIGIT ONE FULL STOP", "0 to 10"),
+        ("DINGBAT NEGATIVE CIRCLED DIGIT ONE", "1 to 20"),
+        ("DIGIT ONE COMMA", "0 to 9"),
+        ("MENDE KIKAKUI DIGIT ONE", "1 to 9"),
+    ] {
+        check(
+            verdict(value, Some(range), true) == Applicability::Run,
+            &format!("runnable: {value} {range}"),
+        );
+    }
+    for (value, range) in [
+        ("CIRCLED DIGIT ONE", Some("0 to 1000")),
+        ("PARENTHESIZED DIGIT ONE", Some("0 to 20")),
+        ("AEGEAN NUMBER ONE", Some("1 to 50")),
+        ("CIRCLED DIGIT ONE", None),
+        ("GREEK SMALL LETTER ALPHA (ALPHABETIC)", None),
+        ("SUBSCRIPT ONE", Some("1 to 9")),
+    ] {
+        check(
+            matches!(verdict(value, range, true), Applicability::Unsatisfied(m) if m.contains("not supported")),
+            &format!("not runnable: {value} {range:?}"),
+        );
+    }
+    check(
+        matches!(verdict("CIRCLED DIGIT ONE", Some("1 to 20"), false), Applicability::Unsatisfied(m) if m.contains("needs its absence")),
+        "satisfied=\"false\" of a supported sequence is not runnable",
+    );
+    check(
+        verdict("CIRCLED DIGIT ONE", Some("1 to 1000"), false) == Applicability::Run,
+        "satisfied=\"false\" of an unsupported range is runnable",
+    );
     checks
 }

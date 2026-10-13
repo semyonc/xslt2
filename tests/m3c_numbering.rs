@@ -960,11 +960,12 @@ fn ordinals() {
 /// §12.3: "It is implementation-defined which numbering sequences, additional
 /// to those listed above, are supported. If an implementation does not
 /// support a numbering sequence represented by the given token, it must use a
-/// format token of 1." (`combinations_for_numbering` stays unsupported.)
+/// format token of 1." (The supported sequences of consecutive code points —
+/// circled digits and the like — are `tests/m3c_followup.rs`'s.)
 #[test]
 fn unsupported_tokens_are_the_token_1() {
     for token in [
-        "&#x2460;", "&#x3B1;", "&#x5D0;", "&#x30A2;", "x", "11", "2", "&#x2488;",
+        "&#xB9;", "&#x3B1;", "&#x5D0;", "&#x30A2;", "x", "11", "2", "&#x24EA;",
     ] {
         assert_eq!(
             number(&format!(r#"value="1, 12" format="({token})""#)),

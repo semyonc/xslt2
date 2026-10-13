@@ -46,10 +46,21 @@
 //! - `letter-value`: accepted and has no effect — in English the token alone
 //!   is never ambiguous (`a` is the alphabetic sequence, `i` the traditional
 //!   one, and each has only that one).
+//! - **Seventeen sequences of consecutive code points** ([`SEQUENCES`]), each
+//!   selected by its character for one as a token of its own and limited to
+//!   what the Unicode repertoire encodes ("the formatting token &#x2460;
+//!   (circled digit one) has a range of 1 to 20 imposed by the Unicode
+//!   character repertoire"): circled digits `⓪ ① … ⑳ ㉑ … ㊿` (0–50, from
+//!   three blocks), `🄀 ⒈ … ⒛` (0–20), `⓿ ❶ … ❿ ⓫ … ⓴` (0–20), `🄋 ➀ … ➉`
+//!   and `🄌 ➊ … ➓` (0–10), `⑴ … ⒇` (1–20), `⓵ … ⓾`, `㈠ … ㈩`, `㊀ … ㊉` and
+//!   the Aegean, Coptic epact, Rumi, Brahmi and Sinhala archaic one to ten
+//!   (1–10), `🄁 🄂 … 🄊` (0–9), counting-rod units and Mende Kikakui digits
+//!   (1–9) — the `combinations_for_numbering` values of the W3C catalog but
+//!   the two Greek ones. Not decimal sequences, so not grouped; `ordinal` is
+//!   ignored for them, as for `A` and `I`.
 //! - **Every other format token falls back to `1`**, as §12.3 requires of an
-//!   unsupported one: circled and parenthesized digits, `1.`-style
-//!   compatibility digits, Greek, Hebrew, Cyrillic, Katakana… (the catalog's
-//!   `combinations_for_numbering` dependency stays unsupported).
+//!   unsupported one: Greek, Hebrew, Cyrillic, Katakana, superscript and
+//!   subscript digits…
 //!
 //! A number outside a sequence's range is formatted with the token `1` (§12.3:
 //! "Numbers that fall outside this range must be formatted using the format
@@ -116,13 +127,200 @@ pub(crate) enum FormatToken {
     /// `w` / `W` / `Ww`.
     Words(WordCase),
     /// > Any other format token indicates a numbering sequence in which that
-    /// > token represents the number 1 (one) … If an implementation does not
+    /// > token represents the number 1 (one)
+    ///
+    /// — one of [`SEQUENCES`], whose character for one is the whole token.
+    Sequence(&'static NumberingSequence),
+    /// > It is implementation-defined which numbering sequences, additional
+    /// > to those listed above, are supported. If an implementation does not
     /// > support a numbering sequence represented by the given token, it must
     /// > use a format token of 1.
     ///
-    /// None is supported: formatted as the token `1`.
+    /// Formatted as the token `1`.
     Other(String),
 }
+
+/// A numbering sequence of characters that the Unicode Standard encodes for
+/// the numbers themselves — ① for one, ② for two … — in runs of consecutive
+/// code points, with or without a character for zero (§12.3: "Any other
+/// format token indicates a numbering sequence in which that token represents
+/// the number 1 (one)").
+///
+/// Its range is what the repertoire has: "there may be implementation-defined
+/// lower and upper bounds on the range of numbers that can be formatted using
+/// this format token; indeed, for some numbering sequences there may be
+/// intrinsic limits. For example, the formatting token &#x2460; (circled
+/// digit one) has a range of 1 to 20 imposed by the Unicode character
+/// repertoire" — here 0 to 50, because the repertoire also has `⓪` and
+/// `㉑`–`㊿` in two other blocks. "Numbers that fall outside this range must
+/// be formatted using the format token 1."
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct NumberingSequence {
+    /// The character for zero, if the repertoire has one.
+    zero: Option<char>,
+    /// The runs of consecutive code points, in increasing order of the
+    /// numbers they stand for, each following on from the one before: the
+    /// first number of the run, the code point for it, and how many numbers
+    /// the run has. The first run starts at 1, with the token.
+    runs: &'static [(u64, u32, u64)],
+}
+
+impl NumberingSequence {
+    /// The token: the character for one.
+    fn one(&self) -> char {
+        char::from_u32(self.runs[0].1).unwrap_or('1')
+    }
+
+    /// The smallest and the largest number the sequence formats.
+    #[cfg(test)]
+    fn range(&self) -> (u64, u64) {
+        let (first, _, length) = self.runs[self.runs.len() - 1];
+        (u64::from(self.zero.is_none()), first + length - 1)
+    }
+
+    /// The character for `n`, or `None` outside the range.
+    fn character(&self, n: u64) -> Option<char> {
+        if n == 0 {
+            return self.zero;
+        }
+        let &(first, code, _) = self
+            .runs
+            .iter()
+            .find(|&&(first, _, length)| (first..first + length).contains(&n))?;
+        // In range: `n - first` is less than the run's length, which fits
+        // the code points the table names.
+        char::from_u32(code + (n - first) as u32)
+    }
+}
+
+/// The numbering sequences of consecutive code points this implementation
+/// supports (§12.3: "It is implementation-defined which numbering sequences,
+/// additional to those listed above, are supported"). Each entry is headed by
+/// the Unicode name of its character for one, which is how the W3C catalog's
+/// `combinations_for_numbering` dependency names the sequence. Every code
+/// point is assigned in **Unicode 15.1**, the version of the rest of this
+/// module (general category `No`: checked against `regexml`'s `\p{No}` by
+/// `tests::every_sequence_character_is_no_in_the_regex_unicode`), and has the
+/// numeric value it stands for (names and values checked against the Unicode
+/// character database when the table was written).
+///
+/// Not here: the Greek letters (the catalog's `GREEK SMALL LETTER ALPHA`
+/// cases want an alphabet run and its traditional numerals), and sequences
+/// that continue past their consecutive run by addition (Aegean, Coptic
+/// epact, Rumi, Brahmi and Sinhala archaic numbers go on with twenty, thirty
+/// …, which this table does not compose: 11 and above use the token `1`).
+pub(crate) const SEQUENCES: [NumberingSequence; 17] = [
+    // CIRCLED DIGIT ONE
+    NumberingSequence {
+        // CIRCLED DIGIT ZERO
+        zero: Some('\u{24EA}'),
+        // ① … ⑳ (CIRCLED NUMBER TWENTY), ㉑ … ㉟, ㊱ … ㊿ (CIRCLED NUMBER FIFTY)
+        runs: &[(1, 0x2460, 20), (21, 0x3251, 15), (36, 0x32B1, 15)],
+    },
+    // DIGIT ONE FULL STOP
+    NumberingSequence {
+        // DIGIT ZERO FULL STOP
+        zero: Some('\u{1F100}'),
+        // ⒈ … ⒛ (NUMBER TWENTY FULL STOP)
+        runs: &[(1, 0x2488, 20)],
+    },
+    // DINGBAT NEGATIVE CIRCLED DIGIT ONE
+    NumberingSequence {
+        // NEGATIVE CIRCLED DIGIT ZERO
+        zero: Some('\u{24FF}'),
+        // ❶ … ❿ (DINGBAT NEGATIVE CIRCLED NUMBER TEN), ⓫ (NEGATIVE CIRCLED
+        // NUMBER ELEVEN) … ⓴ (TWENTY)
+        runs: &[(1, 0x2776, 10), (11, 0x24EB, 10)],
+    },
+    // DINGBAT CIRCLED SANS-SERIF DIGIT ONE
+    NumberingSequence {
+        // DINGBAT CIRCLED SANS-SERIF DIGIT ZERO
+        zero: Some('\u{1F10B}'),
+        // ➀ … ➉ (DINGBAT CIRCLED SANS-SERIF NUMBER TEN)
+        runs: &[(1, 0x2780, 10)],
+    },
+    // DINGBAT NEGATIVE CIRCLED SANS-SERIF DIGIT ONE
+    NumberingSequence {
+        // DINGBAT NEGATIVE CIRCLED SANS-SERIF DIGIT ZERO
+        zero: Some('\u{1F10C}'),
+        // ➊ … ➓ (DINGBAT NEGATIVE CIRCLED SANS-SERIF NUMBER TEN)
+        runs: &[(1, 0x278A, 10)],
+    },
+    // PARENTHESIZED DIGIT ONE
+    NumberingSequence {
+        zero: None,
+        // ⑴ … ⒇ (PARENTHESIZED NUMBER TWENTY)
+        runs: &[(1, 0x2474, 20)],
+    },
+    // DOUBLE CIRCLED DIGIT ONE
+    NumberingSequence {
+        zero: None,
+        // ⓵ … ⓾ (DOUBLE CIRCLED NUMBER TEN)
+        runs: &[(1, 0x24F5, 10)],
+    },
+    // PARENTHESIZED IDEOGRAPH ONE
+    NumberingSequence {
+        zero: None,
+        // ㈠ … ㈩ (PARENTHESIZED IDEOGRAPH TEN)
+        runs: &[(1, 0x3220, 10)],
+    },
+    // CIRCLED IDEOGRAPH ONE
+    NumberingSequence {
+        zero: None,
+        // ㊀ … ㊉ (CIRCLED IDEOGRAPH TEN)
+        runs: &[(1, 0x3280, 10)],
+    },
+    // AEGEAN NUMBER ONE
+    NumberingSequence {
+        zero: None,
+        // AEGEAN NUMBER ONE … NINE, AEGEAN NUMBER TEN
+        runs: &[(1, 0x10107, 10)],
+    },
+    // COPTIC EPACT DIGIT ONE
+    NumberingSequence {
+        zero: None,
+        // COPTIC EPACT DIGIT ONE … NINE, COPTIC EPACT NUMBER TEN
+        runs: &[(1, 0x102E1, 10)],
+    },
+    // RUMI DIGIT ONE
+    NumberingSequence {
+        zero: None,
+        // RUMI DIGIT ONE … NINE, RUMI NUMBER TEN
+        runs: &[(1, 0x10E60, 10)],
+    },
+    // BRAHMI NUMBER ONE
+    NumberingSequence {
+        zero: None,
+        // BRAHMI NUMBER ONE … NINE, BRAHMI NUMBER TEN
+        runs: &[(1, 0x11052, 10)],
+    },
+    // SINHALA ARCHAIC DIGIT ONE
+    NumberingSequence {
+        zero: None,
+        // SINHALA ARCHAIC DIGIT ONE … NINE, SINHALA ARCHAIC NUMBER TEN
+        runs: &[(1, 0x111E1, 10)],
+    },
+    // DIGIT ONE COMMA
+    NumberingSequence {
+        // DIGIT ZERO COMMA
+        zero: Some('\u{1F101}'),
+        // 🄂 … 🄊 (DIGIT NINE COMMA)
+        runs: &[(1, 0x1F102, 9)],
+    },
+    // COUNTING ROD UNIT DIGIT ONE
+    NumberingSequence {
+        zero: None,
+        // COUNTING ROD UNIT DIGIT ONE … NINE (the tens digits that follow
+        // are another sequence)
+        runs: &[(1, 0x1D360, 9)],
+    },
+    // MENDE KIKAKUI DIGIT ONE
+    NumberingSequence {
+        zero: None,
+        // MENDE KIKAKUI DIGIT ONE … NINE
+        runs: &[(1, 0x1E8C7, 9)],
+    },
+];
 
 /// The token `1`: the default (§12.3 "If there are no format tokens, then a
 /// format token of 1 is used to format all numbers") and the fallback.
@@ -282,7 +480,16 @@ impl FormatToken {
             "W" => FormatToken::Words(WordCase::Upper),
             "w" => FormatToken::Words(WordCase::Lower),
             "Ww" => FormatToken::Words(WordCase::Title),
-            other => FormatToken::Other(other.to_string()),
+            other => match chars.as_slice() {
+                [one] => SEQUENCES
+                    .iter()
+                    .find(|sequence| sequence.one() == *one)
+                    .map_or_else(
+                        || FormatToken::Other(other.to_string()),
+                        FormatToken::Sequence,
+                    ),
+                _ => FormatToken::Other(other.to_string()),
+            },
         }
     }
 
@@ -308,6 +515,11 @@ impl FormatToken {
             } else {
                 apply_case(&cardinal_words(*n), *case)
             }),
+            // Ordinal numbering is not supported for these: "the request is
+            // ignored and cardinal numbers are generated instead".
+            (FormatToken::Sequence(sequence), Numeral::Int(n)) => {
+                sequence.character(*n).map(String::from)
+            }
             _ => None,
         };
         // "Numbers that fall outside this range must be formatted using the
@@ -1030,13 +1242,24 @@ mod tests {
     /// by the given token, it must use a format token of 1."
     #[test]
     fn unsupported_tokens_fall_back_to_one() {
-        // CIRCLED DIGIT ONE is No (alphanumeric) but not Nd.
-        assert!(is_alphanumeric('\u{2460}'));
+        // SUPERSCRIPT ONE is No (alphanumeric) but not Nd, and no sequence.
+        assert!(is_alphanumeric('\u{B9}'));
         assert_eq!(
-            FormatToken::parse("\u{2460}"),
-            FormatToken::Other("\u{2460}".into())
+            FormatToken::parse("\u{B9}"),
+            FormatToken::Other("\u{B9}".into())
         );
-        assert_eq!(fmt("\u{2460}", &[3]), "3");
+        assert_eq!(fmt("\u{B9}", &[3]), "3");
+        // A sequence's character for zero, or for two, does not name it: the
+        // token "represents the number 1 (one)".
+        for token in ["\u{24EA}", "\u{2461}", "\u{1F101}", "\u{2460}\u{2460}"] {
+            assert_eq!(
+                FormatToken::parse(token),
+                FormatToken::Other(token.into()),
+                "{token}"
+            );
+            assert_eq!(fmt(token, &[3]), "3", "{token}");
+        }
+        // Greek stays unsupported (user decision), whatever letter-value says.
         assert_eq!(fmt("\u{3B1}", &[3]), "3");
         assert_eq!(fmt("\u{5D0}", &[3]), "3");
         assert_eq!(fmt("x", &[3]), "3");
@@ -1052,6 +1275,120 @@ mod tests {
                 width: 2
             }
         );
+    }
+
+    /// The seventeen sequences, each at the ends of its range, at zero, and
+    /// just outside, as the W3C catalog's `combinations_for_numbering` cases
+    /// expect them (`number-5001` … `number-5102`, `number-0819` … `0821`):
+    /// the sequence to its last encoded number, then the token `1` (§12.3:
+    /// "Numbers that fall outside this range must be formatted using the
+    /// format token 1"). Each row: the token, then the expected result for
+    /// 0, 1, 2, the last number of the range and the one after it.
+    #[test]
+    fn every_sequence_to_the_end_of_its_repertoire() {
+        let rows: [(&str, [&str; 5], u64); 17] = [
+            ("①", ["⓪", "①", "②", "㊿", "51"], 50),
+            ("⒈", ["🄀", "⒈", "⒉", "⒛", "21"], 20),
+            ("❶", ["⓿", "❶", "❷", "⓴", "21"], 20),
+            ("➀", ["🄋", "➀", "➁", "➉", "11"], 10),
+            ("➊", ["🄌", "➊", "➋", "➓", "11"], 10),
+            ("⑴", ["0", "⑴", "⑵", "⒇", "21"], 20),
+            ("⓵", ["0", "⓵", "⓶", "⓾", "11"], 10),
+            ("㈠", ["0", "㈠", "㈡", "㈩", "11"], 10),
+            ("㊀", ["0", "㊀", "㊁", "㊉", "11"], 10),
+            ("𐄇", ["0", "𐄇", "𐄈", "𐄐", "11"], 10),
+            ("𐋡", ["0", "𐋡", "𐋢", "𐋪", "11"], 10),
+            ("𐹠", ["0", "𐹠", "𐹡", "𐹩", "11"], 10),
+            ("𑁒", ["0", "𑁒", "𑁓", "𑁛", "11"], 10),
+            ("𑇡", ["0", "𑇡", "𑇢", "𑇪", "11"], 10),
+            ("🄂", ["🄁", "🄂", "🄃", "🄊", "10"], 9),
+            ("𝍠", ["0", "𝍠", "𝍡", "𝍨", "10"], 9),
+            ("𞣇", ["0", "𞣇", "𞣈", "𞣏", "10"], 9),
+        ];
+        for (token, expected, last) in rows {
+            let got: Vec<String> = [0, 1, 2, last, last + 1]
+                .iter()
+                .map(|&n| fmt(token, &[n]))
+                .collect();
+            assert_eq!(got, expected, "{token}");
+            assert!(
+                matches!(FormatToken::parse(token), FormatToken::Sequence(_)),
+                "{token}"
+            );
+        }
+        // Every sequence of the table has a row, by its token.
+        for sequence in &SEQUENCES {
+            let one = sequence.one().to_string();
+            let row = rows.iter().find(|(token, _, _)| *token == one);
+            assert_eq!(row.map(|r| r.2), Some(sequence.range().1), "{one}");
+        }
+        // The circled digits through their three blocks, as `number-5014`
+        // expects them.
+        let circled: Vec<u64> = (0..=50).collect();
+        assert_eq!(
+            fmt(" ①", &circled).replace('.', ""),
+            " ⓪①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳㉑㉒㉓㉔㉕㉖㉗㉘㉙㉚㉛㉜㉝㉞㉟㊱㊲㊳㊴㊵㊶㊷㊸㊹㊺㊻㊼㊽㊾㊿"
+        );
+        // ❿ is the dingbat ten, ⓫ the eleven of the other block.
+        assert_eq!(fmt("❶", &[9, 10, 11, 12]), "❾.❿.⓫.⓬");
+        assert_eq!(fmt("⑴", &[19, 20, 21]), "⒆.⒇.21");
+    }
+
+    /// Outside its range a sequence is the token `1` in full — decimal, with
+    /// grouping and ordinal — and inside it an ordinal request is ignored
+    /// (§12.3: "the request is ignored and cardinal numbers are generated
+    /// instead") and nothing is grouped (grouping is for "decimal numbering
+    /// sequences"); a number beyond `u64` is outside every range.
+    #[test]
+    fn a_sequence_outside_its_range_is_the_token_1() {
+        assert_eq!(with("①", 3, &ordinal()), "③");
+        assert_eq!(with("①", 51, &ordinal()), "51st");
+        assert_eq!(with("⑴", 0, &ordinal()), "0th");
+        assert_eq!(with("①", 12, &grouped(",", 1)), "⑫");
+        assert_eq!(with("①", 1234, &grouped(",", 3)), "1,234");
+        let big = Numeral::Big("123456789012345678901234567890".into());
+        assert_eq!(
+            NumberFormat::parse("➊").format(&[big], &Conversion::default()),
+            "123456789012345678901234567890"
+        );
+        assert_eq!(
+            NumberFormat::parse("➊").format(&[Numeral::NaN], &Conversion::default()),
+            "NaN"
+        );
+        // As a token among others, with separators.
+        assert_eq!(fmt("①-a", &[2, 3]), "②-c");
+        assert_eq!(fmt("(㈠)", &[1, 2, 11]), "(㈠.㈡.11)");
+    }
+
+    /// The table's characters are Unicode 15.1 — the version `regexml`, and so
+    /// [`is_alphanumeric`], implements — and of category `No`: alphanumeric
+    /// (a token on their own), not decimal digits (so never a `Decimal`
+    /// token). The runs follow on from one another, and each token names one
+    /// sequence.
+    #[test]
+    fn every_sequence_character_is_no_in_the_regex_unicode() {
+        let no = regexml::Regex::xpath(r"^\p{No}$", "").expect("compiles");
+        let mut tokens = Vec::new();
+        for sequence in &SEQUENCES {
+            let (low, high) = sequence.range();
+            assert_eq!(low, u64::from(sequence.zero.is_none()));
+            let mut next = 1;
+            for &(first, _, length) in sequence.runs {
+                assert_eq!(first, next, "{:?}", sequence.one());
+                next = first + length;
+            }
+            for n in low..=high {
+                let c = sequence.character(n).expect("in range");
+                assert!(no.is_match(c.encode_utf8(&mut [0; 4])), "{:X}", c as u32);
+                assert!(is_alphanumeric(c), "{:X}", c as u32);
+                assert_eq!(decimal_digit(c), None, "{:X}", c as u32);
+            }
+            assert_eq!(sequence.character(high + 1), None);
+            tokens.push(sequence.one());
+        }
+        tokens.sort_unstable();
+        tokens.dedup();
+        assert_eq!(tokens.len(), SEQUENCES.len());
     }
 
     #[test]

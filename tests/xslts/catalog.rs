@@ -48,6 +48,11 @@ pub struct Dependency {
     pub value: String,
     /// `satisfied="false"` means the test requires the dependency to be *absent*.
     pub satisfied: bool,
+    /// The `range` attribute of `combinations_for_numbering` (`"0 to 20"`, `"unbounded"`): the
+    /// numbers the processor must format with the sequence (`admin/catalog-schema.xsd`: "The range
+    /// attribute can be used to indicate processor support for the given format. The default is
+    /// unbounded."). `None` when absent; no other dependency has one.
+    pub range: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -380,6 +385,7 @@ fn parse_dependencies(n: Node) -> Vec<Dependency> {
                 kind: c.tag_name().name().to_string(),
                 value: c.attribute("value").unwrap_or("").to_string(),
                 satisfied: attr_bool(c, "satisfied").unwrap_or(true),
+                range: c.attribute("range").map(str::to_string),
             });
         }
     }

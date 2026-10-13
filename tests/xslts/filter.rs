@@ -16,6 +16,26 @@ pub struct Policy {
     pub strict_recoverable: bool,
     /// `--all`: run cases on the exclusion list too.
     pub run_excluded: bool,
+    /// Asks the processor whether it formats every number of a request with the numbering
+    /// sequence of the request's token — the `combinations_for_numbering` dependency
+    /// ([`numbering_supported`]). The driver passes `engine::numbering_probe`, which compiles and
+    /// runs a probe stylesheet through the public API: what the processor supports is never a
+    /// second table here.
+    pub numbering: fn(&NumberingRequest) -> Result<(), String>,
+}
+
+/// One `combinations_for_numbering` question for the processor: does
+/// `<xsl:number value="n" format="{token}" letter-value="{letter_value}"/>` format every `n` of
+/// `numbers` with the sequence of `token`, rather than fall back to the token `1` (XSLT 2.0
+/// §12.3: "If an implementation does not support a numbering sequence represented by the given
+/// token, it must use a format token of 1", and "Numbers that fall outside this range must be
+/// formatted using the format token 1")?
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NumberingRequest {
+    pub token: char,
+    /// `alphabetic` or `traditional`, from a value like `GREEK SMALL LETTER ALPHA (TRADITIONAL)`.
+    pub letter_value: Option<String>,
+    pub numbers: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +241,24 @@ pub fn applicability(set: &TestSet, case: &TestCase, policy: &Policy) -> Applica
         if d.kind == "spec" {
             continue;
         }
+        if d.kind == "combinations_for_numbering" {
+            let range = d.range.as_deref().unwrap_or("unbounded");
+            match (numbering_supported(d, policy), d.satisfied) {
+                (Ok(()), false) => {
+                    return Applicability::Unsatisfied(format!(
+                        "{}={} ({range}) is supported but the test needs its absence",
+                        d.kind, d.value
+                    ))
+                }
+                (Err(why), true) => {
+                    return Applicability::Unsatisfied(format!(
+                        "{}={} ({range}) not supported: {why}",
+                        d.kind, d.value
+                    ))
+                }
+                _ => continue,
+            }
+        }
         match dependency_supported(d, policy) {
             Some(true) if !d.satisfied => {
                 return Applicability::Unsatisfied(format!(
@@ -285,10 +323,10 @@ fn dependency_supported(d: &Dependency, policy: &Policy) -> Option<bool> {
         },
         // xs:decimal is rust_decimal (28 significant digits).
         "maximum_number_of_decimal_digits" => v.parse::<u32>().map(|n| n <= 28).unwrap_or(false),
-        // Unicode digit families for xsl:number (M3 decides), CLDR ordinals, streaming, packages,
-        // extension functions, non-codepoint collations, HTML versions: not supported now.
-        "combinations_for_numbering"
-        | "ordinal_scheme_name"
+        // `combinations_for_numbering` is asked of the processor: `numbering_supported`.
+        // CLDR ordinals, streaming, packages, extension functions, non-codepoint collations, HTML
+        // versions: not supported now.
+        "ordinal_scheme_name"
         | "sweep_and_posture"
         | "detect_accumulator_cycles"
         | "enable_assertions"
@@ -302,6 +340,95 @@ fn dependency_supported(d: &Dependency, policy: &Policy) -> Option<bool> {
         | "default_html_version" => false,
         _ => return None,
     })
+}
+
+/// The characters the catalog's `combinations_for_numbering` values name: the enumeration of
+/// `admin/catalog-schema.xsd` ("The current list uses the Unicode names of the digit one values of
+/// non-digit digits in the Number, Other category"; the Greek pair adds a letter-value in
+/// parentheses). The harness has no Unicode name database, so this transcribes the names — the
+/// catalog's vocabulary, not what the processor supports, which `Policy::numbering` asks the
+/// processor. A value missing here is reported as not supported, naming the value.
+pub const NUMBERING_NAMES: &[(&str, char)] = &[
+    ("CIRCLED DIGIT ONE", '\u{2460}'),
+    ("DOUBLE CIRCLED DIGIT ONE", '\u{24F5}'),
+    ("DIGIT ONE FULL STOP", '\u{2488}'),
+    ("PARENTHESIZED DIGIT ONE", '\u{2474}'),
+    ("SUBSCRIPT ONE", '\u{2081}'),
+    ("SUPERSCRIPT ONE", '\u{B9}'),
+    ("TIBETAN DIGIT HALF ONE", '\u{F2A}'),
+    ("ETHIOPIC DIGIT ONE", '\u{1369}'),
+    ("DINGBAT NEGATIVE CIRCLED DIGIT ONE", '\u{2776}'),
+    ("DINGBAT CIRCLED SANS-SERIF DIGIT ONE", '\u{2780}'),
+    ("DINGBAT NEGATIVE CIRCLED SANS-SERIF DIGIT ONE", '\u{278A}'),
+    ("PARENTHESIZED IDEOGRAPH ONE", '\u{3220}'),
+    ("CIRCLED IDEOGRAPH ONE", '\u{3280}'),
+    ("AEGEAN NUMBER ONE", '\u{10107}'),
+    ("COPTIC EPACT DIGIT ONE", '\u{102E1}'),
+    ("OLD ITALIC NUMERAL ONE", '\u{10320}'),
+    ("RUMI DIGIT ONE", '\u{10E60}'),
+    ("BRAHMI NUMBER ONE", '\u{11052}'),
+    ("SINHALA ARCHAIC DIGIT ONE", '\u{111E1}'),
+    ("MENDE KIKAKUI DIGIT ONE", '\u{1E8C7}'),
+    ("COUNTING ROD UNIT DIGIT ONE", '\u{1D360}'),
+    ("DIGIT ONE COMMA", '\u{1F102}'),
+    ("GREEK SMALL LETTER ALPHA", '\u{3B1}'),
+];
+
+/// The request a `combinations_for_numbering` dependency makes of the processor (its value and
+/// its `range`), or why it cannot be made.
+pub fn numbering_request(d: &Dependency) -> Result<NumberingRequest, String> {
+    let (name, letter_value) = match d.value.strip_suffix(')').and_then(|v| v.split_once(" (")) {
+        Some((name, qualifier)) => (name, Some(qualifier.to_ascii_lowercase())),
+        None => (d.value.as_str(), None),
+    };
+    let token = NUMBERING_NAMES
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|&(_, token)| token)
+        .ok_or_else(|| format!("the harness knows no character named {name:?}"))?;
+    Ok(NumberingRequest {
+        token,
+        letter_value,
+        numbers: range_numbers(d.range.as_deref())?,
+    })
+}
+
+/// The numbers a `range` asks to be formatted. `"a to b"`: each of them (the schema's ranges run
+/// to 1000 at most; a longer one is sampled — its ends and a thousand steps between). An
+/// `unbounded` range (also the schema's default, the attribute absent) cannot be checked by any
+/// finite probe: 1 to 1000 (the least upper bound §12.3 allows for the sequences it describes:
+/// "any upper bound imposed by the implementation must not be less than 1000") and 2^32 - 1 —
+/// enough to reject every sequence with a natural end.
+pub fn range_numbers(range: Option<&str>) -> Result<Vec<u64>, String> {
+    let words: Vec<&str> = xslt2::whitespace::tokens(range.unwrap_or("unbounded")).collect();
+    let (low, high) = match words.as_slice() {
+        ["unbounded"] => return Ok((1..=1000).chain([u64::from(u32::MAX)]).collect()),
+        [low, "to", high] => match (low.parse::<u64>(), high.parse::<u64>()) {
+            (Ok(low), Ok(high)) if low <= high => (low, high),
+            _ => {
+                return Err(format!(
+                    "the range {range:?} has no bounds a to b with a <= b"
+                ))
+            }
+        },
+        _ => {
+            return Err(format!(
+                "the range {range:?} is not \"a to b\" or \"unbounded\""
+            ))
+        }
+    };
+    let step = ((high - low) / 1000).max(1);
+    let mut numbers: Vec<u64> = (low..=high).step_by(step as usize).collect();
+    if numbers.last() != Some(&high) {
+        numbers.push(high);
+    }
+    Ok(numbers)
+}
+
+/// Whether the processor formats the numbers of a `combinations_for_numbering` dependency with its
+/// sequence (`Err`: why not, or why the question cannot be asked).
+pub fn numbering_supported(d: &Dependency, policy: &Policy) -> Result<(), String> {
+    (policy.numbering)(&numbering_request(d)?)
 }
 
 /// Execution profile of a runnable case, for per-profile reporting.
