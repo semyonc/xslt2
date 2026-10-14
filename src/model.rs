@@ -995,6 +995,18 @@ impl ModeTable {
     }
 }
 
+/// The decimal formats of a stylesheet (§16.4.1): "All the
+/// `xsl:decimal-format` declarations in a stylesheet that share the same name
+/// are grouped into a named decimal format; those that have no name are grouped
+/// into a single unnamed decimal format", and "If a stylesheet does not contain
+/// a declaration of the unnamed decimal format, a declaration equivalent to an
+/// `xsl:decimal-format` element with no attributes is implied."
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DecimalFormats {
+    pub(crate) unnamed: crate::format_number::DecimalFormat,
+    pub(crate) named: HashMap<QName, crate::format_number::DecimalFormat>,
+}
+
 /// The result of compiling a stylesheet: immutable, reusable across runs.
 pub struct CompiledStylesheet<'a> {
     pub(crate) names: &'a NameTable,
@@ -1017,6 +1029,9 @@ pub struct CompiledStylesheet<'a> {
     pub(crate) named_outputs: HashMap<QName, OutputDefinition>,
     /// Every `xsl:character-map`, expanded (§20.1), by name.
     pub(crate) character_maps: HashMap<QName, crate::serialize::CharacterMap>,
+    /// The decimal formats (§16.4.1), each merged attribute by attribute: the
+    /// unnamed one (implied when no declaration names none) and the named ones.
+    pub(crate) decimal_formats: DecimalFormats,
     /// Whether the principal module's `version` is 1.0, which makes `xml`
     /// rather than `xhtml` the default method of an XHTML result (§20).
     pub(crate) principal_version_1_0: bool,
@@ -1144,6 +1159,18 @@ impl<'a> CompiledStylesheet<'a> {
 
     pub fn key(&self, id: KeyId) -> &Key {
         &self.keys[id.0 as usize]
+    }
+
+    /// The decimal format `format-number` uses (§16.4): the unnamed one for
+    /// `None`, otherwise the one with that expanded name, if declared.
+    pub(crate) fn decimal_format(
+        &self,
+        name: Option<&QName>,
+    ) -> Option<&crate::format_number::DecimalFormat> {
+        match name {
+            None => Some(&self.decimal_formats.unnamed),
+            Some(name) => self.decimal_formats.named.get(name),
+        }
     }
 
     /// The key whose declarations carry the expanded name `name`.

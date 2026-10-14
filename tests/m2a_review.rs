@@ -76,9 +76,12 @@ const ONE_ITEM: &str = r#"<r><item n="zz"/></r>"#;
 
 // ═══ Finding 1 — recovery may not swallow a processor failure ═════════════
 
-/// The reviewer's reproduction. `format-number()` is in the catalog as an
-/// `XSLT2-NOTIMPL` stub (M2a, phase 3), which is what made this reachable: a
-/// stylesheet calling it used to fail to compile.
+/// The reviewer's reproduction, with today's stand-in. `format-number()` was in
+/// the catalog as an `XSLT2-NOTIMPL` stub (M2a, phase 3), which is what made
+/// this reachable: a stylesheet calling it used to fail to compile. M3d
+/// implemented it (`tests/m3d_formatting.rs`), so the missing feature is now an
+/// extension instruction without `xsl:fallback` (M3e) in the body of a
+/// stylesheet function the predicate calls.
 ///
 /// §5.5.4 licenses recovery for "any dynamic error or type error"; a missing
 /// implementation is neither, so the run must fail — in **both** modes — and
@@ -87,10 +90,10 @@ const ONE_ITEM: &str = r#"<r><item n="zz"/></r>"#;
 #[test]
 fn a_not_implemented_function_in_a_pattern_is_never_recovered_from() {
     for strict in [false, true] {
-        let error = match run(&two_rules("format-number(@n,'0') = '1'"), ONE_ITEM, strict) {
+        let error = match run(&rules_calling_a_missing_feature(), ONE_ITEM, strict) {
             Err(e) => e,
             Ok(out) => panic!(
-                "strict={strict}: format-number() in a pattern must fail the run, \
+                "strict={strict}: a missing feature in a pattern must fail the run, \
                  but it produced {out} — the error was swallowed and a rule chosen"
             ),
         };
@@ -99,7 +102,7 @@ fn a_not_implemented_function_in_a_pattern_is_never_recovered_from() {
             "strict={strict}: expected XSLT2-NOTIMPL, got {error}"
         );
         assert!(
-            error.to_string().contains("format-number"),
+            error.to_string().contains("ext:instruction"),
             "strict={strict}: the message should name the feature: {error}"
         );
     }
@@ -110,14 +113,16 @@ fn a_not_implemented_function_in_a_pattern_is_never_recovered_from() {
 /// (`key()` was an `XSLT2-NOTIMPL` stub from M1 until M2f implemented it, and
 /// was the third case here; `current-group() = 1` was the first until M2g,
 /// which made it the static XTSE1060 — `tests/m2g_grouping.rs`; `regex-group(1)`
-/// was the second until M2h implemented it — `tests/m2h_regex.rs`. The only
-/// missing features an expression can still reach are the other `format-*`
-/// stubs, M3d's, so `format-time()` stands in for them.)
+/// was the second until M2h implemented it — `tests/m2h_regex.rs`; the
+/// `format-*` stubs until M3d — `tests/m3d_formatting.rs`. No function an
+/// expression can call is missing any more, so the feature is reached through a
+/// stylesheet function, called on its own and inside a larger expression.)
 #[test]
 fn any_missing_feature_in_a_pattern_predicate_propagates() {
-    for predicate in ["format-time(xs:time('00:00:00'), '[H]') = '0'"] {
+    for predicate in ["m:missing(.)", "not(m:missing(.)) or true()"] {
+        let body = rules_calling_a_missing_feature().replace("m:missing(.)", predicate);
         for strict in [false, true] {
-            let error = match run(&two_rules(predicate), ONE_ITEM, strict) {
+            let error = match run(&body, ONE_ITEM, strict) {
                 Err(e) => e,
                 Ok(out) => panic!("{predicate} (strict={strict}) produced {out}"),
             };
@@ -127,6 +132,21 @@ fn any_missing_feature_in_a_pattern_predicate_propagates() {
             );
         }
     }
+}
+
+/// [`two_rules`] whose predicate calls `m:missing(.)`, a stylesheet function
+/// that evaluates an extension instruction this processor does not implement
+/// and that has no `xsl:fallback` (`XSLT2-NOTIMPL`, M3e).
+fn rules_calling_a_missing_feature() -> String {
+    r#"<xsl:template match="/"><out><xsl:apply-templates select="r/item"/></out></xsl:template>
+       <xsl:template match="item[m:missing(.)]" xmlns:m="urn:m">PREDICATE</xsl:template>
+       <xsl:template match="item">FALLBACK</xsl:template>
+       <xsl:function name="m:missing" xmlns:m="urn:m">
+         <xsl:param name="n"/>
+         <ext:instruction xmlns:ext="urn:ext" xsl:extension-element-prefixes="ext"/>
+         <xsl:sequence select="true()"/>
+       </xsl:function>"#
+        .to_string()
 }
 
 /// The other half of §5.5.4, which must **not** be lost: a genuine dynamic

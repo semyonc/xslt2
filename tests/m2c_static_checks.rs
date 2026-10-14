@@ -1315,19 +1315,19 @@ fn function_available_in_use_when_answers_for_the_use_when_scope() {
 fn function_available_covers_every_arity_a_function_has() {
     // §18.1.2 asks whether a function of that name exists at **any** arity; the
     // helper used to scan 0 to 4 only, so the five-argument §16.5 signatures
-    // answered false. (`format-date` is a registered stub, so it is not
-    // *available* — `fn:round-half-to-even` and `fn:format-number` are the ones
-    // with high arities that do exist here.)
+    // answered false. (`format-date` was a registered stub, not *available*,
+    // until M3d implemented it; its five-argument form is the high arity.)
     let answers = run(&sheet(
         r#"<xsl:template match="doc"><out>
              <xsl:value-of select="function-available('round-half-to-even')"/>
              <xsl:value-of select="function-available('substring')"/>
              <xsl:value-of select="function-available('concat')"/>
              <xsl:value-of select="function-available('no-such-function')"/>
+             <xsl:value-of select="function-available('format-date', 5)"/>
            </out></xsl:template>"#,
     ))
     .unwrap();
-    assert_eq!(answers, "<out>truetruetruefalse</out>");
+    assert_eq!(answers, "<out>truetruetruefalsetrue</out>");
 }
 
 // ═══ The fence: an element without an implementation is still not a static error
@@ -1341,7 +1341,9 @@ fn an_unimplemented_element_in_a_legal_position_is_never_a_static_error() {
     // placed one goes on being classified as a missing feature.
     for declaration in [
         r#"<xsl:key name="k" match="doc" use="."/>"#,
-        r#"<xsl:decimal-format name="d" decimal-separator=","/>"#,
+        // (`decimal-separator=","` alone was the row until M3d: with the default
+        // `grouping-separator` that is XTSE1300, §16.4.1.)
+        r#"<xsl:decimal-format name="d" decimal-separator="," grouping-separator="."/>"#,
         r#"<xsl:character-map name="m"><xsl:output-character character="a" string="b"/></xsl:character-map>"#,
         r#"<xsl:function name="f:g" xmlns:f="urn:f"><xsl:param name="p"/><xsl:sequence select="$p"/></xsl:function>"#,
     ] {

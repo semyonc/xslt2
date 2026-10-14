@@ -5,12 +5,13 @@
 //! dynamic context. It takes the integers of a place marker and the effective
 //! values of `format`, `lang`, `ordinal`, `letter-value`, `grouping-separator`
 //! and `grouping-size`, and returns the string. `xsl:number` (§12, M3c) is its
-//! first caller; `format-date()` and its siblings (§16.5.1, M3d) are meant to be
-//! the second — "the first presentation modifier … may be any format token
+//! first caller; `format-date()` and its siblings (§16.5.1, M3d) are the
+//! second — "the first presentation modifier … may be any format token
 //! permitted in the format string of the `xsl:number` instruction", and the
 //! `t` / `o` modifiers ask for `letter-value="traditional"` / ordinal numbering
 //! — through [`FormatToken::parse`] (an unsupported token is
-//! [`FormatToken::Other`]) and [`FormatToken::format`].
+//! [`FormatToken::Other`]) and [`FormatToken::format_in_width`], which adds
+//! §16.5.1's minimum and maximum widths.
 //!
 //! # What this implementation supports (the implementation-defined parts)
 //!
@@ -528,6 +529,78 @@ impl FormatToken {
     }
 }
 
+impl FormatToken {
+    /// Formats `n` for a variable marker of `format-date()` (§16.5.1), whose
+    /// width modifier this token's own width does not decide: the caller
+    /// passes the effective minimum and maximum width.
+    ///
+    /// - A decimal token pads with zero digits of its family to `min` ("For
+    ///   decimal representations of numbers, this should be done by
+    ///   prepending zero digits from the appropriate set of digit
+    ///   characters"). When `drop_high_order` is set (the year), a number wider
+    ///   than `max` keeps only its last `max` digits: "In the case of the year
+    ///   component, setting max-width requests omission of high-order digits
+    ///   from the year, for example, if max-width is set to 2 then the year
+    ///   2003 will be output as 03." Any other number is left wider than `max`:
+    ///   "If no mechanism is available for fitting the value within the
+    ///   specified maximum width … then the value should be output in its full
+    ///   representation."
+    /// - Every other token (and the fallback to `1` for a number out of its
+    ///   range) is padded with spaces to `min`: "In other cases, it should be
+    ///   done by appending spaces."
+    ///
+    /// `in_characters` says what `min` and `max` count, which matters only for
+    /// an ordinal decimal number (`3rd`):
+    ///
+    /// - `true`, a width modifier: characters — "min-width is either an
+    ///   unsigned integer indicating the minimum number of characters to be
+    ///   output", and padding applies "If the full representation of the value
+    ///   is shorter than the specified minimum width" — so the suffix counts:
+    ///   `[D1o,2]` and `[D1o,3-3]` are `3rd`, `[D1o,4]` is `03rd`, and a year
+    ///   keeps fewer digits to leave room for it (`[Y1o,4-4]` is `03rd` for
+    ///   2003). When not even one digit fits beside the suffix (`[Y1o,2-2]`),
+    ///   no mechanism fits the value, and it is written in full;
+    /// - `false`, the token's own width (`[D01o]`, no width modifier): digits,
+    ///   as §12.3 reads the token for `xsl:number` ("each number is at least as
+    ///   long as the format token") — `03rd`.
+    ///
+    /// `t` (`letter-value="traditional"`) needs nothing here: as for
+    /// `xsl:number`, in English the token alone names the sequence.
+    pub(crate) fn format_in_width(
+        &self,
+        n: u64,
+        conversion: &Conversion,
+        min: usize,
+        max: Option<usize>,
+        drop_high_order: bool,
+        in_characters: bool,
+    ) -> String {
+        if let FormatToken::Decimal { zero, .. } = self {
+            let ordinal = conversion.ordinal_requested();
+            // What the suffix takes of a width in characters.
+            let suffix = if ordinal && in_characters {
+                ORDINAL_SUFFIX_LEN
+            } else {
+                0
+            };
+            let min_digits = min.saturating_sub(suffix);
+            let ascii = n.to_string();
+            let (n, width) = match max.map(|max| max.saturating_sub(suffix)) {
+                Some(room) if drop_high_order && room > 0 && ascii.len() > room => {
+                    let kept = &ascii[ascii.len() - room..];
+                    (kept.parse().unwrap_or(0), room.max(min_digits))
+                }
+                _ => (n, min_digits),
+            };
+            return decimal(&Numeral::Int(n), *zero, width, None, ordinal);
+        }
+        let mut out = self.format(&Numeral::Int(n), conversion);
+        let len = out.chars().count();
+        out.extend(std::iter::repeat_n(' ', min.saturating_sub(len)));
+        out
+    }
+}
+
 /// A decimal representation in the digit family whose zero is `zero`, padded
 /// with that zero to `width` digits, grouped, and with the English ordinal
 /// suffix if asked for.
@@ -577,6 +650,9 @@ fn decimal(
     }
     out
 }
+
+/// The length of every English ordinal suffix ([`english_ordinal_suffix`]).
+const ORDINAL_SUFFIX_LEN: usize = 2;
 
 /// `st`, `nd`, `rd` or `th` for the number whose ASCII digits are `ascii`:
 /// `th` for anything ending in 11, 12 or 13.
@@ -957,6 +1033,37 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    /// `format_in_width` (§16.5.1): a width in characters counts an ordinal's
+    /// suffix, a width in digits does not; the year leaves room for the suffix
+    /// and keeps every digit when none fits; cardinals are the same either way.
+    #[test]
+    fn widths_in_characters_count_the_ordinal_suffix() {
+        let one = FormatToken::parse("1");
+        let w = |n: u64, conversion: &Conversion, min, max, year, chars| {
+            one.format_in_width(n, conversion, min, max, year, chars)
+        };
+        let o = ordinal();
+        assert_eq!(w(3, &o, 2, None, false, true), "3rd");
+        assert_eq!(w(3, &o, 3, Some(3), false, true), "3rd");
+        assert_eq!(w(3, &o, 4, None, false, true), "03rd");
+        assert_eq!(w(3, &o, 2, Some(2), false, false), "03rd");
+        assert_eq!(w(2003, &o, 4, Some(4), true, true), "03rd");
+        assert_eq!(w(2003, &o, 2, Some(2), true, true), "2003rd");
+        assert_eq!(w(2003, &o, 4, Some(4), true, false), "2003rd");
+        assert_eq!(w(2011, &o, 1, Some(4), true, true), "11th");
+        let c = Conversion::default();
+        for chars in [false, true] {
+            assert_eq!(w(3, &c, 2, None, false, chars), "03");
+            assert_eq!(w(2003, &c, 1, Some(2), true, chars), "03");
+            assert_eq!(w(123, &c, 1, Some(2), false, chars), "123");
+        }
+        // Not a decimal token: spaces, in characters.
+        assert_eq!(
+            FormatToken::parse("w").format_in_width(3, &o, 7, None, false, true),
+            "third  "
+        );
     }
 
     /// §12.3 example: "Given the sequence of numbers 5, 13, 7 and the format

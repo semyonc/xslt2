@@ -164,8 +164,11 @@ pub struct XsltFunctions {
     catalog: BackwardsCompatibleCatalog,
     by_handle: HashMap<FunctionHandle, XsltFn>,
     names: HashMap<(&'static str, usize), XsltFn>,
-    /// The handles registered by [`Self::add_stub`]: in the catalog so that a
-    /// call compiles and reaches the evaluator, but **not** available (§18.1.2).
+    /// The handles that are in the catalog, so that a call compiles and
+    /// reaches the evaluator, but are **not** available (§18.1.2): §3.8's
+    /// fallback error function. (Until M3d implemented them, the §16.4 and
+    /// §16.5 functions were registered here too, so that a call to one was a
+    /// missing feature rather than XPST0017.)
     stubs: HashSet<FunctionHandle>,
     /// The collations every expression of a stylesheet compiled against this
     /// set can name (§13.1.3, DESIGN §9.5). It lives here because this is the
@@ -401,13 +404,9 @@ impl XsltFunctions {
             string(),
         );
 
-        // ── §16.4, §16.5: registered, not implemented ────────────────────
+        // ── §16.4 format-number, §16.5 the date formatting functions ─────
         //
-        // M3d owns these four. They are in the catalog with their spec
-        // signatures so that a stylesheet calling one *compiles* and fails at
-        // evaluation with `XSLT2-NOTIMPL`; without them the call fails to bind
-        // with XPST0017, which is indistinguishable from a wrong answer.
-        // `function-available()` still says false — see `add_stub`.
+        // Implemented by `runtime/format.rs` (M3d).
 
         // §16.4:
         //   format-number($value as numeric?, $picture as xs:string)
@@ -417,14 +416,18 @@ impl XsltFunctions {
         //
         // `numeric?` is a union type the upstream signature model spells
         // `xs:double?`, exactly as it does for `fn:abs` and `fn:round`.
+        //
+        // The evaluator converts the value itself (`runtime/format.rs`): the
+        // upstream engine does not consult declared parameter types outside
+        // XPath 1.0 compatibility mode, so an `xs:decimal` arrives as one.
         let numeric_opt = SequenceType::double_optional;
-        this.add_stub(
+        this.add(
             XsltFn::FormatNumber,
             "format-number",
             vec![numeric_opt(), string()],
             string(),
         );
-        this.add_stub(
+        this.add(
             XsltFn::FormatNumber,
             "format-number",
             vec![numeric_opt(), string(), string()],
@@ -457,8 +460,8 @@ impl XsltFunctions {
                 SequenceType::optional(ItemType::AtomicType(xsd_schema::types::XmlTypeCode::Time)),
             ),
         ] {
-            this.add_stub(which, local, vec![value.clone(), string()], string_opt());
-            this.add_stub(
+            this.add(which, local, vec![value.clone(), string()], string_opt());
+            this.add(
                 which,
                 local,
                 vec![value, string(), string_opt(), string_opt(), string_opt()],
@@ -472,8 +475,8 @@ impl XsltFunctions {
         // (`xpath::functions::special::error`) but deliberately leaves it out
         // of its built-in catalog, so a host that wants the function registers
         // it. It needs no running transformation, and the evaluator calls the
-        // engine's function straight through. Registered with `add`, not
-        // `add_stub`: it works, so `function-available('error')` is true.
+        // engine's function straight through. It is no stub, so
+        // `function-available('error')` is true.
         //
         // One signature per arity, with the types F&O gives that arity: the
         // one-argument form takes `xs:QName`, with no occurrence indicator, and
@@ -544,27 +547,6 @@ impl XsltFunctions {
         handle
     }
 
-    /// Registers a §16 function this processor does **not** implement.
-    ///
-    /// The signature is the spec's, so a call binds and type-checks as it
-    /// would against a complete processor, and the evaluator turns it into
-    /// `XSLT2-NOTIMPL` naming the milestone that owns it. The handle is
-    /// remembered as a stub so that [`Self::is_available`] — and with it
-    /// `function-available()` (§18.1.2: "returns true if and only if there is
-    /// a function available with the given name and arity") — keeps answering
-    /// **false**, and so that a `use-when` expression cannot come to depend on
-    /// a function that does not work.
-    fn add_stub(
-        &mut self,
-        which: XsltFn,
-        local: &'static str,
-        params: Vec<SequenceType>,
-        result: SequenceType,
-    ) {
-        let handle = self.add(which, local, params, result);
-        self.stubs.insert(handle);
-    }
-
     /// Pass this to `XPathContext::with_function_catalog`.
     pub fn catalog(&self) -> &dyn FunctionCatalog {
         &self.catalog.set
@@ -630,9 +612,9 @@ impl XsltFunctions {
     /// constructor functions the XPath binder resolves outside it (see
     /// [`is_constructor_function`]).
     ///
-    /// A function registered by `add_stub` is in the catalog but is not
-    /// *available*: it exists only so that a call to it is classified as a
-    /// missing feature rather than as an unknown function.
+    /// A stub (see `stubs`) is in the catalog but is not *available*: it
+    /// exists only so that a call to it is classified as something other than
+    /// an unknown function.
     pub fn is_available(&self, namespace: &str, local: &str, arity: usize) -> bool {
         if is_constructor_function(namespace, local, arity) {
             return true;
@@ -1216,6 +1198,12 @@ pub fn expand_name_argument<'n>(
         // there is no namespace declaration in scope for the prefix of the
         // QName".
         XsltFn::Key => (Unprefixed::NoNamespace, codes::XTDE1260),
+        // §16.4: "The value of $decimal-format-name must be a lexical QName,
+        // which is expanded as described in 5.1 Qualified Names", and "[ERR
+        // XTDE1280] It is a non-recoverable dynamic error if the name specified
+        // as the $decimal-format-name argument is not a valid QName, or if its
+        // prefix has not been declared in an in-scope namespace declaration".
+        XsltFn::FormatNumber => (Unprefixed::NoNamespace, codes::XTDE1280),
         other => {
             return Err(XsltError::internal(format!(
                 "{}() does not take a name argument",

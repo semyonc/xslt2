@@ -19,6 +19,7 @@ mod dispatch;
 mod documents;
 mod eval;
 mod expressions;
+mod format;
 mod functions;
 mod grouping;
 mod keys;

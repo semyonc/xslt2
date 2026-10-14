@@ -138,6 +138,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         }
         self.check_attribute_set_references()?;
         self.finish_output_definitions()?;
+        self.decimal_formats = self.finish_decimal_formats()?;
         self.check_result_document_references()?;
         Ok(())
     }
@@ -280,6 +281,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             }
             "attribute-set" => self.attribute_set(nav, module_id, ctx, precedence),
             "key" => self.key_declaration(nav, module_id, ctx),
+            "decimal-format" => self.decimal_format_declaration(nav, ctx, precedence, module),
             // Collected by `collect_aliases` before this pass; only the
             // attribute check above still applies here.
             "namespace-alias" => Ok(()),
@@ -883,7 +885,6 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
 /// yet, and the roadmap sub-milestone (§4) that owns each.
 fn unimplemented_declaration(local: &str) -> Option<&'static str> {
     Some(match local {
-        "decimal-format" => "M3d",
         "import-schema" => "M4",
         _ => return None,
     })

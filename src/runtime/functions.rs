@@ -338,9 +338,7 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                 };
                 Ok(XPathValue::string(group))
             }
-            // §16.4, §16.5. These are in the catalog as stubs only, so that a
-            // call to one is reported as a missing feature rather than as an
-            // unknown function (XPST0017) at compile time.
+            // §16.4 and §16.5: `runtime/format.rs`.
             // F&O's `fn:error`: the engine ships the implementation but does
             // not register it, so the catalog registers it here and the call
             // goes straight through. It never returns a value.
@@ -351,13 +349,10 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
             XsltFn::Error => {
                 xsd_schema::xpath::functions::special::error(ctx, args).map_err(XsltError::from)
             }
-            XsltFn::FormatNumber
-            | XsltFn::FormatDateTime
-            | XsltFn::FormatDate
-            | XsltFn::FormatTime => Err(XsltError::not_implemented(
-                format!("{}()", which.name()),
-                "M3d",
-            )),
+            XsltFn::FormatNumber => self.format_number(args),
+            XsltFn::FormatDateTime | XsltFn::FormatDate | XsltFn::FormatTime => {
+                self.format_date_time(which, args)
+            }
             // §3.8: a call bound to the fallback error function — reached only
             // with backwards-compatible behaviour — raises XTDE1425 when, and
             // only when, it is evaluated. §18.1.2: "When backwards compatible
@@ -511,7 +506,7 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
 
     /// Whether the expression being evaluated has backwards-compatible
     /// behaviour, i.e. XPath 1.0 compatibility mode (§3.8).
-    fn xpath1_compatible(&self) -> bool {
+    pub(super) fn xpath1_compatible(&self) -> bool {
         self.sc.compat == CompatMode::BackwardsCompatible
     }
 
@@ -531,6 +526,20 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
     /// is xs:string or xs:string?, then the value V is effectively replaced by
     /// fn:string(V)."
     fn key_name_argument(&self, value: XPathValue<Nav<'t>>) -> Result<String, XsltError> {
+        self.string_argument(
+            value,
+            "the first argument of key() ($key-name as xs:string)",
+        )
+    }
+
+    /// One argument whose declared type is `xs:string`, converted as
+    /// [`Self::key_name_argument`] describes; `what` names the parameter in the
+    /// XPTY0004 message.
+    pub(super) fn string_argument(
+        &self,
+        value: XPathValue<Nav<'t>>,
+        what: &str,
+    ) -> Result<String, XsltError> {
         if self.xpath1_compatible() {
             return Ok(match value.first() {
                 None => String::new(),
@@ -550,11 +559,7 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
             [atom] if converts_to_string(atom) => Ok(atom.to_string_value()),
             _ => Err(XsltError::new(
                 "XPTY0004",
-                format!(
-                    "the first argument of key() ($key-name as xs:string) must be one string, \
-                     not {}",
-                    describe_atoms(&atoms)
-                ),
+                format!("{what} must be one string, not {}", describe_atoms(&atoms)),
             )),
         }
     }
@@ -618,7 +623,7 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
     /// The **same** type the `use-when` evaluator builds, and the expansion goes
     /// through the **same** [`expand_name_argument`], so a name cannot answer
     /// one way in `use-when` and another way here.
-    fn name_scope(&self) -> NameScope<'_> {
+    pub(super) fn name_scope(&self) -> NameScope<'_> {
         NameScope {
             bindings: &self.sc.namespaces,
             xpath_default_namespace: &self.sc.xpath_default_namespace,

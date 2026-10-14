@@ -149,48 +149,51 @@ fn use_when_hides_a_fallback_from_an_extension_instruction() {
     assert_eq!(out, "<out>RIGHT</out>");
 }
 
-// ═══ Phase 3a — the §16 functions that are registered but not implemented ══
+// ═══ Phase 3a — the §16 functions that were registered before they were implemented
 
-/// Every §16 function this processor does not implement is in the catalog with
-/// its spec signature, so the call *compiles* and the failure is reported as a
-/// missing feature (`XSLT2-NOTIMPL`) naming the milestone that owns it — not as
-/// XPST0017, which is indistinguishable from a wrong answer.
+/// M2a registered every §16 function this processor did not implement yet with
+/// its spec signature, so a call *compiled* and failed as a missing feature
+/// (`XSLT2-NOTIMPL`) rather than as XPST0017. The last of them, §16.4
+/// `format-number` and §16.5 `format-dateTime`, `format-date` and
+/// `format-time`, were implemented by M3d (`tests/m3d_formatting.rs`): each
+/// form now runs.
 #[test]
-fn the_unimplemented_16_4_and_16_5_functions_report_their_milestone() {
-    // §16.4 format-number/2 and /3; §16.5 format-dateTime, format-date and
-    // format-time, each in the 2-argument and the 5-argument form.
-    for call in [
-        r#"format-number(1.5, '#.#')"#,
-        r#"format-number(1.5, '#.#', 'df')"#,
-        r#"format-dateTime(xs:dateTime('2002-12-31T12:00:00'), '[Y]')"#,
-        r#"format-dateTime(xs:dateTime('2002-12-31T12:00:00'), '[Y]', 'en', (), ())"#,
-        r#"format-date(xs:date('2002-12-31'), '[Y]')"#,
-        r#"format-date(xs:date('2002-12-31'), '[Y]', 'en', (), ())"#,
-        r#"format-time(xs:time('12:00:00'), '[H]')"#,
-        r#"format-time(xs:time('12:00:00'), '[H]', 'en', (), ())"#,
+fn the_16_4_and_16_5_functions_that_were_stubs_now_run() {
+    for (call, expected) in [
+        (r#"format-number(1.5, '#.#')"#, "1.5"),
+        (
+            r#"format-dateTime(xs:dateTime('2002-12-31T12:00:00'), '[Y]')"#,
+            "2002",
+        ),
+        (
+            r#"format-dateTime(xs:dateTime('2002-12-31T12:00:00'), '[Y]', 'en', (), ())"#,
+            "2002",
+        ),
+        (r#"format-date(xs:date('2002-12-31'), '[Y]')"#, "2002"),
+        (
+            r#"format-date(xs:date('2002-12-31'), '[Y]', 'en', (), ())"#,
+            "2002",
+        ),
+        (r#"format-time(xs:time('12:00:00'), '[H]')"#, "12"),
+        (
+            r#"format-time(xs:time('12:00:00'), '[H]', 'en', (), ())"#,
+            "12",
+        ),
     ] {
         let body = format!(
             r#"<xsl:template match="/"><out><xsl:value-of select="{call}"/></out></xsl:template>"#
         );
-        let error =
-            transform(&body, "<r/>").expect_err(&format!("{call} unexpectedly produced a result"));
-        assert!(
-            error.is_not_implemented(),
-            "{call} should be NOTIMPL, got {error}"
-        );
-        assert!(
-            error.to_string().contains("M3d"),
-            "{call} should name M3d, got {error}"
-        );
+        let out = transform(&body, "<r/>").unwrap_or_else(|e| panic!("{call}: {e}"));
+        assert_eq!(out, format!("<out>{expected}</out>"), "{call}");
     }
 }
 
 /// §18.1.2: `function-available` "returns true if and only if there is a
-/// function available with the given name and arity". A stub is registered but
-/// is not available, so the answer stays **false** and a stylesheet that guards
-/// its use of one still takes the fallback branch.
+/// function available with the given name and arity". While the four were
+/// stubs the answer was **false**, so that a stylesheet guarding its use of one
+/// took the fallback branch; since M3d they are available.
 #[test]
-fn function_available_is_false_for_a_stub() {
+fn function_available_for_the_former_stubs() {
     let out = transform(
         r#"<xsl:template match="/">
              <out>
@@ -202,20 +205,22 @@ fn function_available_is_false_for_a_stub() {
                <xsl:text>,</xsl:text>
                <xsl:value-of select="function-available('format-dateTime')"/>
                <xsl:text>|</xsl:text>
-               <!-- A control: one that really is available. -->
+               <!-- A control: one that was always available. -->
                <xsl:value-of select="function-available('generate-id')"/>
              </out>
            </xsl:template>"#,
         "<r/>",
     )
     .unwrap();
-    assert_eq!(out, "<out>false,false,false,false|true</out>");
+    assert_eq!(out, "<out>true,true,true,true|true</out>");
 }
 
 /// §3.12 `use-when` is evaluated at compile time by a static evaluator that
 /// holds no transformation. A stub must not make one *succeed*: the guard below
 /// is false, so the element stays excluded, exactly as it was before the stubs
-/// were registered.
+/// were registered. (Since M3d `format-date` is implemented, and the guard is
+/// still false: §3.12 keeps only the F&O functions and four XSLT ones in scope
+/// in a `use-when` expression.)
 #[test]
 fn use_when_does_not_start_succeeding_because_of_a_stub() {
     let out = transform(
@@ -444,10 +449,15 @@ fn every_notimpl_names_its_sub_milestone() {
         // compile/declarations.rs: the declaration table.
         // (xsl:key was NOT-IMPL until M2f — `tests/m2f_keys.rs`.)
         // (xsl:function was NOT-IMPL until M2e — `tests/m2e_functions.rs`.)
+        // (xsl:decimal-format was NOT-IMPL until M3d —
+        // `tests/m3d_formatting.rs`.)
         (
-            format!(r#"<xsl:decimal-format name="d"/>{}"#, template("")),
-            "xsl:decimal-format",
-            "M3d",
+            format!(
+                r#"<xsl:import-schema namespace="urn:s"/>{}"#,
+                template("")
+            ),
+            "xsl:import-schema",
+            "M4",
         ),
         // (xsl:character-map, the html/xhtml methods, doctype-* and the output
         // encodings were NOT-IMPL until M3a — `tests/m3a_serialization.rs`.)

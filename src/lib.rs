@@ -42,6 +42,8 @@
 pub mod collation;
 pub mod compile;
 pub mod error;
+pub(crate) mod format_date;
+pub(crate) mod format_number;
 pub mod functions;
 pub mod model;
 pub mod names;

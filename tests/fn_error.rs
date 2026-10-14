@@ -261,9 +261,12 @@ fn a_user_error_named_like_an_internal_code_is_still_a_dynamic_error() {
 #[test]
 fn the_processors_own_not_implemented_still_propagates() {
     for strict in [false, true] {
-        // `format-number()` stands for a feature this processor still lacks
-        // (M3d); until M2f it was `key()`.
-        let err = match run(&two_rules("format-number(1, '0') = '1'"), ONE_ITEM, strict) {
+        // An extension instruction without `xsl:fallback` (M3e), reached through
+        // a stylesheet function the predicate calls, stands for a feature this
+        // processor still lacks: `format-number()` did until M3d implemented it
+        // (`tests/m3d_formatting.rs`), and `key()` until M2f.
+        let body = format!("{}{MISSING_FEATURE_FUNCTION}", two_rules("e:missing(.)"));
+        let err = match run(&body, ONE_ITEM, strict) {
             Err(e) => e,
             Ok(out) => panic!("strict={strict} produced {out}"),
         };
@@ -278,6 +281,16 @@ fn the_processors_own_not_implemented_still_propagates() {
     assert!(XsltError::internal("broken invariant").is_internal());
     assert!(!XsltError::not_implemented("format-number()", "M3d").is_raised());
 }
+
+/// A stylesheet function `e:missing` (namespace `urn:e`, bound on the
+/// predicate's template by [`two_rules`]) whose body evaluates an extension
+/// instruction this processor does not implement and that has no
+/// `xsl:fallback` — `XSLT2-NOTIMPL` (M3e).
+const MISSING_FEATURE_FUNCTION: &str = r#"<xsl:function name="e:missing" xmlns:e="urn:e">
+       <xsl:param name="n"/>
+       <ext:instruction xmlns:ext="urn:ext" xsl:extension-element-prefixes="ext"/>
+       <xsl:sequence select="true()"/>
+     </xsl:function>"#;
 
 /// `xsl:message terminate="yes"` does not go through `fn:error` — the
 /// instruction builds `XTMM9000` directly — so it is a processor error and stays

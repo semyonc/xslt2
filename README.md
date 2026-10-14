@@ -4,7 +4,7 @@ Schema-aware XSLT 2.0 processor in Rust, built on the
 [`xsd-schema`](../xsd-schema) validator and its XPath 2.0 engine.
 
 Status: **M3 — numbering, formatting, serialization, compatibility, in progress** (M1 and M2 done; M3a
-serialization, M3b result documents and M3c numbering done). Stylesheets are loaded,
+serialization, M3b result documents, M3c numbering and M3d number and date formatting done). Stylesheets are loaded,
 compiled and run: the module graph with import precedence, the lexical static contexts of §5.4.1,
 template rules with the §6.4 priorities and conflict resolution, the built-in rules,
 `xsl:apply-imports` and `xsl:next-match`, variables and parameters (tunnel included), attribute
@@ -14,8 +14,10 @@ value templates, attribute sets, the node constructors, `xsl:copy`/`xsl:copy-of`
 output methods with character maps and `disable-output-escaping`, `xsl:result-document` (secondary results are
 returned in memory, `Outcome::secondary`; nothing is written to disk), and `xsl:number` (every level, Unicode
 decimal-digit families, seventeen sequences of consecutive Unicode characters — circled, parenthesized, `1.`-style
-digits and the like —, English words and ordinals). `format-number` and `format-date` belong to a later milestone
-and report the internal `XSLT2-NOTIMPL` code rather than a wrong answer.
+digits and the like —, English words and ordinals), `format-number` with `xsl:decimal-format` (exact
+`xs:decimal` / `xs:integer` digits, the shortest round-trip digits of a double or float, round-half-to-even), and
+`format-date`, `format-time` and `format-dateTime` (English names, the Gregorian `AD` and `ISO` calendars; any other
+language or calendar falls back to these with a `[Language: en]` / `[Calendar: AD]` prefix, as §16.5.2 requires).
 
 ```rust
 use xsd_schema::namespace::NameTable;
@@ -88,11 +90,13 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 | XSLT 2.0-applicable | 6,619 |
 | excluded (documented in `tests/xslts/filter.rs`) | 63 |
 | runnable (dependencies satisfied) | 5,793 |
-| pass | 5,560 |
+| pass | 5,747 |
 | fail / wrongError / harnessError | 38 / 0 / 3 |
-| not implemented (`XSLT2-NOTIMPL`: M2k without its feature, M3d–M4) | 192 |
-| pass rate over runnable | 95.98% |
-| headline (basic profile, non-regex families) | 4,096 / 4,314 = **94.9%** |
+| not implemented (`XSLT2-NOTIMPL`: M2k without its feature, M3e, M4) | 5 |
+| pass rate over runnable | 99.21% |
+| headline (basic profile, non-regex families) | 4,275 / 4,314 = **99.1%** |
+
+With `--features icu-collation` the two M2k cases pass too: 5,749.
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the
@@ -101,7 +105,7 @@ that exists only under the strict comparison starts with `assert-xml namespace m
 (`attribute-0004`, which pins an invented prefix that §5.7.3 leaves implementation-dependent, is excluded). Figures
 were first taken on 2026-09-19, after the M1 review fixes (`../../XSLT2_M1_REVIEW_FIXES.md`) and the M2a groundwork
 (`../../XSLT2_M2A_REPORT.md`), which re-labelled 114 cases from "fail" to "not implemented": they
-need `format-number` / `format-date`, which are stubs until M3d. They are measured against the
+need `format-number` / `format-date`, which were stubs until M3d. They are measured against the
 sibling `../xsd-schema` checkout with its current additive XPath fixes (navigation, `/` evaluation,
 operator errors, regex dialect, string literals, linear general comparison): 3,977 → 4,160; M2b
 (namespace correctness) and M2c (one table-driven static-checking pass, `src/compile/checks.rs`) then
@@ -127,7 +131,9 @@ output (`../../XSLT2_HARNESS_RESULT_TREE_REPORT.md`): 5,014 of 5,689 (`for-each-
 excluded), M3b (`xsl:result-document`, `../../XSLT2_M3B_REPORT.md`) to 5,286 on 2026-10-12, and M3c
 (`xsl:number`, `../../XSLT2_M3C_REPORT.md`) to 5,455 on 2026-10-13, and its follow-up (seventeen numbering sequences of
 consecutive code points; the harness now asks the processor about the `combinations_for_numbering` dependency and
-its `range`, `../../XSLT2_M3C_FOLLOWUP_REPORT.md`) to 5,560 of 5,793 the same day.
+its `range`, `../../XSLT2_M3C_FOLLOWUP_REPORT.md`) to 5,560 of 5,793 the same day. M3d (`format-number`,
+`xsl:decimal-format`, `format-date` / `-time` / `-dateTime`, `../../XSLT2_M3D_REPORT.md`) took it to 5,747 on
+2026-10-14: every one of the 187 cases the formatting functions held back passes.
 
 The sixteen test-sets M1 targets:
 
@@ -146,7 +152,7 @@ The sixteen test-sets M1 targets:
 | param | 25 | 25 | 0 | 0 | 0 | 0 | 100.0% |
 | attribute | 21 | 21 | 0 | 0 | 0 | 0 | 100.0% |
 | copy | 70 | 68 | 2 | 0 | 0 | 0 | 97.1% |
-| sequence | 87 | 86 | 0 | 0 | 0 | 1 | 98.9% |
+| sequence | 87 | 87 | 0 | 0 | 0 | 0 | 100.0% |
 | message | 26 | 24 | 2 | 0 | 0 | 0 | 92.3% |
 | output | 137 | 137 | 0 | 0 | 0 | 0 | 100.0% |
 

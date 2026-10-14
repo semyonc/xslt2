@@ -10,6 +10,7 @@ mod analyze;
 mod attributes;
 mod avt;
 pub(crate) mod checks;
+mod decimal_format;
 mod declarations;
 mod expressions;
 mod functions;
@@ -174,6 +175,11 @@ struct Builder<'a, 'm, 't> {
     /// `finish_output_definitions` into `expanded_character_maps`.
     character_maps: Vec<output::CharacterMapDecl>,
     expanded_character_maps: HashMap<QName, crate::serialize::CharacterMap>,
+    /// Every `xsl:decimal-format` declaration (§16.4.1), by name (`None` for
+    /// the unnamed decimal format), merged by `finish_decimal_formats` into
+    /// `decimal_formats`.
+    decimal_format_decls: HashMap<Option<QName>, decimal_format::DecimalFormatDecls>,
+    decimal_formats: crate::model::DecimalFormats,
     /// Variables in scope at the point currently being compiled.
     scope: Vec<ScopeEntry>,
     /// Slots used by the frame currently being compiled.
@@ -248,6 +254,8 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             named_outputs: HashMap::new(),
             character_maps: Vec::new(),
             expanded_character_maps: HashMap::new(),
+            decimal_format_decls: HashMap::new(),
+            decimal_formats: crate::model::DecimalFormats::default(),
             scope: Vec::new(),
             frame_size: 0,
             decl_order: 0,
@@ -328,6 +336,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             output: std::mem::take(&mut self.output),
             named_outputs: std::mem::take(&mut self.named_outputs),
             character_maps: std::mem::take(&mut self.expanded_character_maps),
+            decimal_formats: std::mem::take(&mut self.decimal_formats),
             principal_version_1_0,
             space_rules: std::mem::take(&mut self.space_rules),
             functions_table: std::mem::take(&mut self.functions_table)
