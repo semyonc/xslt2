@@ -445,7 +445,7 @@ fn every_notimpl_names_its_sub_milestone() {
         // `tests/m2h_regex.rs`; `xsl:result-document` was M3b's until M3b —
         // `tests/m3b_result_documents.rs`; `xsl:number` was M3c's until M3c —
         // `tests/m3c_numbering.rs`. An extension instruction without
-        // `xsl:fallback` is M3e's: the next test.)
+        // `xsl:fallback` is XTDE1450: the next test.)
         // compile/declarations.rs: the declaration table.
         // (xsl:key was NOT-IMPL until M2f — `tests/m2f_keys.rs`.)
         // (xsl:function was NOT-IMPL until M2e — `tests/m2e_functions.rs`.)
@@ -510,15 +510,15 @@ fn every_notimpl_names_its_sub_milestone() {
     }
 }
 
-/// §18.2.3's extension instruction with no `xsl:fallback` is M3e's.
+/// §18.2.3's extension instruction with no `xsl:fallback`: an
+/// `XSLT2-NOTIMPL` naming M3e until M3e implemented it — "it is a
+/// non-recoverable dynamic error if it has no xsl:fallback children"
+/// (XTDE1450; more in `tests/m3e_compat.rs`).
 #[test]
-fn an_extension_instruction_without_fallback_names_m3e() {
+fn an_extension_instruction_without_fallback_is_xtde1450() {
     let body = r#"<xsl:template match="/"><out><my:inst xsl:extension-element-prefixes="my"/></out></xsl:template>"#;
     let error = transform(body, "<r/>").expect_err("the extension instruction ran");
-    assert!(error.is_not_implemented(), "{error}");
-    assert!(
-        error.message.ends_with(" is not implemented (M3e)"),
-        "{:?}",
-        error.message
-    );
+    assert!(!error.is_not_implemented(), "{error}");
+    assert_eq!(error.code, "XTDE1450", "{error}");
+    assert!(error.message.contains("my:inst"), "{:?}", error.message);
 }

@@ -258,12 +258,20 @@ fn a_user_error_named_like_an_internal_code_is_still_a_dynamic_error() {
 
 /// The guard must not swing the other way: the **processor's** own missing
 /// feature still propagates out of a pattern predicate, in both modes.
+///
+/// Since M3e the only missing feature an evaluation can reach is a UCA
+/// collation named at run time in a build without the `icu-collation` feature
+/// (M2k), so the end-to-end half runs in that build only; the guard itself is
+/// pinned in both builds by the unit tests of `runtime::patterns`
+/// (`guard_recoverable`).
 #[test]
 fn the_processors_own_not_implemented_still_propagates() {
+    #[cfg(not(feature = "icu-collation"))]
     for strict in [false, true] {
-        // An extension instruction without `xsl:fallback` (M3e), reached through
-        // a stylesheet function the predicate calls, stands for a feature this
-        // processor still lacks: `format-number()` did until M3d implemented it
+        // A UCA collation computed at run time, reached through a stylesheet
+        // function the predicate calls, stands for a feature this build lacks:
+        // an extension instruction without `xsl:fallback` did until M3e made it
+        // XTDE1450, `format-number()` until M3d implemented it
         // (`tests/m3d_formatting.rs`), and `key()` until M2f.
         let body = format!("{}{MISSING_FEATURE_FUNCTION}", two_rules("e:missing(.)"));
         let err = match run(&body, ONE_ITEM, strict) {
@@ -283,12 +291,15 @@ fn the_processors_own_not_implemented_still_propagates() {
 }
 
 /// A stylesheet function `e:missing` (namespace `urn:e`, bound on the
-/// predicate's template by [`two_rules`]) whose body evaluates an extension
-/// instruction this processor does not implement and that has no
-/// `xsl:fallback` — `XSLT2-NOTIMPL` (M3e).
+/// predicate's template by [`two_rules`]) whose body sorts under a UCA
+/// collation whose URI is computed at run time — `XSLT2-NOTIMPL` (M2k) in a
+/// build without the `icu-collation` feature.
+#[cfg(not(feature = "icu-collation"))]
 const MISSING_FEATURE_FUNCTION: &str = r#"<xsl:function name="e:missing" xmlns:e="urn:e">
        <xsl:param name="n"/>
-       <ext:instruction xmlns:ext="urn:ext" xsl:extension-element-prefixes="ext"/>
+       <xsl:perform-sort select="(2, 1)">
+         <xsl:sort select="." collation="{concat('http://www.w3.org/2013/collation/UCA', '?strength=secondary')}"/>
+       </xsl:perform-sort>
        <xsl:sequence select="true()"/>
      </xsl:function>"#;
 

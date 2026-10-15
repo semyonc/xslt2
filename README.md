@@ -3,8 +3,8 @@
 Schema-aware XSLT 2.0 processor in Rust, built on the
 [`xsd-schema`](../xsd-schema) validator and its XPath 2.0 engine.
 
-Status: **M3 — numbering, formatting, serialization, compatibility, in progress** (M1 and M2 done; M3a
-serialization, M3b result documents, M3c numbering and M3d number and date formatting done). Stylesheets are loaded,
+Status: **M3 — numbering, formatting, serialization, compatibility** (M1 and M2 done; M3a serialization, M3b result
+documents, M3c numbering, M3d number and date formatting and M3e compatibility done). Stylesheets are loaded,
 compiled and run: the module graph with import precedence, the lexical static contexts of §5.4.1,
 template rules with the §6.4 priorities and conflict resolution, the built-in rules,
 `xsl:apply-imports` and `xsl:next-match`, variables and parameters (tunnel included), attribute
@@ -18,6 +18,17 @@ digits and the like —, English words and ordinals), `format-number` with `xsl:
 `xs:decimal` / `xs:integer` digits, the shortest round-trip digits of a double or float, round-half-to-even), and
 `format-date`, `format-time` and `format-dateTime` (English names, the Gregorian `AD` and `ISO` calendars; any other
 language or calendar falls back to these with a `[Language: en]` / `[Calendar: AD]` prefix, as §16.5.2 requires).
+A `version="1.0"` stylesheet, module or element runs with the backwards-compatible behaviour of §3.8 (XPath 1.0
+compatibility mode, first-item attribute value templates and `xsl:value-of`, string-compared keys, …), and when the
+principal module's `xsl:stylesheet` says `version="1.0"` an XHTML result created implicitly is written with the
+`xml` method (§20). A module or element with a version above 2.0 runs with the forwards-compatible behaviour of §3.9:
+XSLT elements XSLT 2.0 does not allow at the top level are ignored with their content, unknown attributes are
+ignored, an XSLT element XSLT 2.0 does not allow in a sequence constructor is replaced by its `xsl:fallback`
+children (or is the static error without one), and an XPath static error in an expression or attribute value
+template is reported only if the expression is evaluated — except a call to a function that is not available, which
+stays static (§18.1.1), and errors in patterns. No extension instruction is implemented: one with `xsl:fallback`
+children evaluates them, one without is XTDE1450 when — and only when — it is evaluated, and `element-available()`
+answers false for it.
 
 ```rust
 use xsd_schema::namespace::NameTable;
@@ -88,15 +99,15 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 | | |
 |---|---|
 | XSLT 2.0-applicable | 6,619 |
-| excluded (documented in `tests/xslts/filter.rs`) | 63 |
-| runnable (dependencies satisfied) | 5,793 |
-| pass | 5,747 |
-| fail / wrongError / harnessError | 38 / 0 / 3 |
-| not implemented (`XSLT2-NOTIMPL`: M2k without its feature, M3e, M4) | 5 |
-| pass rate over runnable | 99.21% |
-| headline (basic profile, non-regex families) | 4,275 / 4,314 = **99.1%** |
+| excluded (documented in `tests/xslts/filter.rs`) | 64 |
+| runnable (dependencies satisfied) | 5,792 |
+| pass | 5,755 |
+| fail / wrongError / harnessError | 31 / 0 / 3 |
+| not implemented (`XSLT2-NOTIMPL`: M2k without its feature, M4) | 3 |
+| pass rate over runnable | 99.36% |
+| headline (basic profile, non-regex families) | 4,280 / 4,313 = **99.2%** |
 
-With `--features icu-collation` the two M2k cases pass too: 5,749.
+With `--features icu-collation` the two M2k cases pass too: 5,757.
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the
@@ -133,7 +144,11 @@ excluded), M3b (`xsl:result-document`, `../../XSLT2_M3B_REPORT.md`) to 5,286 on 
 consecutive code points; the harness now asks the processor about the `combinations_for_numbering` dependency and
 its `range`, `../../XSLT2_M3C_FOLLOWUP_REPORT.md`) to 5,560 of 5,793 the same day. M3d (`format-number`,
 `xsl:decimal-format`, `format-date` / `-time` / `-dateTime`, `../../XSLT2_M3D_REPORT.md`) took it to 5,747 on
-2026-10-14: every one of the 187 cases the formatting functions held back passes.
+2026-10-14: every one of the 187 cases the formatting functions held back passes (5,748 on `xsd-schema` 0.2.3). M3e
+(backwards-compatible attribute value templates, adjacent text nodes merged in simple content, extension instructions
+and forwards-compatible processing, `../../XSLT2_M3E_REPORT.md`) took it to 5,755 of 5,792 on 2026-10-15
+(`next-match-039`, whose expected result is XSLT 3.0's, is excluded); every remaining failure has an owner in that
+report.
 
 The sixteen test-sets M1 targets:
 
@@ -172,11 +187,13 @@ Unicode general category against every code point: `$validrange[not(. = $c)]` co
 1.1 million legal code points with the category's code points read from a source of up to 51 MB. That
 general comparison used to take 30–60 s per case; `xsd-schema` now builds the comparison index once and
 reuses it across the evaluations of a loop-invariant operand (Wave A, A-5), and caches compiled regular
-expressions (A-6), so a single case takes 0.4–2 s. The set is still skipped because of its size: each of
-the 912 `fn:matches` cases builds the 1.1-million-integer range and makes about a million `matches()`
-calls, and the whole set does not finish in 30 minutes. That is a performance limit, not a conformance
-answer. The other 16 cases use XPath 3.0 syntax and are excluded. The set is in the `misc/regex` family,
-outside the headline denominator.
+expressions (A-6), so 37 of the 38 `Ll` cases take 0.2–5 s each. The set is still skipped because of its size and one shape: the
+cache lives for one XPath evaluation, and six of the 38 modes call `matches()` from an `xsl:if` inside an
+`xsl:for-each` over up to 1.1 million code points — one evaluation, and so one compilation of the pattern, per
+item. With the pattern of `fn-matches20` (four `\P{…}` escapes, two of them in classes, and a back-reference) that is about 60 µs per item,
+90% of it compiling (`unicode90-Ll-020`: 64 s; the same million calls inside one expression, `unicode90-Ll-009`,
+take 1 s). That is a performance limit, not a conformance answer (M3e report; Wave B P11). The other 16 cases use
+XPath 3.0 syntax and are excluded. The set is in the `misc/regex` family, outside the headline denominator.
 
 Dependency policy: `tests/xslts/filter.rs`. Assertion semantics: `tests/xslts/compare.rs`
 (`assert` XPaths are evaluated with the `xsd-schema` engine over the re-parsed result). The

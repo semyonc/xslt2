@@ -285,6 +285,6 @@ fn instruction_reaches_group(kind: &InstructionKind) -> bool {
         | InstructionKind::ResultDocument(_)
         | InstructionKind::Number(_)
         | InstructionKind::Fallback
-        | InstructionKind::NotImplemented { .. } => false,
+        | InstructionKind::ExtensionInstruction { .. } => false,
     }
 }

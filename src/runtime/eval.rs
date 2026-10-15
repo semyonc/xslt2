@@ -499,9 +499,25 @@ impl<'a, 't> Transformation<'a, 't> {
                 self.override_rule(false, params, cx, out)
             }
 
-            InstructionKind::NotImplemented { feature, milestone } => {
-                Err(XsltError::not_implemented(feature, milestone))
-            }
+            // §18.2.3: no extension instruction is available here, so
+            // evaluating one performs fallback — "the content of each of the
+            // xsl:fallback children must be evaluated; it is a non-recoverable
+            // dynamic error if it has no xsl:fallback children."
+            InstructionKind::ExtensionInstruction {
+                name,
+                lexical,
+                fallback,
+            } => match fallback {
+                Some(body) => self.eval_body(body, frame, cx, out),
+                None => Err(XsltError::new(
+                    codes::XTDE1450,
+                    format!(
+                        "no implementation of the extension instruction {lexical} \
+                         (Q{{{}}}{}) is available, and it has no xsl:fallback child",
+                        name.uri, name.local
+                    ),
+                )),
+            },
         }
     }
 

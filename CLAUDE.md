@@ -52,7 +52,7 @@ cargo clippy --all-targets         # 0 warnings expected
 cargo test                         # unit tests + every tests/*.rs except the W3C harness (it skips itself in debug): m0b…m2a, m2c, m2d_sorting, m2e_functions, m2f_keys, m2g_grouping, m2g_review, m2h_regex, m2i_core_defects, m2l_pattern_predicates, ns_inherit, q33_depth, …
                                    # + fn_error + m2b_namespaces + m2c_static_checks + m3a_serialization + m3a_review + m3a_review2
                                    # + m3b_result_documents + m3b_review + m3b_review2 + m3c_numbering + m3c_followup
-                                   # + m3d_formatting
+                                   # + m3d_formatting + m3e_compat
                                    # (tests/common/mod.rs: `common::body` drops the default XML
                                    # declaration for the tests written before M3a)
                                    # (the W3C harness skips itself in a debug build)
@@ -205,6 +205,27 @@ counting afresh (N = 10,000, `any`): a `count` / `from` pattern calling a styles
 nodes at each call) 19.0 s; a local variable the pattern reads that changes at every evaluation (the walks are reset)
 20.8 s, and one holding a decimal, date, QName … (compared only by a lossy equality, so never kept).
 `runtime::number::tests` guard the linear shapes by counting the nodes the walks test (and the census probes).
+
+**Compatibility modes** (§3.8, §3.9; DESIGN §9.10; M3e, `tests/m3e_compat.rs`). `StaticContext::compat` is lexical
+(the nearest `[xsl:]version`). Backwards-compatible: XPath 1.0 compatibility mode and the fallback error function
+(`compile/expressions.rs`), `Avt::first_item_only` (§5.6, set when the AVT is compiled), `ValueOf::first_item_only`,
+the `xsl:number` / `xsl:sort` / key rules, and §20's `xml` default method for an XHTML result when the principal
+module's `xsl:stylesheet` says `version="1.0"` and the tree is created implicitly (`principal_version_1_0`; a 1.0
+included module or template does not count). Forwards-compatible: unknown top-level XSLT elements — and XSLT 2.0
+elements that are not declarations — ignored with their content, decided from the element's own `version` alone
+(`checks::own_compat`, in both the checks pass and `declarations.rs` `declaration`, before its static context reads any
+other standard attribute); unknown attributes ignored, `xsl:`-prefixed ones included; in a sequence constructor an
+XSLT element that is not an instruction falls back to its `xsl:fallback` children or is the static error — including
+an `xsl:param` / `xsl:sort` after the **leading run** of a template, function, `for-each`, `for-each-group` or
+`perform-sort` (`instructions::leading_run_ends`: only the leading run declares parameters or sort keys;
+`Builder::falls_back`); an XPath static error other than XPST0017 / XPST0081 on a function name is deferred (§5.3) —
+the expression compiles to `()` with the error in `CompiledExpr::deferred`, which `eval_expr` returns when it is
+evaluated, so nothing a stylesheet writes can forge it; `unknown_function_call` re-checks every function call of an
+expression that parses, so an undeclared variable cannot hide an unknown function (§18.1.1 note); pattern
+predicates are compiled strictly. Extension instructions (§18.2): `InstructionKind::ExtensionInstruction` keeps the expanded name and
+the concatenated `xsl:fallback` bodies; with none it is XTDE1450 when evaluated, never at compile time. §5.7.2's
+"adjacent text nodes … merged" applies to `select` values and AVTs too (`Transformation::simple_strings`); the
+backwards-compatible first-item rules take the first *atomized* item without merging.
 
 A deeply recursive stylesheet needs `xslt2::run_on_large_stack(DEFAULT_STACK_SIZE, || …)` around
 the whole job (compile included): everything involved is `!Send`, so the closure has to own it.

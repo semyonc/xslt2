@@ -4,7 +4,7 @@
 use xsd_schema::document::BufferDocumentOptions;
 use xsd_schema::navigator::DomNavigator;
 use xsd_schema::types::XmlValue;
-use xsd_schema::xpath::functions::atomize_sequence;
+use xsd_schema::xpath::functions::{atomize_sequence, XPathValue};
 use xsd_schema::xpath::XmlItem;
 
 use super::context::XsltContext;
@@ -41,15 +41,75 @@ impl<'a, 't> Transformation<'a, 't> {
                 AvtPart::Literal(text) => out.push_str(text),
                 AvtPart::Expr(id) => {
                     let value = self.eval_expr(*id, frame, cx)?;
-                    // §5.7.2: the same simple-content rules, with a single
-                    // space as the separator.
-                    let atoms = atomize_sequence(value).map_err(|e| self.xpath_error(e))?;
-                    let strings: Vec<String> = atoms.iter().map(|a| self.atom_string(a)).collect();
-                    out.push_str(&strings.join(" "));
+                    if avt.first_item_only {
+                        // §9.10 row 6, §5.6: "After atomizing the result of the
+                        // expression, all items other than the first item in
+                        // the resulting sequence are discarded … If the
+                        // atomized sequence is empty, the result is a
+                        // zero-length string."
+                        let atoms = atomize_sequence(value).map_err(|e| self.xpath_error(e))?;
+                        if let Some(first) = atoms.first() {
+                            out.push_str(&self.atom_string(first));
+                        }
+                    } else {
+                        // §5.6: "This conversion is done using the rules given
+                        // in 5.7.2 Constructing Simple Content" — "the separator
+                        // is a single space character".
+                        out.push_str(&self.simple_strings(value)?.join(" "));
+                    }
                 }
             }
         }
         Ok(out)
+    }
+
+    /// Steps 1–4 of §5.7.2 over the value of an expression: the strings that
+    /// the separator then joins.
+    ///
+    /// > 1. Zero-length text nodes in the sequence are discarded.
+    /// > 2. Adjacent text nodes in the sequence are merged into a single text
+    /// >    node.
+    /// > 3. The sequence is atomized.
+    /// > 4. Every value in the atomized sequence is cast to a string.
+    ///
+    /// So a run of adjacent text nodes is one string, never separated
+    /// (`avt-1205`: a function returning the text nodes `[`, `0`, `]` makes
+    /// `[0]`, not `[ 0 ]`), and every other item is atomized on its own. A
+    /// sequence with no text node in it is atomized in one call, as before
+    /// the merge existed.
+    pub(super) fn simple_strings(
+        &self,
+        value: XPathValue<Nav<'t>>,
+    ) -> Result<Vec<String>, XsltError> {
+        let is_text = |item: &XmlItem<Nav<'t>>| matches!(item, XmlItem::Node(nav) if nav.node_type().is_text_like());
+        if !value.as_slice().iter().any(is_text) {
+            let atoms = atomize_sequence(value).map_err(|e| self.xpath_error(e))?;
+            return Ok(atoms.iter().map(|a| self.atom_string(a)).collect());
+        }
+        let mut strings = Vec::new();
+        let mut pending: Option<String> = None;
+        for item in value.into_vec() {
+            if let XmlItem::Node(nav) = &item {
+                if nav.node_type().is_text_like() {
+                    pending
+                        .get_or_insert_with(String::new)
+                        .push_str(&nav.value());
+                    continue;
+                }
+            }
+            // Step 1 applies to the merged run: a run of zero-length text
+            // nodes is discarded as a whole.
+            if let Some(text) = pending.take().filter(|t| !t.is_empty()) {
+                strings.push(text);
+            }
+            let atoms =
+                atomize_sequence(XPathValue::from_item(item)).map_err(|e| self.xpath_error(e))?;
+            strings.extend(atoms.iter().map(|a| self.atom_string(a)));
+        }
+        if let Some(text) = pending.filter(|t| !t.is_empty()) {
+            strings.push(text);
+        }
+        Ok(strings)
     }
 
     /// §5.7.2 Constructing Simple Content.
@@ -70,12 +130,19 @@ impl<'a, 't> Transformation<'a, 't> {
         match value {
             ValueSource::Select(id) => {
                 let value = self.eval_expr(*id, frame, cx)?;
-                let mut atoms = atomize_sequence(value).map_err(|e| self.xpath_error(e))?;
                 if first_item_only {
-                    atoms.truncate(1);
+                    // §11.4.3, §9.10 row 5: "all items in the atomized result
+                    // sequence other than the first are ignored" — the first
+                    // item atomized, as an XSLT 1.0 processor took the string
+                    // value of the first node (so two text nodes of the
+                    // sequence are not merged first).
+                    let atoms = atomize_sequence(value).map_err(|e| self.xpath_error(e))?;
+                    return Ok(atoms
+                        .first()
+                        .map(|a| self.atom_string(a))
+                        .unwrap_or_default());
                 }
-                let strings: Vec<String> = atoms.iter().map(|a| self.atom_string(a)).collect();
-                Ok(strings.join(&separator))
+                Ok(self.simple_strings(value)?.join(&separator))
             }
             ValueSource::Content(body) => {
                 let (arena, names) = {

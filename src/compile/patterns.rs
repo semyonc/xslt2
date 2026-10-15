@@ -142,6 +142,9 @@ impl PatternSink for Sink<'_, '_, '_, '_> {
     }
 
     fn compile_predicate(&mut self, source: &str) -> Result<ExprId, XsltError> {
-        self.builder.compile_expr(source, self.ctx)
+        // §5.3's forwards-compatible exception is for expressions; a pattern
+        // that does not match the production Pattern is XTSE0340 wherever it
+        // is written (§5.5.2).
+        self.builder.compile_expr_strictly(source, self.ctx)
     }
 }

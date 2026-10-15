@@ -12,6 +12,25 @@ use crate::receiver::Nav;
 use crate::stylesheet::{attr_local, starts_text_run, text_run_value, ModuleId, StaticContextId};
 use crate::whitespace;
 
+/// Whether `child` ends the leading run of `xsl:{names}` children of
+/// `parent`: it is an element other than those, or significant text (§4.2).
+/// Comments, processing instructions and whitespace-only text do not end it.
+///
+/// The run is what a template's or function's parameter list (§9.2: "The
+/// xsl:param elements must come before any other children") and a sort key
+/// specification (§13: "xsl:sort elements must occur before any other
+/// children") consist of; everything from its end on is the sequence
+/// constructor.
+pub(super) fn leading_run_ends(parent: &Nav<'_>, child: &Nav<'_>, names: &[&str]) -> bool {
+    match child.node_type() {
+        DomNodeType::Element => {
+            !(child.namespace_uri() == XSLT_NS && names.contains(&child.local_name()))
+        }
+        kind if kind.is_text_like() => checks::is_significant_text(parent, child),
+        _ => false,
+    }
+}
+
 impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     // ── Sequence constructors (§5.7) ─────────────────────────────────────
 
@@ -23,8 +42,16 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         self.sequence_constructor_skipping(parent, module_id, "")
     }
 
-    /// Compiles the children of `parent`, skipping XSLT elements named `skip`
-    /// (used for the `xsl:param` children of a template).
+    /// Compiles the children of `parent`, skipping the **leading** XSLT
+    /// elements named `skip` — the `xsl:param` declarations of a template or
+    /// function, the `xsl:sort` key specification of `xsl:for-each`,
+    /// `xsl:for-each-group` or `xsl:perform-sort`, which their owners compile.
+    ///
+    /// Only the leading run is theirs: one after the first other element or
+    /// significant text (`leading_run_ends`) is part of the sequence
+    /// constructor, where XSLT 2.0 does not allow it, so it goes through
+    /// [`Self::instruction`] — §3.9's fallback in a forwards-compatible region,
+    /// the static error anywhere else.
     pub(super) fn sequence_constructor_skipping(
         &mut self,
         parent: &Nav<'t>,
@@ -33,13 +60,14 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     ) -> Result<Body, XsltError> {
         let scope_mark = self.scope.len();
         let mut out = Vec::new();
+        let mut leading = !skip.is_empty();
         for child in self.children(parent, module_id) {
+            if leading && leading_run_ends(parent, &child, &[skip]) {
+                leading = false;
+            }
             match child.node_type() {
                 DomNodeType::Element => {
-                    let skipped = !skip.is_empty()
-                        && child.namespace_uri() == XSLT_NS
-                        && child.local_name() == skip;
-                    if !skipped {
+                    if !leading {
                         out.push(self.instruction(&child, module_id)?);
                     }
                 }
@@ -112,39 +140,57 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         Ok(self.wrap(kind, ctx, module_id, nav))
     }
 
+    /// An extension instruction (§18.2): no implementation is available for
+    /// any, so it compiles to its fallback — or to nothing, and XTDE1450 when
+    /// it is evaluated. Its attributes and its other children are the
+    /// extension's business and are not read (§18.2.2: "An implementation must
+    /// not signal an error merely because the stylesheet contains an extension
+    /// instruction for which no implementation is available").
     fn extension_instruction(
         &mut self,
         nav: &Nav<'t>,
         module_id: ModuleId,
         ctx: StaticContextId,
     ) -> Result<Instruction, XsltError> {
-        match self.fallback_bodies(nav, module_id)? {
-            Some(body) => Ok(self.wrap(
-                InstructionKind::Choose {
-                    whens: Vec::new(),
-                    otherwise: Some(body),
-                },
-                ctx,
-                module_id,
-                nav,
-            )),
-            None => Ok(self.wrap(
-                InstructionKind::NotImplemented {
-                    feature: format!("the extension instruction {}", nav.name()),
-                    milestone: "M3e",
-                },
-                ctx,
-                module_id,
-                nav,
-            )),
+        let fallback = self.fallback_bodies(nav, module_id)?;
+        Ok(self.wrap(
+            InstructionKind::ExtensionInstruction {
+                name: crate::names::QName::new(nav.namespace_uri(), nav.local_name()),
+                lexical: nav.name().to_string(),
+                fallback,
+            },
+            ctx,
+            module_id,
+            nav,
+        ))
+    }
+
+    /// Whether an XSLT element that XSLT 2.0 does not allow where it stands
+    /// performs §3.9's fallback instead of being a static error: it is in a
+    /// region with forwards-compatible behaviour (its own `[xsl:]version`
+    /// included) and has an `xsl:fallback` child.
+    pub(super) fn falls_back(
+        &mut self,
+        nav: &Nav<'t>,
+        module_id: ModuleId,
+    ) -> Result<bool, XsltError> {
+        let module = self.modules.module(module_id);
+        let ctx = self.context_of(nav, module)?;
+        if !self.static_contexts.get(ctx).compat.is_forwards() {
+            return Ok(false);
         }
+        Ok(self.children(nav, module_id).any(|child| {
+            child.node_type() == DomNodeType::Element
+                && child.namespace_uri() == XSLT_NS
+                && child.local_name() == "fallback"
+        }))
     }
 
     /// The contents of **every** `xsl:fallback` child, concatenated.
     ///
-    /// > \[§18.2.2\] If the instruction is not available, then the
-    /// > `xsl:fallback` children of the instruction are evaluated (there may
-    /// > be more than one).
+    /// > \[§18.2.3\] … if the instruction element has one or more
+    /// > `xsl:fallback` children, then the content of each of the
+    /// > `xsl:fallback` children must be evaluated
     fn fallback_bodies(
         &mut self,
         nav: &Nav<'t>,
@@ -175,6 +221,14 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         let loc = module.location(nav);
         if !self.static_contexts.get(ctx).compat.is_forwards() {
             check_attributes(nav, &local, &loc)?;
+        } else if !checks::is_instruction(&local) {
+            // §3.9: an element in the XSLT namespace "that XSLT 2.0 does not
+            // allow … to appear as part of a sequence constructor" — an
+            // unknown name, or an XSLT 2.0 element that is not an instruction
+            // (`xsl:param` after the first instruction, `xsl:sort`, `xsl:key`,
+            // `xsl:when` …) — falls back to its `xsl:fallback` children, or is
+            // the static error it would be anyway.
+            return self.fallback_or_error(nav, module_id, &local);
         }
         match local.as_str() {
             "apply-templates" => {
@@ -425,20 +479,13 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             "number" => self.number(nav, ctx, &loc),
             "analyze-string" => self.analyze_string(nav, module_id, ctx, &loc),
             "result-document" => self.result_document(nav, module_id, ctx, &loc),
-            other => {
-                // §3.9: in a forwards-compatible region an unknown XSLT
-                // instruction becomes its xsl:fallback children; with no
-                // fallback children it is the same static error as below (see
-                // `fallback_or_error`, which does not yet raise it).
-                if self.static_contexts.get(ctx).compat.is_forwards() {
-                    return self.fallback_or_error(nav, module_id, other);
-                }
-                Err(XsltError::new(
-                    codes::XTSE0010,
-                    format!("xsl:{other} is not an XSLT instruction"),
-                )
-                .with_location(loc))
-            }
+            // In a forwards-compatible region an unknown name has already
+            // gone to `fallback_or_error` above.
+            other => Err(XsltError::new(
+                codes::XTSE0010,
+                format!("xsl:{other} is not an XSLT instruction"),
+            )
+            .with_location(loc)),
         }
     }
 
@@ -620,9 +667,13 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     /// > than the first in a sequence of sibling `xsl:sort` elements has a
     /// > `stable` attribute.
     ///
-    /// The element table has already checked that the `xsl:sort` children come
-    /// first (§13: "xsl:sort elements must occur before any other children"),
-    /// so every `xsl:sort` child is part of the one specification.
+    /// §13: "xsl:sort elements must occur before any other children", so the
+    /// specification is the leading run of `xsl:sort` children
+    /// (`leading_run_ends`; `xsl:apply-templates` interleaves them with its
+    /// `xsl:with-param` children). An `xsl:sort` after it is not a sort key: the
+    /// element table has rejected it, or, with forwards-compatible behaviour
+    /// and an `xsl:fallback` child, the sequence constructor performs §3.9's
+    /// fallback for it.
     pub(super) fn sort_keys(
         &mut self,
         parent: &Nav<'t>,
@@ -630,10 +681,10 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     ) -> Result<Vec<SortKey>, XsltError> {
         let mut keys = Vec::new();
         for child in self.children(parent, module_id) {
-            if child.node_type() != DomNodeType::Element
-                || child.namespace_uri() != XSLT_NS
-                || child.local_name() != "sort"
-            {
+            if leading_run_ends(parent, &child, &["sort", "with-param"]) {
+                break;
+            }
+            if child.node_type() != DomNodeType::Element || child.local_name() != "sort" {
                 continue;
             }
             let module = self.modules.module(module_id);

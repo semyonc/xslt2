@@ -277,12 +277,15 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             None => None,
         };
         let mut params = Vec::new();
+        // §10.3: "xsl:param*" first; a later `xsl:param` belongs to the
+        // sequence constructor (§3.9's fallback with forwards-compatible
+        // behaviour, see `sequence_constructor_skipping`).
         for child in module.children(nav) {
+            if super::instructions::leading_run_ends(nav, &child, &["param"]) {
+                break;
+            }
             if child.node_type() != DomNodeType::Element {
                 continue;
-            }
-            if child.namespace_uri() != XSLT_NS || child.local_name() != "param" {
-                break;
             }
             let param_ctx = self.context_of(&child, module)?;
             let name = self

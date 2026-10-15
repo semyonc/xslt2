@@ -59,7 +59,8 @@ use crate::names::{resolve_qname, QName, XML_NS, XSLT_NS};
 use crate::receiver::Nav;
 use crate::stylesheet::{
     attr_local, attributes, in_scope_namespaces, is_stripped_stylesheet_text,
-    move_to_document_element, static_context_of, text_run_value, Module, ModuleSet, StaticContext,
+    move_to_document_element, static_context_of, text_run_value, CompatMode, Module, ModuleSet,
+    StaticContext,
 };
 use crate::whitespace;
 
@@ -651,6 +652,12 @@ pub(crate) fn is_instruction(local: &str) -> bool {
     spec_of(local).is_some_and(|spec| spec.category.in_sequence())
 }
 
+/// Whether `xsl:<local>` is an XSLT 2.0 declaration, an element XSLT 2.0
+/// allows as a child of `xsl:stylesheet`.
+pub(super) fn is_declaration(local: &str) -> bool {
+    spec_of(local).is_some_and(|spec| spec.category.at_top_level())
+}
+
 /// The code for an attribute of `xsl:<element>` whose value is not one of the
 /// permitted values for it.
 ///
@@ -708,6 +715,28 @@ pub(crate) fn is_xs_decimal(text: &str) -> bool {
         return false;
     }
     before.bytes().all(|b| b.is_ascii_digit()) && after.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The compatibility behaviour of an XSLT element whose parent's is
+/// `inherited`, read from the element's own `version` attribute only.
+///
+/// > \[§3.9\] An element that has an `[xsl:]version` attribute whose value is
+/// > less than or equal to 2.0 disables forwards-compatible behavior for
+/// > itself, its attributes, its descendants and their attributes. The
+/// > compatibility behavior established by an element overrides any
+/// > compatibility behavior established by an ancestor element.
+///
+/// For an element that may have to be ignored as a whole (§3.9), so nothing
+/// else about it is read; a `version` that is not an `xs:decimal` establishes
+/// nothing here (it is XTSE0110 wherever the element is not ignored).
+pub(super) fn own_compat(nav: &Nav<'_>, inherited: CompatMode) -> CompatMode {
+    match attr_local(nav, "version") {
+        Some(v) if is_xs_decimal(&v) => whitespace::trim(&v)
+            .parse::<f64>()
+            .map(CompatMode::of_version)
+            .unwrap_or(inherited),
+        _ => inherited,
+    }
 }
 
 // ── The pass ─────────────────────────────────────────────────────────────
@@ -795,6 +824,13 @@ impl<'t> Checker<'_, 't> {
         };
         for (uri, local, _, value) in attributes(nav) {
             if uri == XSLT_NS {
+                // §3.9: "if an element has an attribute that XSLT 2.0 does not
+                // allow the element to have, then the attribute must be
+                // ignored" — an attribute in the XSLT namespace is one of
+                // those on an XSLT element.
+                if sc.compat.is_forwards() {
+                    continue;
+                }
                 // §3.5: "The attribute must be in the XSLT namespace only if
                 // its parent element is not in the XSLT namespace."
                 return Err(self.error(
@@ -1250,23 +1286,18 @@ impl<'t> Checker<'_, 't> {
                     }
                     match spec_of(child.local_name()) {
                         Some(spec) if spec.category.at_top_level() => self.element(&child)?,
-                        Some(_) => {
-                            return Err(self.error(
-                                codes::XTSE0010,
-                                &child,
-                                format!(
-                                    "xsl:{} is not a stylesheet declaration",
-                                    child.local_name()
-                                ),
-                            ))
-                        }
                         // §3.9: "if an element in the XSLT namespace appears as
                         // a child of the xsl:stylesheet element, and XSLT 2.0
                         // does not allow such elements to occur as children of
                         // the xsl:stylesheet element, then the element and its
-                        // content must be ignored."
-                        None if sc.compat.is_forwards() => {}
-                        None => {
+                        // content must be ignored" — an XSLT 2.0 instruction
+                        // (`xsl:value-of`) as much as an unknown name. The
+                        // element's own `[xsl:]version` can enable the
+                        // behaviour: §3.9 "An element enables
+                        // forwards-compatible behavior for itself, its
+                        // attributes, its descendants and their attributes".
+                        _ if own_compat(&child, sc.compat).is_forwards() => {}
+                        Some(_) | None => {
                             return Err(self.error(
                                 codes::XTSE0010,
                                 &child,
@@ -1481,12 +1512,16 @@ pub(super) fn visit(body: &Body, f: &mut impl FnMut(&Instruction)) {
                     }
                 }
             }
+            InstructionKind::ExtensionInstruction { fallback, .. } => {
+                if let Some(body) = fallback {
+                    visit(body, f);
+                }
+            }
             InstructionKind::Text { .. }
             | InstructionKind::Sequence { .. }
             | InstructionKind::CopyOf { .. }
             | InstructionKind::Number(_)
-            | InstructionKind::Fallback
-            | InstructionKind::NotImplemented { .. } => {}
+            | InstructionKind::Fallback => {}
         }
     }
 }

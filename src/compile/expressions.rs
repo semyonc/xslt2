@@ -124,7 +124,93 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         out
     }
 
+    /// Compiles an XPath expression written in an attribute or in an attribute
+    /// value template.
+    ///
+    /// > \[§5.3\] Except where forwards-compatible behavior is enabled (see 3.9
+    /// > Forwards-Compatible Processing), it is a static error if the value of
+    /// > such an attribute, or the text between curly brackets in an attribute
+    /// > value template, does not match the XPath production Expr, or if it
+    /// > fails to satisfy other static constraints defined in the XPath
+    /// > specification, for example that all variable references must refer
+    /// > to variables that are in scope.
+    ///
+    /// So where forwards-compatible behaviour is enabled, such an error is
+    /// not reported when the stylesheet is compiled: the expression becomes
+    /// one that raises it when — and only if — it is evaluated
+    /// ([`Self::deferred_static_error`]). The one exception is a call to an
+    /// unknown function, which §18.1.1's note keeps static: "In XSLT 2.0
+    /// (without backwards compatibility enabled) a static error occurs when an
+    /// XPath expression references a function that is not available. This is
+    /// true even in a part of the stylesheet that uses forwards-compatible
+    /// behavior." Every call of an expression that parses is checked
+    /// ([`Self::unknown_function_call`]), so another static error the engine
+    /// meets first cannot hide one.
+    ///
+    /// Patterns are not expressions (§5.5.2 has no such exception for
+    /// XTSE0340), so a pattern's predicates go through
+    /// [`Self::compile_expr_strictly`].
     pub(super) fn compile_expr(
+        &mut self,
+        source: &str,
+        ctx: StaticContextId,
+    ) -> Result<ExprId, XsltError> {
+        match self.compile_expr_strictly(source, ctx) {
+            Err(error)
+                if self.static_contexts.get(ctx).compat.is_forwards()
+                    && error.code != "XPST0017" =>
+            {
+                // The engine reports the first static error it meets, so an
+                // undeclared variable or prefix can hide a call to an unknown
+                // function in the same expression; that one stays static.
+                if let Some(unknown) = self.unknown_function_call(source, ctx) {
+                    return Err(unknown);
+                }
+                self.deferred_static_error(error, ctx)
+            }
+            other => other,
+        }
+    }
+
+    /// The static error of the first function call in `source` whose name
+    /// does not resolve here — XPST0017 for no function of that name and
+    /// arity, XPST0081 for a prefix that is not bound — or `None` when every
+    /// call resolves, or when `source` does not parse (then nothing is known
+    /// about its function calls, and the syntax error is deferred whole).
+    ///
+    /// Each call found in the parsed expression is compiled on its own, with
+    /// its arguments replaced by `()`: only the name and the arity are looked
+    /// up, so only those two codes are taken from the probe.
+    fn unknown_function_call(&self, source: &str, ctx: StaticContextId) -> Option<XsltError> {
+        let parsed = xsd_schema::xpath::parse(source).ok()?;
+        for (_, node) in parsed.arena.iter() {
+            let xsd_schema::xpath::ast::AstNode::FunctionCall(call) = node else {
+                continue;
+            };
+            let name = if call.prefix.is_empty() {
+                call.local_name.clone()
+            } else {
+                format!("{}:{}", call.prefix, call.local_name)
+            };
+            let probe = format!("{name}({})", vec!["()"; call.args.len()].join(", "));
+            if let Err(e) = XPathExpr::compile_with_vars(&probe, self.compile_context(ctx), &[]) {
+                if let Some(code @ ("XPST0017" | "XPST0081")) = e.error_code() {
+                    return Some(XsltError::new(
+                        code,
+                        format!(
+                            "cannot compile the expression {source:?}: {e} (a call to a function \
+                             that is not available is a static error even with forwards-compatible \
+                             behavior, §18.1.1)"
+                        ),
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    /// Compiles an XPath expression; any static error is reported now.
+    pub(super) fn compile_expr_strictly(
         &mut self,
         source: &str,
         ctx: StaticContextId,
@@ -143,7 +229,40 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     format!("cannot compile the expression {source:?}: {e}"),
                 )
             })?;
-        self.exprs.push(CompiledExpr { expr, ctx, vars });
+        self.exprs.push(CompiledExpr {
+            expr,
+            ctx,
+            vars,
+            deferred: None,
+        });
+        Ok(ExprId(self.exprs.len() as u32 - 1))
+    }
+
+    /// An expression that fails with `error` when — and only if — it is
+    /// evaluated (§5.3, forwards-compatible behaviour): the error rides in
+    /// `CompiledExpr::deferred`, which `Transformation::eval_expr` returns
+    /// before evaluating anything, so the run fails with the code the compiler
+    /// would have reported, as the processor's error. The expression itself is
+    /// the empty sequence, so the analyses that read a compiled expression
+    /// (variable references, focus, function calls) see nothing.
+    fn deferred_static_error(
+        &mut self,
+        error: XsltError,
+        ctx: StaticContextId,
+    ) -> Result<ExprId, XsltError> {
+        let expr = XPathExpr::compile_with_vars("()", self.compile_context(ctx), &[])
+            .map_err(|e| XsltError::internal(format!("cannot compile `()`: {e}")))?;
+        let message = format!(
+            "{} (a static error in a region with forwards-compatible behavior, deferred to \
+             evaluation by §5.3)",
+            error.message
+        );
+        self.exprs.push(CompiledExpr {
+            expr,
+            ctx,
+            vars: Vec::new(),
+            deferred: Some(XsltError::new(error.code, message)),
+        });
         Ok(ExprId(self.exprs.len() as u32 - 1))
     }
 
@@ -211,6 +330,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             expr,
             ctx,
             vars: Vec::new(),
+            deferred: None,
         });
         Ok(ExprId(self.exprs.len() as u32 - 1))
     }

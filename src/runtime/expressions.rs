@@ -34,6 +34,11 @@ impl<'a, 't> Transformation<'a, 't> {
         cx: &XsltContext<'t>,
     ) -> Result<XPathValue<Nav<'t>>, XsltError> {
         let compiled = self.sheet.expr(id);
+        // §5.3: a static error that forwards-compatible behaviour deferred
+        // fails the expression now that it is evaluated.
+        if let Some(deferred) = &compiled.deferred {
+            return Err(deferred.clone());
+        }
         let ctx = self.sheet.context(compiled.ctx);
         // A parked error belongs to the evaluation that parked it; one that
         // was swallowed (a pattern predicate treated as a non-match, §5.5.4)

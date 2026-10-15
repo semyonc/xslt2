@@ -265,8 +265,27 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         subtree_min: u32,
     ) -> Result<(), XsltError> {
         let module = self.modules.module(module_id);
-        let ctx = self.context_of(nav, module)?;
         let local = nav.local_name().to_string();
+        // §3.9: "if an element in the XSLT namespace appears as a child of the
+        // xsl:stylesheet element, and XSLT 2.0 does not allow such elements to
+        // occur as children of the xsl:stylesheet element, then the element and
+        // its content must be ignored" — decided from its own `version` alone,
+        // before its static context reads any of its other standard attributes
+        // (XTSE0808, XTSE0125, XTSE1430 would otherwise be raised for an
+        // element that is to be ignored).
+        if !super::checks::is_declaration(&local) {
+            let mut parent = nav.clone();
+            let inherited = if parent.move_to_parent() {
+                let parent_ctx = self.context_of(&parent, module)?;
+                self.static_contexts.get(parent_ctx).compat
+            } else {
+                crate::stylesheet::CompatMode::Xslt20
+            };
+            if super::checks::own_compat(nav, inherited).is_forwards() {
+                return Ok(());
+            }
+        }
+        let ctx = self.context_of(nav, module)?;
         if !self.static_contexts.get(ctx).compat.is_forwards() {
             check_attributes(nav, &local, &module.location(nav))?;
         }
@@ -757,7 +776,12 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                         if first_non_param.is_none() {
                             first_non_param = Some(child.clone());
                         }
-                        if is_param {
+                        // §3.9: with forwards-compatible behaviour and an
+                        // `xsl:fallback` child, a misplaced `xsl:param` is part
+                        // of the sequence constructor and performs fallback
+                        // there (`sequence_constructor_skipping`); otherwise
+                        // it is the static error.
+                        if is_param && !self.falls_back(&child, module_id)? {
                             let module = self.modules.module(module_id);
                             return Err(XsltError::new(
                                 codes::XTSE0010,

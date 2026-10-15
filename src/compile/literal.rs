@@ -135,6 +135,10 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                         )
                         .with_location(module.location(nav)))
                     }
+                    // §3.9: "if an element has an attribute that XSLT 2.0 does
+                    // not allow the element to have, then the attribute must
+                    // be ignored" — a literal result element included.
+                    _ if sc.compat.is_forwards() => {}
                     other => {
                         return Err(XsltError::new(
                             codes::XTSE0805,

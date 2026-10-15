@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use xsd_schema::namespace::NameTable;
 use xsd_schema::xpath::{XPathContext, XPathExpr};
 
-use crate::error::Location;
+use crate::error::{Location, XsltError};
 use crate::functions::XsltFunctions;
 use crate::names::QName;
 use crate::output::OutputDefinition;
@@ -82,6 +82,14 @@ pub struct CompiledExpr {
     pub expr: XPathExpr,
     pub ctx: StaticContextId,
     pub vars: Vec<VarLocation>,
+    /// A static error of the expression's source that §5.3's
+    /// forwards-compatible exception defers to the time the expression is
+    /// evaluated: `Transformation::eval_expr` returns it, as the processor's
+    /// error with its own code, instead of evaluating `expr` (the empty
+    /// sequence then). Kept here, not in the expression, so that nothing a
+    /// stylesheet can write — an `fn:error` QName included — can produce such
+    /// an error.
+    pub(crate) deferred: Option<XsltError>,
 }
 
 /// One part of an attribute value template (§5.6).
@@ -96,6 +104,22 @@ pub enum AvtPart {
 /// > may contain XPath expressions enclosed in curly brackets. …\]
 pub struct Avt {
     pub parts: Vec<AvtPart>,
+    /// Backwards-compatible behaviour is enabled for the attribute (§9.10
+    /// row 6), so each enclosed expression contributes its first atomized item
+    /// only:
+    ///
+    /// > \[§5.6\] If backwards compatible behavior is enabled for the attribute,
+    /// > the rules for converting the value of the expression to a string are
+    /// > modified as follows. After atomizing the result of the expression, all
+    /// > items other than the first item in the resulting sequence are
+    /// > discarded, and the effective value is obtained by converting the first
+    /// > item in the sequence to a string. If the atomized sequence is empty,
+    /// > the result is a zero-length string.
+    ///
+    /// Decided once, when the template is compiled, from the static context of
+    /// the element the attribute is on (§3.8: an element's `[xsl:]version`
+    /// governs "itself, its attributes, its descendants and their attributes").
+    pub(crate) first_item_only: bool,
 }
 
 impl Avt {
@@ -103,6 +127,7 @@ impl Avt {
     pub fn literal(text: impl Into<String>) -> Self {
         Self {
             parts: vec![AvtPart::Literal(text.into())],
+            first_item_only: false,
         }
     }
 
@@ -585,14 +610,33 @@ pub enum InstructionKind {
     /// `xsl:number` (§12).
     Number(Box<NumberInstruction>),
     /// `xsl:fallback` outside an unknown extension instruction: ignored
-    /// (§18.2.3 "the xsl:fallback instruction … is ignored").
+    /// (§18.2.3 "When not performing fallback, evaluating an xsl:fallback
+    /// element returns an empty sequence").
     Fallback,
-    /// A construct the compiler recognises but this processor does not run yet;
-    /// `milestone` is the roadmap sub-milestone that owns it (see
-    /// `XsltError::not_implemented`).
-    NotImplemented {
-        feature: String,
-        milestone: &'static str,
+    /// An extension instruction (§18.2): an element in a sequence constructor
+    /// whose namespace an `[xsl:]extension-element-prefixes` in scope
+    /// designates (§18.2.1). This processor implements no extension
+    /// instruction, so evaluating one always performs fallback:
+    ///
+    /// > \[§18.2.3\] \[ERR XTDE1450\] When a processor performs fallback for an
+    /// > extension instruction that is not recognized, if the instruction
+    /// > element has one or more `xsl:fallback` children, then the content of
+    /// > each of the `xsl:fallback` children must be evaluated; it is a
+    /// > non-recoverable dynamic error if it has no `xsl:fallback` children.
+    ///
+    /// and never at compile time — §18.2.2: "An implementation must not signal
+    /// an error merely because the stylesheet contains an extension
+    /// instruction for which no implementation is available."
+    ExtensionInstruction {
+        /// The element's expanded name.
+        name: QName,
+        /// The element's name as written, for the XTDE1450 message.
+        lexical: String,
+        /// The contents of every `xsl:fallback` child, in document order;
+        /// `None` when there is none (XTDE1450 when evaluated). The siblings
+        /// of the `xsl:fallback` children are not compiled: their meaning
+        /// belongs to the extension.
+        fallback: Option<Body>,
     },
 }
 

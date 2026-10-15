@@ -68,7 +68,13 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         if !literal.is_empty() {
             parts.push(AvtPart::Literal(literal));
         }
-        Ok(Avt { parts })
+        // §9.10 row 6 (§5.6): the attribute's own static context says whether
+        // backwards-compatible behaviour is enabled for it.
+        let first_item_only = self.static_contexts.get(ctx).compat.is_backwards();
+        Ok(Avt {
+            parts,
+            first_item_only,
+        })
     }
 }
 

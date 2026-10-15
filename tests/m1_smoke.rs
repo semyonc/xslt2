@@ -517,12 +517,12 @@ fn a_document_element_that_is_not_a_stylesheet_is_xtse0150() {
 
 #[test]
 fn a_not_implemented_construct_carries_the_internal_code_not_a_panic() {
-    // An extension instruction without `xsl:fallback` is M3e's (it was
-    // `format-date()` until M3d implemented it, and `xsl:number` until M3c).
+    // `xsl:import-schema` is M4's (the stand-in was an extension instruction
+    // without `xsl:fallback` until M3e made it XTDE1450, `format-date()` until
+    // M3d implemented it, and `xsl:number` until M3c).
     let s = sheet(
-        r#"<xsl:template match="/"><xsl:for-each select="doc">
-             <ext:instruction xmlns:ext="urn:ext" xsl:extension-element-prefixes="ext"/>
-           </xsl:for-each></xsl:template>"#,
+        r#"<xsl:import-schema namespace="urn:schema"/>
+           <xsl:template match="/"><out/></xsl:template>"#,
     );
     let e = transform(&s, "<doc/>").unwrap_err();
     assert!(e.is_not_implemented(), "{e}");

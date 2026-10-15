@@ -79,14 +79,19 @@ const ONE_ITEM: &str = r#"<r><item n="zz"/></r>"#;
 /// The reviewer's reproduction, with today's stand-in. `format-number()` was in
 /// the catalog as an `XSLT2-NOTIMPL` stub (M2a, phase 3), which is what made
 /// this reachable: a stylesheet calling it used to fail to compile. M3d
-/// implemented it (`tests/m3d_formatting.rs`), so the missing feature is now an
-/// extension instruction without `xsl:fallback` (M3e) in the body of a
-/// stylesheet function the predicate calls.
+/// implemented it (`tests/m3d_formatting.rs`), and the next stand-in, an
+/// extension instruction without `xsl:fallback`, is XTDE1450 since M3e; the
+/// missing feature is now a UCA collation computed at run time in a build
+/// without the `icu-collation` feature (M2k), in the body of a stylesheet
+/// function the predicate calls. With the feature no missing feature is left
+/// for an evaluation to reach, and the guard is pinned by the unit tests of
+/// `runtime::patterns` (`guard_recoverable`).
 ///
 /// §5.5.4 licenses recovery for "any dynamic error or type error"; a missing
 /// implementation is neither, so the run must fail — in **both** modes — and
 /// must never quietly fall through to the `FALLBACK` rule, which is what the
 /// defect made it do.
+#[cfg(not(feature = "icu-collation"))]
 #[test]
 fn a_not_implemented_function_in_a_pattern_is_never_recovered_from() {
     for strict in [false, true] {
@@ -102,7 +107,7 @@ fn a_not_implemented_function_in_a_pattern_is_never_recovered_from() {
             "strict={strict}: expected XSLT2-NOTIMPL, got {error}"
         );
         assert!(
-            error.to_string().contains("ext:instruction"),
+            error.to_string().contains("collation/UCA"),
             "strict={strict}: the message should name the feature: {error}"
         );
     }
@@ -117,6 +122,7 @@ fn a_not_implemented_function_in_a_pattern_is_never_recovered_from() {
 /// `format-*` stubs until M3d — `tests/m3d_formatting.rs`. No function an
 /// expression can call is missing any more, so the feature is reached through a
 /// stylesheet function, called on its own and inside a larger expression.)
+#[cfg(not(feature = "icu-collation"))]
 #[test]
 fn any_missing_feature_in_a_pattern_predicate_propagates() {
     for predicate in ["m:missing(.)", "not(m:missing(.)) or true()"] {
@@ -135,15 +141,18 @@ fn any_missing_feature_in_a_pattern_predicate_propagates() {
 }
 
 /// [`two_rules`] whose predicate calls `m:missing(.)`, a stylesheet function
-/// that evaluates an extension instruction this processor does not implement
-/// and that has no `xsl:fallback` (`XSLT2-NOTIMPL`, M3e).
+/// that sorts under a UCA collation computed at run time (`XSLT2-NOTIMPL`,
+/// M2k, in a build without the `icu-collation` feature).
+#[cfg(not(feature = "icu-collation"))]
 fn rules_calling_a_missing_feature() -> String {
     r#"<xsl:template match="/"><out><xsl:apply-templates select="r/item"/></out></xsl:template>
        <xsl:template match="item[m:missing(.)]" xmlns:m="urn:m">PREDICATE</xsl:template>
        <xsl:template match="item">FALLBACK</xsl:template>
        <xsl:function name="m:missing" xmlns:m="urn:m">
          <xsl:param name="n"/>
-         <ext:instruction xmlns:ext="urn:ext" xsl:extension-element-prefixes="ext"/>
+         <xsl:perform-sort select="(2, 1)">
+           <xsl:sort select="." collation="{concat('http://www.w3.org/2013/collation/UCA', '?strength=secondary')}"/>
+         </xsl:perform-sort>
          <xsl:sequence select="true()"/>
        </xsl:function>"#
         .to_string()
