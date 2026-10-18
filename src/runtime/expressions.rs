@@ -84,6 +84,8 @@ impl<'a, 't> Transformation<'a, 't> {
                     dynamic.implicit_timezone = Some(timezone);
                 }
                 dynamic.set_function_evaluator(Some(&evaluator));
+                // Compiled regular expressions outlive this evaluation.
+                dynamic.set_regex_cache(Some(&self.xpath_regexes));
             });
         result.map_err(|e| self.xpath_error(e))
     }

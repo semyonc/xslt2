@@ -18,10 +18,11 @@ xsd-schema = { path = "../xsd-schema", features = ["xsd11"] }
 bumpalo = "3"
 # Typed keys for the document store (DocId).
 slotmap = "1.0"
-# The regular-expression engine behind xsl:analyze-string (§15). The same
-# requirement as xsd-schema's, so the graph keeps one copy and a local
-# `[patch.crates-io]` of it applies to both.
-regexml = "0.2"
+# The regular-expression engine behind xsl:analyze-string (§15): the maintained
+# fork of `regexml`, published as `regexml-fork` and renamed back so the code
+# keeps the name `regexml`. The same requirement as xsd-schema's, so the graph
+# keeps one copy.
+regexml = { package = "regexml-fork", version = "0.3" }
 # Serialization's `normalization-form` (NFC, NFD, NFKC, NFKD). Already in the
 # graph through `xsd-schema` (its `fn:normalize-unicode`), with the same
 # requirement, so no new build.

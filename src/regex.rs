@@ -10,94 +10,63 @@
 //! `^` and `$`, reluctant quantifiers, back-references `\N` and the escape
 //! `\$`; capturing groups are numbered by their opening parenthesis; there is
 //! no `(?…)` syntax. §7.6.1.1 defines exactly four flags, `s`, `m`, `i` and
-//! `x`, in any order and repeatable.
+//! `x`, in any order and repeatable; without `s`, "the meta-character .
+//! matches any character except a newline (#x0A) character".
 //!
-//! The backend is `regexml`, which implements the *later* XPath dialect — the
-//! one with the non-capturing group `(?:…)` and the `q` flag. The XPath
-//! engine of `xsd-schema` faces the same mismatch for `fn:matches`,
-//! `fn:replace` and `fn:tokenize` and solves it with a pre-pass over the
-//! pattern before handing it to `regexml::Regex::xpath`; that pre-pass is
-//! private to the engine, so `check_xpath20_dialect` here is a copy of it
-//! (`xsd-schema/src/xpath/functions/regex.rs`, `check_xpath20_regex_dialect`).
-//! Keep the two in step; the copy can go once the engine exposes its regex
-//! compilation to hosts.
+//! The backend is `regexml` (the `regexml-fork` crate), compiled in its XPath
+//! 2.0 dialect, `Regex::xpath20`, which is exactly that language: the flags
+//! `s`, `m`, `i`, `x` (anything else, `q` or a `;` included, is
+//! `ErrorKind::InvalidFlags`), no `(?` outside a character class (checked as
+//! the pattern reads after the `x` flag's whitespace removal), and `.` that
+//! excludes only #xA. `xsd-schema` compiles `fn:matches`, `fn:replace` and
+//! `fn:tokenize` with the same constructor, so the two agree by construction.
 //!
 //! The error codes are XSLT's own (§15.1): an invalid regular expression is
 //! XTDE1140 where F&O says FORX0002, invalid flags are XTDE1145 where F&O says
 //! FORX0001, and a regular expression that matches the zero-length string is
 //! XTDE1150.
 //!
-//! One more check is this processor's own: a regular expression nested deeper
-//! than [`MAX_NESTING`] is refused with an implementation-limit error
-//! (`XSLT2-INTERNAL`) before `regexml` sees it, because `regexml` would use
-//! host stack in proportion to the nesting and a deep enough pattern — which
-//! a computed `regex` can take from the input document — would abort the
-//! process.
+//! One error is not a syntax error: the engine refuses a pattern that nests
+//! groups and character classes more than 64 levels deep
+//! (`ErrorKind::NestingTooDeep`), because compiling and matching recurse once
+//! per level on the host stack, and a deep enough pattern — which a computed
+//! `regex` can take from the input document — would otherwise abort the
+//! process. The pattern may well be valid, so this processor reports it as an
+//! implementation limit (`XSLT2-INTERNAL`, see `too_deep`), not XTDE1140.
+//!
+//! > \[§21\] A conforming processor may impose limits on the processing
+//! > resources consumed by the processing of a stylesheet.
+//!
+//! The engine's one limit replaces the 32 levels this crate used to impose
+//! before the engine had one (Wave B decision D6). What it costs in stack,
+//! measured as the smallest thread stack (arm64, 4 KiB steps, a thread's own
+//! floor of 19 KiB included) that runs one phase at 32 / 64 levels:
+//!
+//! | Phase | debug | release |
+//! |---|---|---|
+//! | compile `((…(a)…))` (`Regex::xpath20`, its `is_match("")`, the drop) | 243 / 498 KiB | 35 / 83 KiB |
+//! | compile `[a-z-[a-z-[…[a]…]]]` | 83 / 163 KiB | 19 / 19 KiB |
+//! | match (`analyze`) `((…(a)+…)+)+` | 35 / 83 KiB | 19 / 19 KiB |
+//!
+//! and nothing grows with the length of a flat pattern — 10 000
+//! alternatives or 10 000 `\p{L}` compile in the stack of one. A computed
+//! regex is compiled after the run has checked its stack guard
+//! (`TransformOptions::stack_limit`), so that compilation comes on top of what
+//! the guard allowed; on a thread with Rust's default 2 MiB stack the guard's
+//! default for such a thread (`OTHER_THREAD_STACK_LIMIT`, 1 MiB) leaves the
+//! other 1 MiB for it — under 0.5 MiB at the limit in a debug build — and for
+//! the evaluation between two checks (`tests/m2h_regex.rs`,
+//! `a_recursion_compiling_regexes_at_the_limit_ends_in_the_stack_guard_error`,
+//! which runs in both profiles).
+//! Real regular expressions nest a handful of levels deep: the deepest
+//! literal one in the W3C XSLT test suite (758 of them: `xsl:analyze-string`,
+//! `matches`, `replace`, `tokenize`) nests 4, in XQTS 1.0.2 2.
 
 use std::fmt;
 
+use regexml::ErrorKind;
+
 use crate::error::{codes, XsltError};
-
-/// The flags F&O 1.0 §7.6.1.1 defines.
-const XPATH20_FLAGS: &str = "smix";
-
-/// How deep the groups and character classes of a regular expression may nest
-/// (`(` … `)` outside a class, `[` … `]` including a subtracted class
-/// `[a-z-[aeiou]]`, counted together): an implementation limit.
-///
-/// > \[§21\] A conforming processor may impose limits on the processing
-/// > resources consumed by the processing of a stylesheet.
-///
-/// `regexml` parses a pattern by recursive descent, and the program it builds,
-/// the matcher that runs it, the match it reports and the drop of each are all
-/// recursive in the nesting too — all on the host stack, with no stack guard
-/// (`TransformOptions::stack_limit`) between their levels. Before this limit a
-/// computed `regex="{@re}"` with 3 000 nested groups taken from the input
-/// aborted the process on a 2 MiB thread, and 12 000 on the 8 MiB main thread.
-///
-/// The limit has to hold in **both** build profiles, so it is sized for the
-/// debug build, whose frames are about six times larger. Measured for the M2h
-/// reviews (`regexml` 0.2.2, and in parentheses the local fork with its
-/// capture-restoring backtracking, where it differs; arm64, the stack painted
-/// below the caller's frame and the deepest write found after each phase; the
-/// cost per level is constant from about 16 levels on):
-///
-/// | Phase | debug, per level | debug, at 32 | release, per level | release, at 32 |
-/// |---|---|---|---|---|
-/// | compile `((…(a)…))` (`Regex::xpath`, incl. its `is_match("")`) | 5 568 B | 186 KiB | 960 B | 33 KiB |
-/// | compile `[a-z-[a-z-[…[a]…]]]` | 2 432 B | 88 KiB | 512 B | 19 KiB |
-/// | match (`analyze`), deepest shape tried, `((…(a)+…)+)+` | 1 632 B (1 936 B) | 59 KiB (68 KiB) | 352 B (478 B) | < 16 KiB (17 KiB) |
-/// | the captured substrings (`collect_match`) / drop the match / drop the program | 320 / 208 / 256 B | < 16 KiB each | 128 / 64 / 128 B | < 16 KiB each |
-///
-/// and **nothing** grows with the length of a flat pattern: 10 000
-/// alternatives, a sequence of 5 000 groups or of 10 000 quantified pieces, or
-/// 10 000 `\p{L}` compile and match in the same stack as one (release). So
-/// nesting is the only thing to bound, and the deepest phase is the
-/// compilation; the phases run one after another, so the deepest of them is
-/// what a regular expression adds. At this limit that is 186 KiB in a debug
-/// build — under a quarter of the 1 MiB that lies, on a thread with Rust's
-/// default 2 MiB stack, between the end of the stack and the
-/// `OTHER_THREAD_STACK_LIMIT` (1 MiB) a run gets by default on a thread that
-/// `run_on_large_stack` did not start. That quarter is the budget, because a
-/// computed regex is compiled after the run has checked the stack guard, so
-/// what the compilation takes is on top of what the guard allowed, and the
-/// rest of the 1 MiB is for the evaluation between two checks.
-///
-/// Measured through `xslt2`'s public API: a whole job (compile the stylesheet,
-/// transform, serialize) with a 32-deep regex peaks at 340 KB in a debug
-/// build, as deep as the same job with no group at all (56 KB against 35 KB in
-/// release); and a template recursion that compiles a new 32-deep computed
-/// regex at every level until the guard's default 1 MiB stops it needs a
-/// thread of 1 232 KiB in debug (the same as with a regex of no groups: the
-/// evaluation between checks dominates) and 1 056 KiB in release, so Rust's
-/// default 2 MiB leaves about 800 KiB to spare. The previous limit, 256, was
-/// sized from release numbers alone and aborted that recursion in a debug
-/// build (1.4 MB to compile at 256). For comparison, Rust's `regex-syntax` 0.8
-/// sets its default `nest_limit` to 250 for the same reason; but real regular
-/// expressions nest a handful of levels deep: the deepest literal one in the
-/// W3C XSLT test suite (758 of them: `xsl:analyze-string`, `matches`,
-/// `replace`, `tokenize`) nests 4, in XQTS 1.0.2 2.
-pub(crate) const MAX_NESTING: usize = 32;
 
 /// A regular expression compiled for `xsl:analyze-string`, together with the
 /// effective values of `regex` and `flags` it was compiled from.
@@ -140,15 +109,16 @@ impl CompiledRegex {
     /// XTDE1150 is decided here, by the very test the spec states — whatever
     /// string the instruction is later applied to, an empty one included.
     ///
-    /// A pattern nested deeper than [`MAX_NESTING`] is refused first, with the
-    /// implementation-limit error (`XSLT2-INTERNAL`), whether or not it is
-    /// valid: finding out would take the recursion the limit is there to
-    /// avoid.
+    /// The flags are checked before the pattern. A pattern nested deeper than
+    /// the engine allows is the implementation-limit error (`XSLT2-INTERNAL`)
+    /// — reported as soon as the engine's parser reaches that depth, so an
+    /// error that comes later in the pattern is not seen (§2.9: "It is
+    /// implementation-dependent which of the several errors is signaled").
     pub(crate) fn new(pattern: &str, flags: &str) -> Result<Self, XsltError> {
-        check_xpath20_dialect(pattern, flags)?;
-        let regex = regexml::Regex::xpath(pattern, flags).map_err(|e| match e {
-            regexml::Error::InvalidFlags(_) => invalid_flags(flags),
-            other => invalid_regex(pattern, &format!("{other:?}")),
+        let regex = regexml::Regex::xpath20(pattern, flags).map_err(|e| match e.kind() {
+            ErrorKind::InvalidFlags => invalid_flags(flags),
+            ErrorKind::NestingTooDeep => too_deep(&e),
+            _ => invalid_regex(pattern, &e),
         })?;
         if regex.is_match("") {
             return Err(XsltError::new(
@@ -193,7 +163,7 @@ fn invalid_flags(flags: &str) -> XsltError {
     )
 }
 
-fn invalid_regex(pattern: &str, why: &str) -> XsltError {
+fn invalid_regex(pattern: &str, why: &regexml::Error) -> XsltError {
     XsltError::new(
         codes::XTDE1140,
         format!(
@@ -202,102 +172,16 @@ fn invalid_regex(pattern: &str, why: &str) -> XsltError {
     )
 }
 
-/// The implementation-limit error for a pattern nested `depth` deep
-/// ([`MAX_NESTING`]). Not a syntax error — the pattern may well be a valid
-/// regular expression — so not XTDE1140: the same internal code as the stack
-/// guard's limits (`TransformOptions::stack_limit`), never recovered from.
-fn too_deep(depth: usize) -> XsltError {
+/// The implementation-limit error for a pattern nested deeper than the engine
+/// allows (`ErrorKind::NestingTooDeep`, 64 levels). Not a syntax error — the
+/// pattern may well be a valid regular expression — so not XTDE1140: the same
+/// internal code as the stack guard's limits (`TransformOptions::stack_limit`),
+/// never recovered from. The engine's message names the limit.
+fn too_deep(why: &regexml::Error) -> XsltError {
     XsltError::internal(format!(
-        "xsl:analyze-string: the regular expression nests groups and character classes \
-         {depth} deep, more than the {MAX_NESTING} this processor allows (an implementation \
-         limit: a deeper one could overflow the stack while it is compiled)"
+        "xsl:analyze-string: the regular expression is refused by an implementation limit of \
+         this processor ({why}): a deeper one could overflow the stack while it is compiled"
     ))
-}
-
-/// Rejects what the XPath 2.0 dialect does not have and `regexml` accepts:
-/// any flag other than `s`, `m`, `i` and `x` (XTDE1145), and a `(` followed by
-/// `?` outside a character class (XTDE1140). Then refuses a pattern nested
-/// deeper than [`MAX_NESTING`] (`XSLT2-INTERNAL`, see `too_deep`).
-///
-/// Copied from `xsd-schema`'s `check_xpath20_regex_dialect`
-/// (`src/xpath/functions/regex.rs`), whose reasoning is unchanged: in the XPath
-/// 2.0 grammar a `(` always opens a capturing group and is followed by a
-/// branch, and `?` is a quantifier that needs an atom before it, so an
-/// unescaped `(` can never be followed by `?`. Under the `x` flag the pattern
-/// is checked as it reads after whitespace removal — F&O §7.6.1.1:
-/// "whitespace characters (#x9, #xA, #xD and #x20) in the regular expression
-/// are removed prior to matching with one exception: whitespace characters
-/// within character class expressions (charClassExpr) are not removed" — so
-/// `( ?:a)` is `(?:a)`, and a backslash escapes the next character that
-/// survives the removal.
-///
-/// The nesting measure is this crate's addition (the engine's `fn:matches`,
-/// `fn:replace` and `fn:tokenize` do not have it yet): the same walk counts
-/// the unescaped `(` still open outside a class plus the classes still open,
-/// and the deepest point of the pattern is its nesting. It is reported only
-/// after the walk, so that a dialect error anywhere in the pattern still wins.
-fn check_xpath20_dialect(pattern: &str, flags: &str) -> Result<(), XsltError> {
-    if flags.chars().any(|f| !XPATH20_FLAGS.contains(f)) {
-        return Err(invalid_flags(flags));
-    }
-
-    let ignore_whitespace = flags.contains('x');
-    let is_removed = |c: char| matches!(c, '\u{9}' | '\u{A}' | '\u{D}' | ' ');
-
-    let chars: Vec<char> = pattern.chars().collect();
-    // `[` opens a character class and, after `-`, a nested subtracted class;
-    // inside a class an unescaped `[` or `]` is not allowed otherwise, so a
-    // plain depth counter tracks `[a-z-[(?]]` correctly.
-    let mut class_depth: usize = 0;
-    // The last character kept outside a class was an unescaped `(`.
-    let mut after_open_paren = false;
-    // Groups open outside a class, and the deepest nesting seen so far
-    // (`MAX_NESTING`). A class is only ever open inside the innermost group,
-    // so the two depths add up.
-    let mut group_depth: usize = 0;
-    let mut nesting: usize = 0;
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        i += 1;
-        if ignore_whitespace && class_depth == 0 && is_removed(c) {
-            continue;
-        }
-        let opened = after_open_paren;
-        after_open_paren = false;
-        match c {
-            '\\' => {
-                if ignore_whitespace && class_depth == 0 {
-                    while chars.get(i).is_some_and(|&next| is_removed(next)) {
-                        i += 1;
-                    }
-                }
-                i += 1;
-            }
-            '[' => {
-                class_depth += 1;
-                nesting = nesting.max(group_depth + class_depth);
-            }
-            ']' => class_depth = class_depth.saturating_sub(1),
-            '(' if class_depth == 0 => {
-                after_open_paren = true;
-                group_depth += 1;
-                nesting = nesting.max(group_depth);
-            }
-            ')' if class_depth == 0 => group_depth = group_depth.saturating_sub(1),
-            '?' if opened => {
-                return Err(invalid_regex(
-                    pattern,
-                    "`(?` has no meaning in XPath 2.0: there are no non-capturing groups",
-                ))
-            }
-            _ => {}
-        }
-    }
-    if nesting > MAX_NESTING {
-        return Err(too_deep(nesting));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -355,17 +239,33 @@ mod tests {
         format!("{}[a]{}", "[a-z-".repeat(depth - 1), "]".repeat(depth - 1))
     }
 
-    /// `MAX_NESTING`: groups and classes, nested to the limit, compile; one
+    /// The engine's nesting limit (`ErrorKind::NestingTooDeep`).
+    const NESTING_LIMIT: usize = 64;
+
+    fn assert_too_deep(error: &XsltError, what: &str) {
+        assert_eq!(
+            error.code,
+            crate::error::codes_internal::INTERNAL,
+            "{what}: {error}"
+        );
+        assert!(error.is_internal(), "{what}");
+        assert!(
+            error.message.contains("implementation limit")
+                && error.message.contains(&format!("{NESTING_LIMIT} levels")),
+            "{what}: {error}"
+        );
+    }
+
+    /// The engine's limit: groups and classes, nested to it, compile; one
     /// level deeper is the implementation-limit error, which is not a syntax
     /// error (the pattern is a valid XPath 2.0 regular expression). On the
-    /// test's own thread, with no extra stack: the limit is sized so that a
-    /// debug build compiles a pattern at the limit in a quarter of the room a
-    /// default thread has.
+    /// test's own thread, with no extra stack, in whatever profile `cargo
+    /// test` builds.
     #[test]
     fn nesting_up_to_the_limit_compiles_and_one_more_is_the_limit_error() {
-        let at_limit = CompiledRegex::new(&groups(MAX_NESTING), "").unwrap();
+        let at_limit = CompiledRegex::new(&groups(NESTING_LIMIT), "").unwrap();
         assert!(at_limit.regex().is_match("xay"));
-        assert!(CompiledRegex::new(&subtractions(MAX_NESTING), "").is_ok());
+        assert!(CompiledRegex::new(&subtractions(NESTING_LIMIT), "").is_ok());
         // A class inside groups: the two depths add up.
         let mixed = |groups: usize, classes: usize| {
             format!(
@@ -375,26 +275,14 @@ mod tests {
                 ")".repeat(groups)
             )
         };
-        assert!(CompiledRegex::new(&mixed(MAX_NESTING - 2, 2), "").is_ok());
+        assert!(CompiledRegex::new(&mixed(NESTING_LIMIT - 2, 2), "").is_ok());
         for pattern in [
-            groups(MAX_NESTING + 1),
-            subtractions(MAX_NESTING + 1),
-            mixed(MAX_NESTING - 1, 2),
+            groups(NESTING_LIMIT + 1),
+            subtractions(NESTING_LIMIT + 1),
+            mixed(NESTING_LIMIT - 1, 2),
         ] {
             let error = CompiledRegex::new(&pattern, "").unwrap_err();
-            assert_eq!(
-                error.code,
-                crate::error::codes_internal::INTERNAL,
-                "{pattern}"
-            );
-            assert!(error.is_internal());
-            assert!(
-                error.message.contains(&format!("{} deep", MAX_NESTING + 1))
-                    && error
-                        .message
-                        .contains(&format!("the {MAX_NESTING} this processor allows")),
-                "{error}"
-            );
+            assert_too_deep(&error, &pattern);
         }
     }
 
@@ -404,7 +292,7 @@ mod tests {
     /// stack of a short one).
     #[test]
     fn only_nesting_counts() {
-        let deep = MAX_NESTING * 4;
+        let deep = NESTING_LIMIT * 4;
         let escaped = format!("{}a", r"\(".repeat(deep));
         assert!(CompiledRegex::new(&escaped, "").is_ok());
         let in_a_class = format!("[{}]", "(".repeat(deep));
@@ -416,22 +304,58 @@ mod tests {
         // Under `x`, whitespace between the parentheses changes nothing.
         let spaced = format!(
             "{} a {}",
-            "( ".repeat(MAX_NESTING + 1),
-            " )".repeat(MAX_NESTING + 1)
+            "( ".repeat(NESTING_LIMIT + 1),
+            " )".repeat(NESTING_LIMIT + 1)
         );
-        assert!(CompiledRegex::new(&spaced, "x").unwrap_err().is_internal());
+        assert_too_deep(&CompiledRegex::new(&spaced, "x").unwrap_err(), "spaced");
     }
 
-    /// The limit is decided before `regexml` sees the pattern, so it holds for
-    /// an invalid pattern too (finding out needs the recursion the limit
-    /// avoids) — but a dialect error anywhere in the pattern still wins.
+    /// The flags are checked first; then the pattern is read from the left,
+    /// so whichever of a dialect error and the nesting limit comes first in
+    /// it is reported (§2.9: "It is implementation-dependent which of the
+    /// several errors is signaled"). The limit holds for an invalid pattern
+    /// too: 100 000 unclosed groups are refused at the 65th, before the
+    /// recursion the limit avoids.
     #[test]
-    fn the_limit_comes_after_the_dialect_check() {
+    fn the_flags_come_first_then_the_pattern_from_the_left() {
         let unclosed = "(".repeat(100_000);
-        assert!(CompiledRegex::new(&unclosed, "").unwrap_err().is_internal());
-        let with_non_capturing = format!("{}(?:a)", groups(MAX_NESTING + 1));
-        assert_eq!(code(&with_non_capturing, ""), codes::XTDE1140);
-        assert_eq!(code(&groups(MAX_NESTING + 1), "q"), codes::XTDE1145);
+        assert_too_deep(&CompiledRegex::new(&unclosed, "").unwrap_err(), "unclosed");
+        let deep_then_non_capturing = format!("{}(?:a)", groups(NESTING_LIMIT + 1));
+        assert_too_deep(
+            &CompiledRegex::new(&deep_then_non_capturing, "").unwrap_err(),
+            "deep, then (?:",
+        );
+        let non_capturing_then_deep = format!("(?:a){}", groups(NESTING_LIMIT + 1));
+        assert_eq!(code(&non_capturing_then_deep, ""), codes::XTDE1140);
+        assert_eq!(code(&groups(NESTING_LIMIT + 1), "q"), codes::XTDE1145);
+    }
+
+    /// F&O 1.0 §7.6.1.1: "If the s flag is not specified, the meta-character
+    /// . matches any character except a newline (#x0A) character" — a
+    /// carriage return is matched (F&O 3.1 later excluded it too). And the `x`
+    /// flag removes "whitespace characters (#x9, #xA, #xD and #x20)" only, so
+    /// a form feed stays.
+    #[test]
+    fn dot_and_the_x_flag_follow_f_and_o_1_0() {
+        let dot = CompiledRegex::new("^a.b$", "").unwrap();
+        assert!(dot.regex().is_match("a\rb"));
+        assert!(!dot.regex().is_match("a\nb"));
+        assert!(CompiledRegex::new("^a.b$", "s")
+            .unwrap()
+            .regex()
+            .is_match("a\nb"));
+        let form_feed = CompiledRegex::new("^(\u{C}?:a)$", "x").unwrap();
+        assert!(form_feed.regex().is_match(":a"));
+        assert!(form_feed.regex().is_match("\u{C}:a"));
+        assert!(!form_feed.regex().is_match("a"));
+    }
+
+    /// The engine's own flags after a `;` are not XPath 2.0 flags.
+    #[test]
+    fn engine_flags_are_xtde1145() {
+        for flags in [";k", "i;k", ";"] {
+            assert_eq!(code("a", flags), codes::XTDE1145, "{flags:?}");
+        }
     }
 
     #[test]
