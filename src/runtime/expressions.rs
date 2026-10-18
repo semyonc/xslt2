@@ -40,10 +40,6 @@ impl<'a, 't> Transformation<'a, 't> {
             return Err(deferred.clone());
         }
         let ctx = self.sheet.context(compiled.ctx);
-        // A parked error belongs to the evaluation that parked it; one that
-        // was swallowed (a pattern predicate treated as a non-match, §5.5.4)
-        // must not surface from the next unrelated XPath error.
-        self.parked_error.borrow_mut().take();
 
         // Bind only the slots the expression actually references (§7.5).
         let mut bindings: Vec<(u32, XPathValue<Nav<'t>>)> = Vec::with_capacity(compiled.vars.len());
@@ -122,8 +118,9 @@ impl<'a, 't> Transformation<'a, 't> {
         })
     }
 
-    /// Turns an `XPathError` back into an `XsltError`, recovering an XSLT code
-    /// that the evaluator parked on the way out.
+    /// Turns an `XPathError` back into an `XsltError`: the error the evaluator
+    /// raised inside a function call travels as the engine error's host
+    /// payload and comes back unchanged.
     ///
     /// The `None` arm assigns [`codes_internal::INTERNAL`], and since
     /// [`XsltError::is_recoverable_in_pattern`] refuses to recover from that
@@ -139,11 +136,9 @@ impl<'a, 't> Transformation<'a, 't> {
     ///
     /// [`codes_internal::INTERNAL`]: crate::error::codes_internal::INTERNAL
     pub(super) fn xpath_error(&self, e: XPathError) -> XsltError {
-        if let Some(parked) = self.parked_error.borrow_mut().take() {
-            return parked;
-        }
-        // An error the engine identifies by an error QName (what `fn:error`
-        // raises) is reported by that QName's local name.
+        // An error the processor raised inside a function call is its host
+        // payload; an error the engine identifies by an error QName (what
+        // `fn:error` raises) is reported by that QName's local name.
         if let Some(raised) = crate::error::raised_error_to_xslt(&e) {
             return raised;
         }

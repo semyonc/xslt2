@@ -169,7 +169,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 values.push(value);
             }
             let column = column_keys(values)
-                .map_err(|(a, b)| incomparable(&a, &b, self).with_location(key.loc.clone()))?;
+                .map_err(|(a, b)| incomparable(&a, &b).with_location(key.loc.clone()))?;
             columns.push(column);
         }
 
@@ -408,7 +408,7 @@ impl<'a, 't> Transformation<'a, 't> {
         // string or number function as appropriate." Without it, "Any values of
         // type xs:untypedAtomic are cast to xs:string."
         Ok(Some(match rule.data_type {
-            SortDataType::Text => XmlValue::string(self.atom_string(&atom)),
+            SortDataType::Text => XmlValue::string(atom.to_string_value()),
             // fn:number: NaN for anything that cannot be cast to xs:double.
             SortDataType::Number => XmlValue::double(
                 cast_to(&atom, XmlTypeCode::Double)
@@ -431,14 +431,14 @@ fn bad_value(attr: &str, value: &str) -> XsltError {
 }
 
 /// XTDE1030 for a pair of sort key values that `lt` cannot compare.
-fn incomparable(a: &XmlValue, b: &XmlValue, run: &Transformation<'_, '_>) -> XsltError {
+fn incomparable(a: &XmlValue, b: &XmlValue) -> XsltError {
     XsltError::new(
         codes::XTDE1030,
         format!(
             "the sort key values {:?} (xs:{}) and {:?} (xs:{}) cannot be compared",
-            run.atom_string(a),
+            a.to_string_value(),
             a.type_code.local_name().unwrap_or("anyAtomicType"),
-            run.atom_string(b),
+            b.to_string_value(),
             b.type_code.local_name().unwrap_or("anyAtomicType")
         ),
     )

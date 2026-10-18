@@ -101,13 +101,13 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 | XSLT 2.0-applicable | 6,619 |
 | excluded (documented in `tests/xslts/filter.rs`) | 64 |
 | runnable (dependencies satisfied) | 5,792 |
-| pass | 5,755 |
-| fail / wrongError / harnessError | 31 / 0 / 3 |
+| pass | 5,758 |
+| fail / wrongError / harnessError | 28 / 0 / 3 |
 | not implemented (`XSLT2-NOTIMPL`: M2k without its feature, M4) | 3 |
-| pass rate over runnable | 99.36% |
-| headline (basic profile, non-regex families) | 4,280 / 4,313 = **99.2%** |
+| pass rate over runnable | 99.41% |
+| headline (basic profile, non-regex families) | 4,283 / 4,313 = **99.3%** |
 
-With `--features icu-collation` the two M2k cases pass too: 5,757.
+With `--features icu-collation` the two M2k cases pass too: 5,760.
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the
@@ -148,7 +148,8 @@ its `range`, `../../XSLT2_M3C_FOLLOWUP_REPORT.md`) to 5,560 of 5,793 the same da
 (backwards-compatible attribute value templates, adjacent text nodes merged in simple content, extension instructions
 and forwards-compatible processing, `../../XSLT2_M3E_REPORT.md`) took it to 5,755 of 5,792 on 2026-10-15
 (`next-match-039`, whose expected result is XSLT 3.0's, is excluded); every remaining failure has an owner in that
-report.
+report. `xsd-schema` Wave B batch (a) (the `wave-b` branch: `xs:QName` / `xs:NOTATION` values convert to their
+lexical form) took it to 5,758 on 2026-10-18 (`element-0308`, `message-0306`, `type-0143`).
 
 The sixteen test-sets M1 targets:
 

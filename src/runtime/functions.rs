@@ -48,30 +48,19 @@ impl<'t> FunctionEvaluator<Nav<'t>> for XsltEvaluator<'_, '_, 't> {
             return self
                 .run
                 .call_stylesheet_function(id, args)
-                .map_err(|e| self.park(e));
+                .map_err(XsltError::into_xpath_error);
         }
         let Some(which) = self.run.sheet.functions().resolve(handle) else {
             return BuiltinEvaluator.eval(handle, ctx, args);
         };
-        match self.call(which, ctx, args) {
-            Ok(value) => Ok(value),
-            // `XPathError` has no host-error variant, so the real error is
-            // parked on the transformation and picked up by `xpath_error`.
-            Err(e) => Err(self.park(e)),
-        }
+        // The engine carries the real error out as its host payload, and
+        // `xpath_error` takes it back unchanged.
+        self.call(which, ctx, args)
+            .map_err(XsltError::into_xpath_error)
     }
 }
 
 impl<'t> XsltEvaluator<'_, '_, 't> {
-    /// Parks an error raised below an XPath function call on the
-    /// transformation, where `xpath_error` picks it up: `XPathError` has no
-    /// host-error variant to carry it in.
-    fn park(&self, e: XsltError) -> XPathError {
-        let message = e.to_string();
-        *self.run.parked_error.borrow_mut() = Some(e);
-        XPathError::internal(message)
-    }
-
     /// The base URI relative references in *this* expression resolve against.
     ///
     /// §5.4.1 gives the static context "Base URI: The base URI of the
@@ -339,16 +328,6 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                 Ok(XPathValue::string(group))
             }
             // §16.4 and §16.5: `runtime/format.rs`.
-            // F&O's `fn:error`: the engine ships the implementation but does
-            // not register it, so the catalog registers it here and the call
-            // goes straight through. It never returns a value.
-            // `XsltError::from` keeps the whole error QName and the `Raised`
-            // origin for an error the engine identifies by a QName, so the
-            // error the stylesheet asked for reaches §5.5.4's recovery as the
-            // dynamic error it is, whatever its local name.
-            XsltFn::Error => {
-                xsd_schema::xpath::functions::special::error(ctx, args).map_err(XsltError::from)
-            }
             XsltFn::FormatNumber => self.format_number(args),
             XsltFn::FormatDateTime | XsltFn::FormatDate | XsltFn::FormatTime => {
                 self.format_date_time(which, args)

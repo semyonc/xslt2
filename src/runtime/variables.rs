@@ -198,7 +198,6 @@ impl<'a, 't> Transformation<'a, 't> {
     ) -> Result<XPathValue<Nav<'t>>, XsltError> {
         let compiled = self.sheet.expr(id);
         let ctx = self.sheet.context(compiled.ctx);
-        self.parked_error.borrow_mut().take();
         compiled
             .expr
             .evaluator(ctx)

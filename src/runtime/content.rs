@@ -3,7 +3,6 @@
 
 use xsd_schema::document::BufferDocumentOptions;
 use xsd_schema::navigator::DomNavigator;
-use xsd_schema::types::XmlValue;
 use xsd_schema::xpath::functions::{atomize_sequence, XPathValue};
 use xsd_schema::xpath::XmlItem;
 
@@ -14,17 +13,6 @@ use crate::model::*;
 use crate::receiver::{ComplexContentNormalizer, Name, Nav, Receiver, ResultBuilder};
 
 impl<'a, 't> Transformation<'a, 't> {
-    /// The string an atomized item contributes to simple content (§5.7.2
-    /// step 4, "every value in the atomized sequence is cast to a string").
-    ///
-    /// `xs:QName` and `xs:NOTATION` need the name table to render, because a
-    /// `QualifiedName` holds interned ids: upstream's `Display` prints a debug
-    /// form, which would reach the result tree as an element name. Casting a
-    /// QName to a string yields its lexical form, prefix and all.
-    pub(super) fn atom_string(&self, value: &XmlValue) -> String {
-        atom_to_string(self.sheet.names(), value)
-    }
-
     /// §5.6: the effective value of an attribute value template.
     pub(super) fn avt(
         &self,
@@ -49,7 +37,7 @@ impl<'a, 't> Transformation<'a, 't> {
                         // zero-length string."
                         let atoms = atomize_sequence(value).map_err(|e| self.xpath_error(e))?;
                         if let Some(first) = atoms.first() {
-                            out.push_str(&self.atom_string(first));
+                            out.push_str(&first.to_string_value());
                         }
                     } else {
                         // §5.6: "This conversion is done using the rules given
@@ -84,7 +72,7 @@ impl<'a, 't> Transformation<'a, 't> {
         let is_text = |item: &XmlItem<Nav<'t>>| matches!(item, XmlItem::Node(nav) if nav.node_type().is_text_like());
         if !value.as_slice().iter().any(is_text) {
             let atoms = atomize_sequence(value).map_err(|e| self.xpath_error(e))?;
-            return Ok(atoms.iter().map(|a| self.atom_string(a)).collect());
+            return Ok(atoms.iter().map(|a| a.to_string_value()).collect());
         }
         let mut strings = Vec::new();
         let mut pending: Option<String> = None;
@@ -104,7 +92,7 @@ impl<'a, 't> Transformation<'a, 't> {
             }
             let atoms =
                 atomize_sequence(XPathValue::from_item(item)).map_err(|e| self.xpath_error(e))?;
-            strings.extend(atoms.iter().map(|a| self.atom_string(a)));
+            strings.extend(atoms.iter().map(|a| a.to_string_value()));
         }
         if let Some(text) = pending.filter(|t| !t.is_empty()) {
             strings.push(text);
@@ -139,7 +127,7 @@ impl<'a, 't> Transformation<'a, 't> {
                     let atoms = atomize_sequence(value).map_err(|e| self.xpath_error(e))?;
                     return Ok(atoms
                         .first()
-                        .map(|a| self.atom_string(a))
+                        .map(|a| a.to_string_value())
                         .unwrap_or_default());
                 }
                 Ok(self.simple_strings(value)?.join(&separator))
@@ -420,8 +408,9 @@ impl<'t> Receiver<'t> for SimpleContentCollector<'t> {
         }
         match item {
             XmlItem::Atomic(value) => {
-                let text = atom_to_string(self.names, value);
-                self.push_atomic(text);
+                // §5.7.2 step 4: "every value in the atomized sequence is
+                // cast to a string" — for an xs:QName, its lexical form.
+                self.push_atomic(value.to_string_value());
             }
             XmlItem::Node(nav) => {
                 let text = nav.value();
@@ -445,23 +434,5 @@ impl<'t> Receiver<'t> for SimpleContentCollector<'t> {
         }
         // A copy has the same string value as its original.
         self.append_item(item)
-    }
-}
-/// The string an atomized item contributes to simple content (§5.7.2 step 4).
-///
-/// `xs:QName` and `xs:NOTATION` need the name table to render, because a
-/// `QualifiedName` holds interned ids: upstream's `Display` prints a debug
-/// form, which would reach the result tree as an element name. Casting a QName
-/// to a string yields its lexical form, prefix and all.
-fn atom_to_string(names: &xsd_schema::namespace::NameTable, value: &XmlValue) -> String {
-    match value.as_qname() {
-        Some(qname) => {
-            let local = names.resolve(qname.local_name);
-            match qname.prefix.and_then(|p| names.try_resolve(p)) {
-                Some(prefix) if !prefix.is_empty() => format!("{prefix}:{local}"),
-                _ => local,
-            }
-        }
-        None => value.to_string_value(),
     }
 }

@@ -244,6 +244,10 @@ The tests that need the fork's fixes assert them unconditionally (`m2h_regex`'s
 
 ## Upstream (`../xsd-schema`)
 
-`xslt2` depends on it by path. Upstream changes are **releases**: additive only until 0.3.0. After
+`xslt2` depends on it by path. Since 2026-10-18 `xslt2` `main` builds against the `xsd-schema` branch **`wave-b`**
+(the breaking 0.3.0 work; keep `../xsd-schema` checked out on it): `XPathError` / `ItemType` / `FunctionId` are
+`#[non_exhaustive]`, an `XsltError` travels through the engine as the host payload of `XPathError::Raised`
+(`XsltError::into_xpath_error`, recovered by `raised_error_to_xslt`), `fn:error` is the engine's built-in, and QName /
+NOTATION values print their lexical form (`to_string_value`). Upstream changes are **releases**. After
 touching `src/xpath/*` re-run the XQTS selection (8,047/8,047); after touching `src/document/*` or
 `src/navigator/*` re-run both XSD suites and compare the totals.

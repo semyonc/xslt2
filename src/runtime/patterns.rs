@@ -154,16 +154,7 @@ impl<'a, 't> Transformation<'a, 't> {
             Ok(matched) => Ok(matched),
             Err(e) if self.options.strict_recoverable => Err(e),
             Err(e) if !e.is_recoverable_in_pattern() => Err(e),
-            Err(_) => {
-                // The error has just been dropped; drop the side channel with
-                // it. `XsltEvaluator::eval` parks the real error and hands the
-                // engine a placeholder, and `xpath_error` normally collects it
-                // on the way out — but if the engine were ever to swallow the
-                // placeholder itself, the park would outlive this match and
-                // surface from an unrelated evaluation later on.
-                self.parked_error.borrow_mut().take();
-                Ok(false)
-            }
+            Err(_) => Ok(false),
         }
     }
 
@@ -1231,11 +1222,13 @@ mod tests {
         }
     }
 
-    /// Swallowing an error must also clear the parked-error side channel, so a
-    /// host error the engine dropped cannot surface from a later, unrelated
-    /// evaluation.
+    /// An error the processor raises inside an XPath function call travels as
+    /// the engine error's host payload — there is no side channel that could
+    /// outlive an error §5.5.4 recovers from — and one that is not recovered
+    /// from comes back with its code and origin, so a processor failure is
+    /// still refused by the recovery guard.
     #[test]
-    fn recovering_from_an_error_clears_the_parked_error() {
+    fn an_error_raised_inside_a_function_call_comes_back_unchanged() {
         let names = xsd_schema::namespace::NameTable::new();
         let functions = XsltFunctions::new();
         let sheet = Compiler::new(&names, &functions)
@@ -1243,20 +1236,21 @@ mod tests {
                 "<xsl:stylesheet version=\"2.0\" \
                  xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\">\
                  <xsl:template match=\"/\"/></xsl:stylesheet>",
-                "file:///parked.xsl",
+                "file:///payload.xsl",
             )
             .expect("the stylesheet compiles");
         let arena = Bump::new();
         let run = sheet.transformation(&arena, TransformOptions::default());
-        *run.parked_error.borrow_mut() = Some(XsltError::not_implemented("format-number()", "M3d"));
-        assert_eq!(
-            run.guard_recoverable(Err(XsltError::new("FORG0001", "x"))),
-            Ok(false)
-        );
-        assert!(
-            run.parked_error.borrow().is_none(),
-            "the park must not outlive the match that dropped its error"
-        );
+        let failure = XsltError::not_implemented("format-number()", "M3d");
+        let back = run.xpath_error(failure.clone().into_xpath_error());
+        assert_eq!(back, failure);
+        assert!(back.is_processor_failure());
+        assert_eq!(run.guard_recoverable(Err(back.clone())), Err(back));
+        // A dynamic error raised the same way is recovered from as before.
+        let dynamic = XsltError::new("FORG0001", "x");
+        let back = run.xpath_error(dynamic.clone().into_xpath_error());
+        assert_eq!(back, dynamic);
+        assert_eq!(run.guard_recoverable(Err(back)), Ok(false));
     }
 
     // ── §4.3 / XPath 2.0 §2.5.4.3: the type tests read the annotation ────

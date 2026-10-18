@@ -34,7 +34,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 codes::XTTE0520,
                 format!(
                     "xsl:apply-templates selected an atomic value ({}) where only nodes are allowed",
-                    self.atom_string(value)
+                    value.to_string_value()
                 ),
             ));
         }
@@ -71,7 +71,7 @@ impl<'a, 't> Transformation<'a, 't> {
         out: &mut dyn Receiver<'t>,
     ) -> Result<(), XsltError> {
         match item {
-            XmlItem::Atomic(value) => out.text(&self.atom_string(value), false),
+            XmlItem::Atomic(value) => out.text(&value.to_string_value(), false),
             XmlItem::Node(nav) => match nav.node_type() {
                 DomNodeType::Root | DomNodeType::Element => {
                     // The built-in rule recurses into the children without a

@@ -880,8 +880,13 @@ fn evaluate_use_when(
         // An error the engine identifies by an error QName — `fn:error` —
         // keeps that identity; anything else that has no code of its own is an
         // error in the `use-when` attribute itself, which §3.12 leaves as
-        // XTSE0010. (The FODC0002 §3.12 makes `fn:doc` raise is parked by the
-        // evaluator and collected below, with its processor origin.)
+        // XTSE0010. An error one of the name-answering functions raised
+        // (XTDE1390, XTDE1400, XTDE1428, XTDE1440, and `fn:doc`'s FODC0002)
+        // comes back as the `XsltError` it was, with the processor as its
+        // origin: §3.12 excludes an element with "no static or dynamic errors
+        // … other than errors in the use-when attribute itself", and names no
+        // code of its own for those, so the error is reported as it is, while
+        // the stylesheet is compiled.
         crate::error::raised_error_to_xslt(&e)
             .unwrap_or_else(|| {
                 XsltError::new(
@@ -902,17 +907,7 @@ fn evaluate_use_when(
         .run_with_node_and_setup::<Nav<'_>, _>(None, |ev| {
             ev.context().set_function_evaluator(Some(&evaluator));
         });
-    // An error one of the name-answering functions raised keeps its own code
-    // (XTDE1390, XTDE1400, XTDE1428, XTDE1440, and `fn:doc`'s FODC0002), with
-    // the processor as its origin: §3.12 excludes an element with
-    // "no static or dynamic errors … other than errors in the use-when attribute
-    // itself", and names no code of its own for those, so the error is reported
-    // as it is, while the stylesheet is compiled.
-    let parked = evaluator.take_error();
-    let value = outcome.map_err(|e| match parked {
-        Some(error) => error.or_location(&module.location(nav)),
-        None => fail(e),
-    })?;
+    let value = outcome.map_err(fail)?;
     effective_boolean_value(&value).map_err(fail)
 }
 

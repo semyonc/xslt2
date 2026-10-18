@@ -212,7 +212,7 @@ impl<'a, 't> Transformation<'a, 't> {
         if backwards {
             return Ok(match value.first() {
                 None => String::new(),
-                Some(XmlItem::Atomic(atom)) => self.atom_string(atom),
+                Some(XmlItem::Atomic(atom)) => atom.to_string_value(),
                 Some(XmlItem::Node(node)) => {
                     use xsd_schema::navigator::DomNavigator;
                     node.value()

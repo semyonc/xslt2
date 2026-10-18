@@ -368,11 +368,35 @@ impl fmt::Display for XsltError {
 
 impl std::error::Error for XsltError {}
 
+impl XsltError {
+    /// This error as the XPath engine carries it out of a function the
+    /// processor implements: an `XPathError::Raised` identified by the error's
+    /// QName — the code in the error namespace for a processor error, the
+    /// stylesheet's own QName for one raised through `fn:error` — with the
+    /// whole `XsltError` as its host payload.
+    ///
+    /// The engine never looks inside the payload and propagates the error as
+    /// it is, so [`raised_error_to_xslt`] (and `From<XPathError>`) give back
+    /// exactly this error — code, message, location and [`ErrorOrigin`] — on
+    /// the way out.
+    pub fn into_xpath_error(self) -> xsd_schema::xpath::XPathError {
+        let (namespace_uri, local_name) = match self.error_qname() {
+            Some((namespace_uri, local_name)) => {
+                (namespace_uri.to_string(), local_name.to_string())
+            }
+            None => (XQT_ERRORS_NAMESPACE.to_string(), self.code.clone()),
+        };
+        let description = self.message.clone();
+        xsd_schema::xpath::XPathError::host(&namespace_uri, &local_name, Some(&description), self)
+    }
+}
+
 impl From<xsd_schema::xpath::XPathError> for XsltError {
     fn from(e: xsd_schema::xpath::XPathError) -> Self {
-        // An error the engine identifies by an error QName keeps that identity:
-        // its namespace and its `Raised` origin, not just the local name that
-        // `error_code` would report for the three QNames it knows.
+        // An error the processor raised inside a function call comes back as it
+        // was raised; one the engine identifies by an error QName keeps that
+        // identity: its namespace and its `Raised` origin, not just the local
+        // name that `error_code` would report for the three QNames it knows.
         if let Some(raised) = raised_error_to_xslt(&e) {
             return raised;
         }
@@ -393,9 +417,16 @@ impl From<xsd_schema::xpath::XPathError> for XsltError {
 /// dynamic error regardless of how the stylesheet spelled the QName. The
 /// description becomes the message.
 ///
+/// An error that carries an `XsltError` as its host payload — one the processor
+/// raised inside an XPath function call ([`XsltError::into_xpath_error`]) — is
+/// that error, unchanged.
+///
 /// Returns `None` for every other engine error, so the caller keeps its own
 /// mapping.
 pub fn raised_error_to_xslt(e: &xsd_schema::xpath::XPathError) -> Option<XsltError> {
+    if let Some(own) = e.downcast_host_payload::<XsltError>() {
+        return Some(own.clone());
+    }
     let raised = e.raised_error()?;
     Some(XsltError::raised(
         raised.namespace_uri,
@@ -629,5 +660,40 @@ mod tests {
         assert!(!coded.is_raised());
         assert_eq!(coded.error_namespace(), None);
         assert!(raised_error_to_xslt(&XPathError::more_than_one_item()).is_none());
+    }
+
+    /// An `XsltError` the processor raises inside a function call crosses the
+    /// engine as the host payload of an `XPathError::Raised` and comes back
+    /// whole: code, message, location and origin.
+    #[test]
+    fn an_xslt_error_round_trips_through_the_engine() {
+        use xsd_schema::xpath::XPathError;
+
+        // A processor error: its QName is the code in the error namespace.
+        let processor = XsltError::new(codes::XTDE1360, "no context item")
+            .with_location(Location::new("a.xsl", 3, 7));
+        let engine = processor.clone().into_xpath_error();
+        assert!(matches!(engine, XPathError::Raised(_)));
+        let qname = engine.raised_error().expect("an error QName");
+        assert_eq!(
+            (qname.namespace_uri, qname.local_name, qname.description),
+            (XQT_ERRORS_NAMESPACE, "XTDE1360", Some("no context item"))
+        );
+        assert_eq!(raised_error_to_xslt(&engine), Some(processor.clone()));
+        let back = XsltError::from(engine);
+        assert_eq!(back, processor);
+        assert_eq!(back.origin(), ErrorOrigin::Processor);
+
+        // An error the stylesheet raised keeps its own QName and origin.
+        let raised = XsltError::raised("urn:e", "boom", "why");
+        let engine = raised.clone().into_xpath_error();
+        assert_eq!(engine.raised_error().unwrap().namespace_uri, "urn:e");
+        let back = XsltError::from(engine);
+        assert_eq!(back, raised);
+        assert!(back.is_raised());
+
+        // A processor failure stays one.
+        let failure = XsltError::not_implemented("x", "M4");
+        assert!(XsltError::from(failure.into_xpath_error()).is_not_implemented());
     }
 }

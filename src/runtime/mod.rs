@@ -2,7 +2,7 @@
 //! (§6), and the evaluation of the instruction tree.
 //!
 //! Everything a run needs that outlives a single call — the document store,
-//! the lazily evaluated globals, the message log, the error side channel —
+//! the lazily evaluated globals, the message log —
 //! lives behind a `RefCell` on [`Transformation`], whose methods all take
 //! `&self`. That is what lets the XSLT function evaluator, which must be
 //! handed to the XPath engine as a shared reference, hold the running
@@ -454,10 +454,6 @@ pub struct Transformation<'a, 't> {
     /// (`runtime/number.rs`), by `NumberInstruction::memo_slot`.
     number_memos: RefCell<HashMap<usize, number::NumberMemo<'t>>>,
     messages: RefCell<Vec<Message>>,
-    /// Where an XSLT error raised inside the XPath engine is parked: an
-    /// `XPathError` has no "host error with a code" variant, so the evaluator
-    /// stores the real error here and returns a placeholder (M0b finding 4).
-    parked_error: RefCell<Option<XsltError>>,
     params: RefCell<HashMap<QName, XPathValue<Nav<'t>>>>,
     resolver: Arc<dyn Resolver>,
     options: TransformOptions,
@@ -508,7 +504,6 @@ impl<'a> CompiledStylesheet<'a> {
             placements: RefCell::new(patterns::PlacementCache::default()),
             number_memos: RefCell::new(HashMap::new()),
             messages: RefCell::new(Vec::new()),
-            parked_error: RefCell::new(None),
             params: RefCell::new(HashMap::new()),
             resolver: Arc::new(FileResolver),
             options,

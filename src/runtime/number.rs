@@ -639,7 +639,7 @@ impl<'a, 't> Transformation<'a, 't> {
                     codes::XTDE0980,
                     format!(
                         "xsl:number cannot convert {:?} to an integer",
-                        self.atom_string(&atom)
+                        atom.to_string_value()
                     ),
                 ));
             }
@@ -648,7 +648,7 @@ impl<'a, 't> Transformation<'a, 't> {
                     codes::XTDE0980,
                     format!(
                         "xsl:number cannot format {:?}: the integer is less than zero",
-                        self.atom_string(&atom)
+                        atom.to_string_value()
                     ),
                 ));
             }
@@ -689,7 +689,7 @@ impl<'a, 't> Transformation<'a, 't> {
                     format!(
                         "xsl:number has no value or select attribute, and the context item is \
                          the atomic value {:?}, not a node",
-                        self.atom_string(atom)
+                        atom.to_string_value()
                     ),
                 )),
                 None => Err(XsltError::new(
@@ -710,7 +710,7 @@ impl<'a, 't> Transformation<'a, 't> {
                             (1, Some(XmlItem::Atomic(atom))) => format!(
                                 "the select attribute of xsl:number selected the atomic value \
                                  {:?}, and must select a single node",
-                                self.atom_string(&atom)
+                                atom.to_string_value()
                             ),
                             (n, _) => format!(
                                 "the select attribute of xsl:number selected {n} items, and \

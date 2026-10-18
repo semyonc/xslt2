@@ -518,7 +518,7 @@ impl<'a, 't> Transformation<'a, 't> {
                         "item {} of the population is the atomic value {:?}, and {} needs \
                          nodes",
                         position + 1,
-                        self.atom_string(value),
+                        value.to_string_value(),
                         if starting {
                             "group-starting-with"
                         } else {

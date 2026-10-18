@@ -648,7 +648,7 @@ impl<'a, 't> Transformation<'a, 't> {
         if !compat {
             return value;
         }
-        let text = self.atom_string(&value);
+        let text = value.to_string_value();
         XmlValue::new(
             XmlTypeCode::String,
             XmlValueKind::Atomic(XmlAtomicValue::String(text)),
@@ -769,8 +769,9 @@ pub(super) fn placement_of(value: &XmlValue, collation: &KeyCollation) -> Option
         },
         // `eq` on two QNames compares "namespace URI + local name only"; on
         // two NOTATIONs it compares the values, whose equality is the same.
-        (XmlTypeCode::QName, XmlAtomicValue::QName(name))
-        | (XmlTypeCode::Notation, XmlAtomicValue::Notation(name)) => {
+        (XmlTypeCode::QName, XmlAtomicValue::QName(value))
+        | (XmlTypeCode::Notation, XmlAtomicValue::Notation(value)) => {
+            let name = value.name();
             Slot::Name(code, name.namespace_uri, name.local_name)
         }
         (XmlTypeCode::HexBinary, XmlAtomicValue::HexBinary(octets))

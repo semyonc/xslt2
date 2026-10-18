@@ -25,6 +25,7 @@ use xsd_schema::xpath::XPathError;
 use xsd_schema::RoXmlNavigator;
 
 use crate::collation::{Collation, CollationRegistry};
+use crate::error::XsltError;
 use crate::names::FN_NS;
 
 /// Which XSLT function a [`FunctionHandle`] stands for.
@@ -79,10 +80,6 @@ pub enum XsltFn {
     FormatDate,
     /// `format-time(…)` (§16.5).
     FormatTime,
-    /// `fn:error()` … `fn:error($error, $description, $error-object)` — F&O's
-    /// error-raising function. The engine ships the implementation but does not
-    /// register it among its built-ins, so it is registered here.
-    Error,
     /// §3.8's *fallback error function*: what a call to a function with no
     /// implementation is bound to under backwards-compatible behaviour (see
     /// `XsltFunctions::backwards_compatible_catalog`). Evaluating it raises
@@ -101,9 +98,10 @@ impl XsltFn {
     ///
     /// So the four named ones are in scope, and so are the F&O functions this
     /// crate happens to register itself rather than inherit from the engine —
-    /// `fn:doc`, `fn:doc-available`, `fn:document-uri` and `fn:error` are all
-    /// F&O core, not XSLT additions. Every other §16 function is XSLT-specific
-    /// and is simply absent, which makes a call to it XPST0017.
+    /// `fn:doc`, `fn:doc-available` and `fn:document-uri` are F&O core, not
+    /// XSLT additions (`fn:error` is the engine's own built-in). Every other
+    /// §16 function is XSLT-specific and is simply absent, which makes a call
+    /// to it XPST0017.
     pub fn in_use_when_scope(self) -> bool {
         matches!(
             self,
@@ -114,7 +112,6 @@ impl XsltFn {
                 | XsltFn::Doc
                 | XsltFn::DocAvailable
                 | XsltFn::DocumentUri
-                | XsltFn::Error
         )
     }
 
@@ -143,7 +140,6 @@ impl XsltFn {
             XsltFn::FormatDateTime => "format-dateTime",
             XsltFn::FormatDate => "format-date",
             XsltFn::FormatTime => "format-time",
-            XsltFn::Error => "error",
             XsltFn::FallbackError => "the fallback error function",
         }
     }
@@ -469,38 +465,12 @@ impl XsltFunctions {
             );
         }
 
-        // ── fn:error, arities 0 to 3 ─────────────────────────────────────
-        //
-        // The XPath engine provides the implementation
-        // (`xpath::functions::special::error`) but deliberately leaves it out
-        // of its built-in catalog, so a host that wants the function registers
-        // it. It needs no running transformation, and the evaluator calls the
-        // engine's function straight through. It is no stub, so
-        // `function-available('error')` is true.
-        //
-        // One signature per arity, with the types F&O gives that arity: the
-        // one-argument form takes `xs:QName`, with no occurrence indicator, and
-        // only the two- and three-argument forms accept an empty `$error`. The
-        // engine's implementation enforces the same types itself, so a wrong
-        // declaration here could not loosen them — but a right one is what
-        // XPath 1.0 compatibility mode converts against.
-        let qname = SequenceType::one(ItemType::AtomicType(xsd_schema::types::XmlTypeCode::QName));
-        let qname_opt =
-            SequenceType::optional(ItemType::AtomicType(xsd_schema::types::XmlTypeCode::QName));
-        this.add(XsltFn::Error, "error", vec![], SequenceType::empty());
-        this.add(XsltFn::Error, "error", vec![qname], SequenceType::empty());
-        this.add(
-            XsltFn::Error,
-            "error",
-            vec![qname_opt.clone(), string()],
-            SequenceType::empty(),
-        );
-        this.add(
-            XsltFn::Error,
-            "error",
-            vec![qname_opt, string(), items()],
-            SequenceType::empty(),
-        );
+        // `fn:error` (F&O §3, arities 0 to 3) is not registered here: the
+        // engine has it as a built-in (`FunctionId::Error`), which the catalog
+        // reaches through its fallback to the built-in registry — so it is
+        // available (`function-available('error')` is true), in scope in a
+        // `use-when` expression (an engine built-in is F&O core), and evaluated
+        // by the engine.
 
         // ── §3.8: the fallback error function ────────────────────────────
         //
@@ -898,12 +868,6 @@ pub struct StaticEvaluator<'f> {
     /// namespace". Without it an unprefixed **type** name in a `use-when`
     /// expression would expand differently here than it does at run time.
     xpath_default_namespace: String,
-    /// An error one of these functions raised, with its own code.
-    /// `XPathError` has no host-error variant, so the engine carries an
-    /// `XPathError::internal` with the same message and the caller collects
-    /// the real error here with [`Self::take_error`] — the run-time evaluator's
-    /// `parked_error`, for the `use-when` evaluator.
-    parked: std::cell::RefCell<Option<crate::error::XsltError>>,
 }
 
 impl<'f> StaticEvaluator<'f> {
@@ -916,21 +880,7 @@ impl<'f> StaticEvaluator<'f> {
             functions,
             namespaces,
             xpath_default_namespace,
-            parked: std::cell::RefCell::new(None),
         }
-    }
-
-    /// The error a function raised during the last evaluation, if any —
-    /// consulted when the evaluation failed, since the engine's own error only
-    /// carries its message.
-    pub fn take_error(&self) -> Option<crate::error::XsltError> {
-        self.parked.borrow_mut().take()
-    }
-
-    fn park(&self, e: crate::error::XsltError) -> XPathError {
-        let carried = XPathError::internal(e.to_string());
-        *self.parked.borrow_mut() = Some(e);
-        carried
     }
 
     /// The static context these four functions expand their argument against —
@@ -970,7 +920,8 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
         // §3.12 does not exempt a `use-when` expression from these functions'
         // errors: a name that cannot be expanded is XTDE1390 / XTDE1400 /
         // XTDE1428 / XTDE1440 here exactly as at run time.
-        let expand = || expand_name_argument(&scope, which, &name).map_err(|e| self.park(e));
+        let expand =
+            || expand_name_argument(&scope, which, &name).map_err(XsltError::into_xpath_error);
         match which {
             XsltFn::SystemProperty => {
                 let (uri, local) = expand()?;
@@ -992,7 +943,7 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
                 // which means that the function function-available will return
                 // false in respect of such functions". §18.1.1: the
                 // two-argument form asks about one arity only.
-                let arity = arity_argument(args.get(1)).map_err(|e| self.park(e))?;
+                let arity = arity_argument(args.get(1)).map_err(XsltError::into_xpath_error)?;
                 Ok(XPathValue::boolean(match arity {
                     None => (0..=MAX_ARITY)
                         .any(|arity| self.functions.is_available_in_use_when(&uri, local, arity)),
@@ -1020,16 +971,16 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
             // documents: None", so `fn:doc` can never find its document. F&O
             // gives that FODC0002 (`use-when-0128`). It is the processor's
             // error, not one the stylesheet raised through `fn:error`, so it
-            // is parked like the four name errors above and collected with
-            // `ErrorOrigin::Processor`; the engine itself only carries its
-            // message.
-            XsltFn::Doc => Err(self.park(crate::error::XsltError::new(
+            // travels like the four name errors above, as the engine's host
+            // error carrying the `XsltError` with `ErrorOrigin::Processor`.
+            XsltFn::Doc => Err(XsltError::new(
                 "FODC0002",
                 format!(
                     "a use-when expression has no available documents, so doc({name:?}) cannot \
                      be resolved"
                 ),
-            ))),
+            )
+            .into_xpath_error()),
             // F&O `fn:doc-available`: "If `$uri` is the empty sequence, this
             // function returns false" (from memory) — and with no available
             // documents at all, false is the answer for every other argument
@@ -1041,7 +992,6 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
             // `K-DocumentURIFunc-3` (`empty(document-uri(()))` = `true`) and
             // `fn-document-uri-2` (`count(document-uri(()))` = `0`).
             XsltFn::DocumentUri => Ok(XPathValue::empty()),
-            XsltFn::Error => BuiltinEvaluator.eval(handle, ctx, args),
             other => Err(XPathError::internal(format!(
                 "{}() cannot be called from a use-when expression",
                 other.name()
