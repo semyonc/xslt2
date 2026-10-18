@@ -664,26 +664,12 @@ fn back_references() {
 /// repetition (Python, Perl and Java agree). `regexml` 0.2.2 reported `""`:
 /// backtracking cleared the group instead of restoring it.
 ///
-/// The fix is in `regexml` (the local fork, see `CLAUDE.md`), which this
-/// crate's tests do not control: with the crates.io 0.2.2 the test checks the
-/// backend on the very pattern first and skips, saying so, instead of
-/// failing. The fork's own tests (`tests/test_captures.rs`) assert the fix
-/// unconditionally.
+/// The fix is in the engine, `regexml-fork` 0.3.0 ("Captured groups are
+/// restored when the matcher backtracks", its CHANGELOG), which this crate
+/// depends on; the test used to skip on the crates.io `regexml` 0.2.2 and is
+/// now unconditional.
 #[test]
 fn a_backtracked_alternative_does_not_erase_an_earlier_capture() {
-    let backend = regexml::Regex::xpath("((a)|(ab))+c", "")
-        .unwrap()
-        .replace_all("aabc", "$2")
-        .unwrap();
-    if backend != "a" {
-        eprintln!(
-            "a_backtracked_alternative_does_not_erase_an_earlier_capture: SKIPPED — the \
-             regexml in use reports group 2 of ((a)|(ab))+c over aabc as {backend:?}; the \
-             capture-restoring backtracking fix (fork branch analyze-string-and-category-cache, \
-             planned upstream PR) is needed for this test"
-        );
-        return;
-    }
     assert_eq!(
         groups("'aabc'", "((a)|(ab))+c", 3),
         r#"<out><m g0="aabc" g1="ab" g2="a" g3="ab"/></out>"#
@@ -1232,8 +1218,9 @@ fn run_default_thread(main: &str, source: &str) -> Result<String, (Phase, XsltEr
         .unwrap()
 }
 
-/// The implementation limit on regex nesting (`regex::MAX_NESTING`, private).
-const NESTING_LIMIT: usize = 32;
+/// The implementation limit on regex nesting: the engine's
+/// (`regexml::ErrorKind::NestingTooDeep`, 64 levels of groups and classes).
+const NESTING_LIMIT: usize = 64;
 
 /// `((…(a)…))`, `depth` groups deep.
 fn nested_groups(depth: usize) -> String {
@@ -1259,10 +1246,10 @@ fn assert_nesting_limit(result: Result<String, (Phase, XsltError)>, phase: Phase
             assert_eq!(got, phase, "{e}");
             assert_eq!(e.code, "XSLT2-INTERNAL", "{e}");
             assert!(
-                e.message.contains(&format!("{depth} deep"))
+                e.message.contains("implementation limit")
                     && e.message
-                        .contains(&format!("the {NESTING_LIMIT} this processor allows")),
-                "{e}"
+                        .contains(&format!("more than {NESTING_LIMIT} levels deep")),
+                "depth {depth}: {e}"
             );
         }
         Ok(out) => panic!("expected the nesting limit, got {out:?}"),
@@ -1271,9 +1258,9 @@ fn assert_nesting_limit(result: Result<String, (Phase, XsltError)>, phase: Phase
 
 /// R1. §21: "A conforming processor may impose limits on the processing
 /// resources consumed by the processing of a stylesheet." `regexml` compiles a
-/// regular expression recursively, so its nesting is limited (32 levels):
-/// up to the limit the regular expression works, fixed or computed — on an
-/// ordinary thread, in a debug build as well (R3-1).
+/// regular expression recursively, so its nesting is limited (the engine's
+/// 64 levels): up to the limit the regular expression works, fixed or
+/// computed — on an ordinary thread, in a debug build as well (R3-1).
 #[test]
 fn a_regex_nested_to_the_limit_works_fixed_and_computed() {
     let regex = nested_groups(NESTING_LIMIT);
@@ -1339,11 +1326,12 @@ fn a_deeply_nested_regex_from_the_input_is_an_error_not_an_abort() {
 /// on an ordinary thread (`std::thread::spawn`, 2 MiB), in whatever profile
 /// `cargo test` builds. The guard lets the evaluation use 1 MiB
 /// (`OTHER_THREAD_STACK_LIMIT`) before a compilation that comes on top of it,
-/// so the limit has to keep a debug build's compilation (5.6 KB a level) well
-/// inside the other 1 MiB: with the previous limit, 256, this aborted the
-/// process (stack overflow, SIGABRT) in a debug build at 192 and 256 levels.
-/// It ends in the guard's error; one level deeper, the first compilation is
-/// the nesting-limit error.
+/// so the limit has to keep a debug build's compilation inside the other
+/// 1 MiB: with this crate's earlier limit of 256 levels this aborted the
+/// process (stack overflow, SIGABRT) in a debug build at 192 and 256 levels;
+/// at the engine's 64 a debug compilation needs a 498 KiB thread
+/// (`src/regex.rs`). It ends in the guard's error; one level deeper, the
+/// first compilation is the nesting-limit error.
 #[test]
 fn a_recursion_compiling_regexes_at_the_limit_ends_in_the_stack_guard_error() {
     let main = sheet(

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use regexml::{AnalyzeEntry, MatchEntry};
+use regexml::{AnalyzeEntry, ErrorKind, MatchEntry};
 use xsd_schema::types::XmlValue;
 use xsd_schema::xpath::functions::{atomize_sequence, XPathValue};
 use xsd_schema::xpath::XmlItem;
@@ -31,10 +31,11 @@ use crate::regex::CompiledRegex;
 
 /// How many computed regular expressions a run keeps compiled.
 ///
-/// `regexml` rebuilds the Unicode category tables behind `\p{…}`, `\w` and
-/// `\d` on every compilation, so recompiling the same effective value for
-/// every evaluation of an instruction would dominate a loop over short
-/// strings. The cache is keyed by the effective values of `regex` and
+/// `regexml` builds the Unicode category sets behind `\p{…}`, `\w` and `\d`
+/// once per process, but it still parses the pattern and builds a program on
+/// every compilation, so recompiling the same effective value for every
+/// evaluation of an instruction would dominate a loop over short strings.
+/// The cache is keyed by the effective values of `regex` and
 /// `flags`; when it is full it is simply emptied — a stylesheet that computes
 /// more distinct regular expressions than this in one run pays one
 /// compilation per evaluation, which is what it would pay without a cache.
@@ -115,7 +116,7 @@ impl<'a, 't> Transformation<'a, 't> {
                     None => String::new(),
                 };
                 // Q33: compiling nests on the host stack as deep as the
-                // pattern does (`regex::MAX_NESTING` bounds that), and this
+                // pattern does (the engine's nesting limit bounds that), and this
                 // instruction may itself sit deep in a body with no template
                 // invocation in between to check the stack guard.
                 self.check_stack()?;
@@ -263,14 +264,21 @@ fn partition(
     input: &str,
     with_groups: bool,
 ) -> Result<Vec<Substring>, XsltError> {
-    let entries = regex.regex().analyze(input).map_err(|e| {
-        XsltError::new(
+    // The engine's only error here is `ErrorKind::MatchesEmptyString`, which
+    // `CompiledRegex::new` has already ruled out (XTDE1150); anything else
+    // would be an engine defect, reported as this processor's own.
+    let entries = regex.regex().analyze(input).map_err(|e| match e.kind() {
+        ErrorKind::MatchesEmptyString => XsltError::new(
             codes::XTDE1150,
             format!(
-                "xsl:analyze-string: the regular expression {:?} cannot be applied: {e:?}",
+                "xsl:analyze-string: the regular expression {:?} cannot be applied: {e}",
                 regex.pattern()
             ),
-        )
+        ),
+        _ => XsltError::internal(format!(
+            "xsl:analyze-string: the regular expression {:?} cannot be applied: {e}",
+            regex.pattern()
+        )),
     })?;
     let mut substrings = Vec::new();
     for entry in entries {

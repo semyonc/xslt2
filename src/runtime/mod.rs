@@ -435,6 +435,15 @@ pub struct Transformation<'a, 't> {
     /// The regular expressions of `xsl:analyze-string` instructions whose
     /// `regex` or `flags` is computed, by effective value (`runtime/analyze.rs`).
     regexes: RefCell<analyze::RegexCache>,
+    /// The compiled regular expressions of `fn:matches`, `fn:replace` and
+    /// `fn:tokenize`, lent to every evaluation of the run (`eval_expr`). The
+    /// engine's own cache lasts one evaluation, and an instruction is evaluated
+    /// once per item, so without this a `matches()` in an `xsl:if` inside an
+    /// `xsl:for-each` compiled its pattern for every item. One per
+    /// transformation, because that is the object that already lives across
+    /// evaluations and is used by one thread at a time; bounded by the engine
+    /// (`RegexCache::DEFAULT_CAPACITY` entries, least recently used dropped).
+    xpath_regexes: xsd_schema::xpath::RegexCache,
     /// What the call of each `id()` / `key()` pattern selects, per document
     /// (§5.5.2), computed on first use.
     id_key_selections: RefCell<patterns::IdKeySelections<'t>>,
@@ -494,6 +503,7 @@ impl<'a> CompiledStylesheet<'a> {
             keys: RefCell::new(keys::KeyIndexes::default()),
             scope_serials: std::cell::Cell::new(0),
             regexes: RefCell::new(analyze::RegexCache::default()),
+            xpath_regexes: xsd_schema::xpath::RegexCache::new(),
             id_key_selections: RefCell::new(HashMap::new()),
             placements: RefCell::new(patterns::PlacementCache::default()),
             number_memos: RefCell::new(HashMap::new()),

@@ -42,7 +42,7 @@ PSVI, `BufferDocument`). Separate git repository.
 | `src/compile/decimal_format.rs` | `xsl:decimal-format` (§16.4.1): values recorded per attribute with their import precedence, merged attribute by attribute after the declaration pass (XTSE1290 for two values at the top precedence), then XTSE1295 / XTSE1300 on the merged format; `char` attributes untrimmed, one character (XTSE0020). `CompiledStylesheet::decimal_format(name)` |
 | `src/functions.rs` | The §16 function library as an XPath catalog, plus the `use-when` evaluator. No stub is left since M3d (`stubs` holds only §3.8's fallback error function) |
 | `src/collation.rs`, `src/collation/uca.rs`, `src/collation/uca/search.rs` | The collation registry (`CollationResolver`): codepoint, HTML ASCII case-insensitive, host-registered; `CaseOrderCollation` for `xsl:sort lang` / `case-order`; with the `icu-collation` feature the F&O 3.1 §5.3.3 UCA URIs and locale-tailored sorting on ICU4X 1.5 (`uca.rs`) and the substring search under them (`uca/search.rs`) |
-| `src/regex.rs` | §15 regular expressions: the XPath 2.0 dialect check (a copy of `xsd-schema`'s private pre-pass) in front of `regexml`, and XTDE1140 / XTDE1145 / XTDE1150 |
+| `src/regex.rs` | §15 regular expressions: `regexml`'s XPath 2.0 dialect (`Regex::xpath20`, the constructor `xsd-schema`'s `fn:matches` uses too), XTDE1140 / XTDE1145 / XTDE1150 by `ErrorKind`, and the engine's 64-level nesting limit as `XSLT2-INTERNAL` |
 
 ## Build
 
@@ -56,8 +56,7 @@ cargo test                         # unit tests + every tests/*.rs except the W3
                                    # (tests/common/mod.rs: `common::body` drops the default XML
                                    # declaration for the tests written before M3a)
                                    # (the W3C harness skips itself in a debug build)
-RUSTDOCFLAGS='-D warnings' cargo doc --no-deps   # must exit 0; the local regexml fork's own
-                                                 # rustc warning is a dependency's and does not fail it
+RUSTDOCFLAGS='-D warnings' cargo doc --no-deps   # must exit 0
 ```
 
 The off-by-default **`icu-collation`** feature (ICU4X 1.5 `icu_collator`; UCA collation URIs, locale-tailored
@@ -230,20 +229,18 @@ backwards-compatible first-item rules take the first *atomized* item without mer
 A deeply recursive stylesheet needs `xslt2::run_on_large_stack(DEFAULT_STACK_SIZE, || …)` around
 the whole job (compile included): everything involved is `!Send`, so the closure has to own it.
 
-## Local `regexml` fork (optional, untracked)
+## The `regexml` engine
 
-`regexml` (third-party, comes in through `xsd-schema`) has a fork at `../regexml` for regex work
-(`xsl:analyze-string`, category memoization). A developer machine may have an **untracked**
-`.cargo/config.toml` here with `[patch.crates-io] regexml = { path = "../regexml/regexml" }`; it is
-listed in `.git/info/exclude`. Check with `cargo tree -i regexml`. While it is active `Cargo.lock`
-shows as modified (the `regexml` entry loses its registry source and checksum) — **never commit
-`Cargo.lock` in that state**; stage files by name, not with `git add -A`/`-u`. To switch back,
-delete the config and `git checkout Cargo.lock`.
+`regexml` is the crates.io package **`regexml-fork`** (0.3; the maintained fork of Paligo's `regexml`, repository
+`semyonc/regexml`), renamed back in `Cargo.toml` (`regexml = { package = "regexml-fork", … }`) so the code says
+`regexml`. `xsd-schema` depends on it the same way, so the graph holds one engine and one ICU4X 1.5 line: `cargo tree
+-d` (also with `--features icu-collation`) shows no second `regexml` or `icu_*` version. No local `[patch]` is needed;
+an old untracked `.cargo/config.toml` with `[patch.crates-io] regexml = { path = "../regexml/regexml" }` is obsolete —
+a patch only replaces a package of its own name, so it no longer applies — and should be deleted (then `git checkout
+Cargo.lock` if it rewrote the lockfile).
 
-A test that needs a fix only the fork has (so far: `m2h_regex`'s
-`a_backtracked_alternative_does_not_erase_an_earlier_capture`, capture restoration on backtracking)
-probes `regexml` on its own pattern first and, on the crates.io release, skips with an `eprintln!`
-naming the fix instead of failing; the fork's own tests assert the fix unconditionally.
+The tests that need the fork's fixes assert them unconditionally (`m2h_regex`'s
+`a_backtracked_alternative_does_not_erase_an_earlier_capture`, capture restoration on backtracking).
 
 ## Upstream (`../xsd-schema`)
 
