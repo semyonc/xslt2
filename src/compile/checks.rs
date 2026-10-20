@@ -142,9 +142,9 @@ pub(super) enum Content {
     GroupsThenSequence(&'static [Group]),
     /// `(xsl:import*, other-declarations)`: the top level of a module (§3.6).
     TopLevel,
-    /// Content this processor does not model (`xsl:import-schema`'s inline
-    /// `xs:schema`).
-    Opaque,
+    /// `xs:schema?`: `xsl:import-schema`'s optional inline schema (§3.14),
+    /// whose content is XML Schema's, not XSLT's.
+    InlineSchema,
 }
 
 /// Everything the spec's syntax summary says about one XSLT element.
@@ -384,7 +384,11 @@ static TABLE: &[ElementSpec] = &[
     },
     ElementSpec {
         optional: &["namespace", "schema-location"],
-        ..row("import-schema", Category::Declaration, Content::Opaque)
+        ..row(
+            "import-schema",
+            Category::Declaration,
+            Content::InlineSchema,
+        )
     },
     ElementSpec {
         required: &["href"],
@@ -750,6 +754,7 @@ pub(super) fn own_compat(nav: &Nav<'_>, inherited: CompatMode) -> CompatMode {
 pub(super) fn check(
     modules: &ModuleSet<'_>,
     collations: &CollationRegistry,
+    schema: Option<&xsd_schema::SchemaSet>,
 ) -> Result<(), XsltError> {
     for module in &modules.modules {
         let root = match module.root {
@@ -765,7 +770,12 @@ pub(super) fn check(
         if module.is_excluded(&root) {
             continue;
         }
-        Checker { module, collations }.element(&root)?;
+        Checker {
+            module,
+            collations,
+            schema,
+        }
+        .element(&root)?;
     }
     Ok(())
 }
@@ -774,6 +784,9 @@ struct Checker<'m, 't> {
     module: &'m Module<'t>,
     /// What `[xsl:]default-collation` may name (§3.6.1's XTSE0125).
     collations: &'m CollationRegistry,
+    /// The schema set of a schema-aware compilation (§21.2); `None` for a
+    /// basic processor, which §21.1 restricts.
+    schema: Option<&'m xsd_schema::SchemaSet>,
 }
 
 impl<'t> Checker<'_, 't> {
@@ -788,9 +801,9 @@ impl<'t> Checker<'_, 't> {
         if nav.namespace_uri() != XSLT_NS {
             // A literal result element or an extension instruction. Its own
             // attributes belong to §11.1, which the literal-result-element
-            // compiler owns; the one rule that is this pass's is §21.1's, which
-            // applies wherever the attribute is written.
-            self.basic_processor_attrs_of_lre(nav)?;
+            // compiler owns; the rules that are this pass's are §21.1's and
+            // §19.2's, which apply wherever the attribute is written.
+            self.lre_validation_attrs(nav, &sc)?;
             if sc.is_extension_namespace(nav.namespace_uri()) {
                 // §18.2.2: the instruction's own content is defined by the
                 // extension, not by XSLT; only its xsl:fallback children are
@@ -805,6 +818,18 @@ impl<'t> Checker<'_, 't> {
             // XTSE0150 before this pass runs.
             return Ok(());
         };
+        if spec.local == "import-schema" && self.schema.is_none() {
+            // > [ERR XTSE1650] A basic XSLT processor must signal a static
+            // > error if the stylesheet includes an xsl:import-schema
+            // > declaration.
+            return Err(self.error(
+                codes::XTSE1650,
+                nav,
+                "xsl:import-schema needs a schema-aware processor (§21.1); compile with \
+                 Compiler::schema_aware"
+                    .to_string(),
+            ));
+        }
         self.attributes(nav, spec, &sc)?;
         self.content(nav, spec, &sc)
     }
@@ -848,7 +873,7 @@ impl<'t> Checker<'_, 't> {
                 // attributes).
                 continue;
             }
-            if let Some(error) = self.basic_processor_attr(nav, spec, &local, &value) {
+            if let Some(error) = self.validation_attr(nav, spec, &local, &value, sc) {
                 return Err(error);
             }
             if allows(&local) {
@@ -863,6 +888,25 @@ impl<'t> Checker<'_, 't> {
                 codes::XTSE0090,
                 nav,
                 format!("xsl:{} has no attribute named {local:?}", spec.local),
+            ));
+        }
+        // > [ERR XTSE1505] It is a static error if both the [xsl:]type and
+        // > [xsl:]validation attributes are present on the xsl:element,
+        // > xsl:attribute, xsl:copy, xsl:copy-of, xsl:document, or
+        // > xsl:result-document instructions, or on a literal result element.
+        // (A basic processor has already rejected `type` with XTSE1660.)
+        if spec.optional.contains(&"type")
+            && attr_local(nav, "type").is_some()
+            && attr_local(nav, "validation").is_some()
+        {
+            return Err(self.error(
+                codes::XTSE1505,
+                nav,
+                format!(
+                    "xsl:{} has both a type and a validation attribute, which are mutually \
+                     exclusive (§19.2)",
+                    spec.local
+                ),
             ));
         }
         for required in spec.required {
@@ -908,70 +952,167 @@ impl<'t> Checker<'_, 't> {
         Ok(())
     }
 
-    /// §21.1's two restrictions on a basic processor, on an XSLT element.
+    /// The rules for `type`, `validation` and `default-validation` on an XSLT
+    /// element whose own syntax admits the attribute — anywhere else the
+    /// attribute is simply not one the element defines, which is XTSE0090.
+    ///
+    /// A **basic** processor (§21.1):
     ///
     /// > \[ERR XTSE1660\] A basic XSLT processor must signal a static error if
     /// > the stylesheet includes an `[xsl:]type` attribute, or an
     /// > `[xsl:]validation` or `default-validation` attribute with a value
     /// > other than `strip`.
     ///
-    /// Only on an element whose own syntax admits the attribute: anywhere else
-    /// the attribute is simply not one the element defines, which is XTSE0090.
-    fn basic_processor_attr(
+    /// A **schema-aware** one: the permitted values (XTSE0020 — §19.2.1.1's
+    /// four for `validation`, §3.6's `preserve` and `strip` for
+    /// `default-validation`) and `type`'s XTSE1520 / XTSE1530 (§19.2.1.2).
+    fn validation_attr(
         &self,
         nav: &Nav<'t>,
         spec: &'static ElementSpec,
         local: &str,
         value: &str,
+        sc: &StaticContext,
     ) -> Option<XsltError> {
         let admits = |name: &str| spec.required.contains(&name) || spec.optional.contains(&name);
-        match local {
-            "type" if admits("type") => Some(self.error(
-                codes::XTSE1660,
-                nav,
-                format!(
-                    "a basic XSLT processor cannot honour the type attribute of xsl:{}",
-                    spec.local
-                ),
-            )),
-            "validation" | "default-validation"
-                if admits(local) && whitespace::trim(value) != "strip" =>
-            {
-                Some(self.error(
+        if !admits(local) || !matches!(local, "type" | "validation" | "default-validation") {
+            return None;
+        }
+        let value = whitespace::trim(value);
+        let Some(set) = self.schema else {
+            return match local {
+                "type" => Some(self.error(
                     codes::XTSE1660,
                     nav,
                     format!(
-                        "a basic XSLT processor supports only {local}=\"strip\", not {:?}",
-                        whitespace::trim(value)
+                        "a basic XSLT processor cannot honour the type attribute of xsl:{}",
+                        spec.local
+                    ),
+                )),
+                _ if value != "strip" => Some(self.error(
+                    codes::XTSE1660,
+                    nav,
+                    format!(
+                        "a basic XSLT processor supports only {local}=\"strip\", not {value:?}"
+                    ),
+                )),
+                _ => None,
+            };
+        };
+        match local {
+            "type" => self
+                .type_attr(set, value, sc, spec.local == "attribute")
+                .err()
+                .map(|e| e.with_location(self.module.location(nav))),
+            "validation" if super::attributes::validation_value(value).is_none() => {
+                Some(self.error(
+                    codes::XTSE0020,
+                    nav,
+                    format!(
+                        "the validation attribute of xsl:{} must be \"strict\", \"lax\", \
+                     \"preserve\" or \"strip\", not {value:?}",
+                        spec.local
                     ),
                 ))
             }
+            "default-validation" if !matches!(value, "preserve" | "strip") => Some(self.error(
+                codes::XTSE0020,
+                nav,
+                format!(
+                    "default-validation must be \"preserve\" or \"strip\", not {value:?} (§3.6)"
+                ),
+            )),
             _ => None,
         }
     }
 
-    /// The same §21.1 rule for the `xsl:type` / `xsl:validation` spelling a
-    /// literal result element uses (§11.1).
-    fn basic_processor_attrs_of_lre(&self, nav: &Nav<'t>) -> Result<(), XsltError> {
+    /// §19.2.1.2's static rules for a `type` attribute in a schema-aware
+    /// stylesheet: XTSE1520 (see `attributes::type_attribute_name`) and
+    ///
+    /// > \[ERR XTSE1530\] It is a static error if the value of the type
+    /// > attribute of an `xsl:attribute` instruction refers to a complex type
+    /// > definition.
+    fn type_attr(
+        &self,
+        set: &xsd_schema::SchemaSet,
+        value: &str,
+        sc: &StaticContext,
+        on_attribute: bool,
+    ) -> Result<(), XsltError> {
+        let name = super::attributes::type_attribute_name(value, sc)?;
+        match crate::schema::in_scope_type(set, &name.uri, &name.local) {
+            None => Err(XsltError::new(
+                codes::XTSE1520,
+                format!(
+                    "the type attribute {value:?} names {name}, which is not a type in the \
+                     in-scope schema components"
+                ),
+            )),
+            Some(crate::schema::TypeKind::Complex) if on_attribute => Err(XsltError::new(
+                codes::XTSE1530,
+                format!("xsl:attribute cannot have the complex type {name} as its type"),
+            )),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// The same rules for the `xsl:type` / `xsl:validation` spelling a literal
+    /// result element uses (§11.1.1), with XTSE1505 for both together.
+    fn lre_validation_attrs(&self, nav: &Nav<'t>, sc: &StaticContext) -> Result<(), XsltError> {
+        let mut seen_type = false;
+        let mut seen_validation = false;
         for (uri, local, _, value) in attributes(nav) {
             if uri != XSLT_NS {
                 continue;
             }
-            let offending = match local.as_str() {
-                "type" => true,
-                "validation" => whitespace::trim(&value) != "strip",
-                _ => false,
-            };
-            if offending {
-                return Err(self.error(
-                    codes::XTSE1660,
-                    nav,
-                    format!(
-                        "a basic XSLT processor cannot honour xsl:{local} on a literal result \
+            let value = whitespace::trim(&value);
+            match (local.as_str(), self.schema) {
+                ("type", None) => {
+                    return Err(self.error(
+                        codes::XTSE1660,
+                        nav,
+                        "a basic XSLT processor cannot honour xsl:type on a literal result element"
+                            .to_string(),
+                    ))
+                }
+                ("validation", None) if value != "strip" => {
+                    return Err(self.error(
+                        codes::XTSE1660,
+                        nav,
+                        "a basic XSLT processor cannot honour xsl:validation on a literal result \
                          element"
-                    ),
-                ));
+                            .to_string(),
+                    ))
+                }
+                ("type", Some(set)) => {
+                    seen_type = true;
+                    self.type_attr(set, value, sc, false)
+                        .map_err(|e| e.with_location(self.module.location(nav)))?;
+                }
+                ("validation", Some(_)) => {
+                    seen_validation = true;
+                    if super::attributes::validation_value(value).is_none() {
+                        return Err(self.error(
+                            codes::XTSE0020,
+                            nav,
+                            format!(
+                                "xsl:validation must be \"strict\", \"lax\", \"preserve\" or \
+                                 \"strip\", not {value:?}"
+                            ),
+                        ));
+                    }
+                }
+                _ => {}
             }
+        }
+        if seen_type && seen_validation {
+            return Err(self.error(
+                codes::XTSE1505,
+                nav,
+                "a literal result element has both xsl:type and xsl:validation, which are \
+                 mutually exclusive (§19.2)"
+                    .to_string(),
+            ));
         }
         Ok(())
     }
@@ -1004,7 +1145,11 @@ impl<'t> Checker<'_, 't> {
             Content::Groups(groups) => self.groups(nav, spec, groups, false),
             Content::GroupsThenSequence(groups) => self.groups(nav, spec, groups, true),
             Content::TopLevel => self.top_level(nav, sc),
-            Content::Opaque => Ok(()),
+            // §3.14: `<!-- Content: xs:schema? -->` (XTSE0010 otherwise). The
+            // schema itself is XML Schema's to check (XTSE0220, `crate::schema`).
+            Content::InlineSchema => {
+                crate::schema::inline_schema_element(self.module, nav).map(|_| ())
+            }
         }
     }
 
@@ -1460,7 +1605,7 @@ pub(super) fn visit(body: &Body, f: &mut impl FnMut(&Instruction)) {
             InstructionKind::If { then: body, .. }
             | InstructionKind::LiteralElement { body, .. }
             | InstructionKind::Element { body, .. }
-            | InstructionKind::Document { body }
+            | InstructionKind::Document { body, .. }
             | InstructionKind::Copy { body, .. }
             | InstructionKind::Message { body, .. } => visit(body, f),
             InstructionKind::ResultDocument(rd) => visit(&rd.body, f),

@@ -19,6 +19,85 @@ use crate::output::OutputDefinition;
 use crate::pattern::Pattern;
 use crate::stylesheet::{CompatMode, ModuleId, StaticContextId, StaticContexts};
 
+/// What `[xsl:]validation` / `[xsl:]type` asks of a node constructor (§19.2):
+/// the attribute written on it, or else the `default-validation` of its
+/// stylesheet module (§3.6), or else `strip`.
+///
+/// > If both attributes are omitted, the effect is the same as specifying the
+/// > validation attribute with the value specified in the default-validation
+/// > attribute of the containing xsl:stylesheet element; if this is not
+/// > specified, the effect is the same as specifying validation="strip".
+///
+/// The static rules (XTSE1505, XTSE1520, XTSE1530, XTSE0020; XTSE1660 for a
+/// basic processor) are the checker's (`compile/checks.rs`). Only `Strip` is
+/// evaluated by this processor so far (M4a): every other value raises
+/// `XSLT2-NOTIMPL` naming the sub-milestone that owns it (see
+/// [`Validation::owner`]) when the instruction is evaluated.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Validation {
+    /// The new node and the nodes it contains are untyped (§19.2.1.1).
+    #[default]
+    Strip,
+    /// The contained nodes keep their annotations.
+    Preserve,
+    /// Validated against the top-level declaration of the node's name.
+    Strict,
+    /// Validated against the declaration when there is one.
+    Lax,
+    /// `[xsl:]type`: validated against this in-scope type (§19.2.1.2), its
+    /// QName expanded with the `[xsl:]xpath-default-namespace` for an unprefixed
+    /// one.
+    Type(QName),
+}
+
+/// The kind of node constructor a [`Validation`] is on, for its owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Constructor {
+    /// A literal result element or `xsl:element`.
+    Element,
+    /// `xsl:attribute`.
+    Attribute,
+    /// `xsl:copy` or `xsl:copy-of`.
+    Copy,
+    /// `xsl:document`, `xsl:result-document`, or the implicit final result
+    /// tree.
+    Document,
+}
+
+impl Validation {
+    /// Whether this is `strip`.
+    pub fn is_strip(&self) -> bool {
+        matches!(self, Self::Strip)
+    }
+
+    /// The `validation` value as written, or `type=…`.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Strip => "validation=\"strip\"".to_string(),
+            Self::Preserve => "validation=\"preserve\"".to_string(),
+            Self::Strict => "validation=\"strict\"".to_string(),
+            Self::Lax => "validation=\"lax\"".to_string(),
+            Self::Type(name) => format!("type=\"{name}\""),
+        }
+    }
+
+    /// The roadmap sub-milestone that implements this validation on a
+    /// `constructor` (M4_PLAN §4): M4d constructed elements and attributes
+    /// (`strict`, `preserve`, and `type` on an attribute), M4e copies and
+    /// document nodes, M4f `type` on elements, copies and documents and `lax`
+    /// everywhere. `None` for `strip`, which needs nothing.
+    pub fn owner(&self, constructor: Constructor) -> Option<&'static str> {
+        Some(match (self, constructor) {
+            (Self::Strip, _) => return None,
+            (Self::Lax, _) => "M4f",
+            (Self::Type(_), Constructor::Attribute) => "M4d",
+            (Self::Type(_), _) => "M4f",
+            (Self::Strict | Self::Preserve, Constructor::Element | Constructor::Attribute) => "M4d",
+            (Self::Strict | Self::Preserve, Constructor::Copy | Constructor::Document) => "M4e",
+        })
+    }
+}
+
 /// Index into the expression table of a [`CompiledStylesheet`] (`exprs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ExprId(pub u32);
@@ -534,6 +613,8 @@ pub enum InstructionKind {
         /// §11.1's `[xsl:]inherit-namespaces`: whether this element's namespace
         /// nodes reach its descendants (§5.7.1's last rule).
         inherit_namespaces: bool,
+        /// `xsl:validation` / `xsl:type` (§11.1.1).
+        validation: Validation,
         body: Body,
     },
     Element {
@@ -541,12 +622,14 @@ pub enum InstructionKind {
         namespace: NamespaceAvt,
         attr_sets: Vec<QName>,
         inherit_namespaces: bool,
+        validation: Validation,
         body: Body,
     },
     Attribute {
         name: Avt,
         namespace: NamespaceAvt,
         separator: Option<Avt>,
+        validation: Validation,
         value: ValueSource,
     },
     Namespace {
@@ -561,17 +644,20 @@ pub enum InstructionKind {
         value: ValueSource,
     },
     Document {
+        validation: Validation,
         body: Body,
     },
     Copy {
         copy_namespaces: bool,
         inherit_namespaces: bool,
         attr_sets: Vec<QName>,
+        validation: Validation,
         body: Body,
     },
     CopyOf {
         select: ExprId,
         copy_namespaces: bool,
+        validation: Validation,
     },
     Variable {
         slot: usize,
@@ -662,9 +748,9 @@ pub enum ResultFormat {
 /// > evaluating the sequence constructor is used to construct the content of
 /// > the document, as described in 5.7.1 Constructing Complex Content.
 ///
-/// `validation` and `type` are the static checker's (`compile/checks.rs`): a
-/// basic processor accepts only `validation="strip"`, which is what an
-/// untyped tree is already (XTSE1660 otherwise).
+/// `validation` and `type`: see [`Validation`] — a basic processor accepts
+/// only `validation="strip"`, which is what an untyped tree is already
+/// (XTSE1660 otherwise).
 pub struct ResultDocument {
     /// `None` selects the unnamed output definition: "If the format attribute
     /// is omitted, the unnamed output definition is used".
@@ -680,6 +766,7 @@ pub struct ResultDocument {
     /// maps referenced in this instruction supplement and take precedence over
     /// those defined in the selected output definition".
     pub use_character_maps: Vec<QName>,
+    pub validation: Validation,
     pub body: Body,
 }
 
@@ -1090,6 +1177,14 @@ pub struct CompiledStylesheet<'a> {
     pub(crate) base_uri: String,
     /// Compatibility mode of the principal module, for the §3.6 warning.
     pub(crate) principal_compat: CompatMode,
+    /// In schema-aware mode (§21.2), the schema set of the caller's
+    /// `SchemaContext` (M4 plan D-1); `None` for a basic processor.
+    pub(crate) schema: Option<&'a xsd_schema::SchemaSet>,
+    /// The validation of the implicit final result tree: the principal
+    /// module's `default-validation` (§3.6: "It also determines the
+    /// validation applied to the implicit final result tree created in the
+    /// absence of an xsl:result-document instruction").
+    pub(crate) final_validation: Validation,
 }
 
 impl<'a> CompiledStylesheet<'a> {
@@ -1112,6 +1207,26 @@ impl<'a> CompiledStylesheet<'a> {
     /// A named `xsl:output` definition.
     pub fn named_output(&self, name: &QName) -> Option<&OutputDefinition> {
         self.named_outputs.get(name)
+    }
+
+    /// Whether this stylesheet was compiled by a schema-aware processor
+    /// (`Compiler::schema_aware`, §21.2).
+    pub fn is_schema_aware(&self) -> bool {
+        self.schema.is_some()
+    }
+
+    /// The schema set of the `SchemaContext` a schema-aware stylesheet was
+    /// compiled against.
+    pub fn schema_set(&self) -> Option<&'a xsd_schema::SchemaSet> {
+        self.schema
+    }
+
+    /// The in-scope schema types of the stylesheet's expressions (§3.13).
+    pub(crate) fn type_scope(&self) -> crate::functions::TypeScope<'a> {
+        match self.schema {
+            Some(set) => crate::functions::TypeScope::Schema(set),
+            None => crate::functions::TypeScope::Basic,
+        }
     }
 
     /// The base URI of the principal module.

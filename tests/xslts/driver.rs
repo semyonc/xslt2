@@ -390,13 +390,25 @@ fn run_suite() {
                             entity_results: filter::result_may_be_entity(case),
                         };
                         let v = compare::evaluate_guarded(&case.result, &exec.output, &cx);
-                        rec.status = match v.outcome {
-                            Outcome::Pass => Status::Pass,
-                            Outcome::Fail => Status::Fail,
-                            Outcome::WrongError => Status::WrongError,
-                            Outcome::HarnessError => Status::HarnessError,
-                        };
-                        rec.message = v.message;
+                        let failed = matches!(v.outcome, Outcome::Fail | Outcome::WrongError)
+                            && !filter::expects_only_static_errors(case);
+                        if let Some(message) = exec
+                            .output
+                            .untyped_input_fence(failed, v.message.as_deref())
+                        {
+                            // M4b fence (M4a review R7): the case failed on an untyped tree
+                            // where it asked for a validated one.
+                            rec.status = Status::NotImplemented;
+                            rec.message = Some(message);
+                        } else {
+                            rec.status = match v.outcome {
+                                Outcome::Pass => Status::Pass,
+                                Outcome::Fail => Status::Fail,
+                                Outcome::WrongError => Status::WrongError,
+                                Outcome::HarnessError => Status::HarnessError,
+                            };
+                            rec.message = v.message;
+                        }
                     }
                 }
             }

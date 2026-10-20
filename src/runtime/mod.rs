@@ -726,6 +726,17 @@ impl<'a, 't> Transformation<'a, 't> {
         let id = self.store.borrow_mut().insert(doc, None);
         let implicit = self.store.borrow().get(id).expect("just inserted").doc;
         let delivered = self.deliver((implicit, disabled_escaping))?;
+        // §3.6: `default-validation` "also determines the validation applied to
+        // the implicit final result tree created in the absence of an
+        // xsl:result-document instruction" — the principal module's. Fenced
+        // like every other non-`strip` validation (M4e owns document nodes).
+        if delivered.primary_output.is_none() && delivered.primary.is_some() {
+            eval::validation_fence(
+                &self.sheet.final_validation,
+                crate::model::Constructor::Document,
+                "the implicit final result tree (the principal module's default-validation)",
+            )?;
+        }
         let (primary, disabled_escaping) = match delivered.primary {
             Some((doc, marks)) => (Some(doc), marks),
             None => (None, crate::serialize::EscapingMarks::default()),

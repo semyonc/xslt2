@@ -517,11 +517,12 @@ fn a_document_element_that_is_not_a_stylesheet_is_xtse0150() {
 
 #[test]
 fn a_not_implemented_construct_carries_the_internal_code_not_a_panic() {
-    // `xsl:import-schema` is M4's (the stand-in was an extension instruction
-    // without `xsl:fallback` until M3e made it XTDE1450, `format-date()` until
-    // M3d implemented it, and `xsl:number` until M3c).
+    // A typed pattern is M4c's (the stand-in was `xsl:import-schema` until M4a
+    // made it XTSE1650 for a basic processor, an extension instruction without
+    // `xsl:fallback` until M3e made it XTDE1450, `format-date()` until M3d
+    // implemented it, and `xsl:number` until M3c).
     let s = sheet(
-        r#"<xsl:import-schema namespace="urn:schema"/>
+        r#"<xsl:template match="element(*, xs:integer)"/>
            <xsl:template match="/"><out/></xsl:template>"#,
     );
     let e = transform(&s, "<doc/>").unwrap_err();

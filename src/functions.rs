@@ -555,8 +555,18 @@ impl XsltFunctions {
     /// §3.12 keeps "the core functions defined in \[Functions and Operators\]"
     /// in scope, and the constructor functions are among them (see
     /// [`is_constructor_function`]).
-    pub fn is_available_in_use_when(&self, namespace: &str, local: &str, arity: usize) -> bool {
-        if is_constructor_function(namespace, local, arity) {
+    ///
+    /// `scope` is the processor's: a schema-aware one has a constructor for every built-in atomic
+    /// type in a `use-when` expression too (§3.12: "the type definitions that would be available in
+    /// the absence of any `xsl:import-schema` declaration").
+    pub fn is_available_in_use_when(
+        &self,
+        namespace: &str,
+        local: &str,
+        arity: usize,
+        scope: TypeScope<'_>,
+    ) -> bool {
+        if scope.has_constructor(namespace, local, arity) {
             return true;
         }
         match self.catalog.set.lookup(namespace, local, arity) {
@@ -585,8 +595,17 @@ impl XsltFunctions {
     /// A stub (see `stubs`) is in the catalog but is not *available*: it
     /// exists only so that a call to it is classified as something other than
     /// an unknown function.
-    pub fn is_available(&self, namespace: &str, local: &str, arity: usize) -> bool {
-        if is_constructor_function(namespace, local, arity) {
+    ///
+    /// `scope` decides which constructor functions exist (XPath 2.0 §3.10.4: one "for every atomic
+    /// type in the in-scope schema types").
+    pub fn is_available(
+        &self,
+        namespace: &str,
+        local: &str,
+        arity: usize,
+        scope: TypeScope<'_>,
+    ) -> bool {
+        if scope.has_constructor(namespace, local, arity) {
             return true;
         }
         match self.catalog.set.lookup(namespace, local, arity) {
@@ -868,6 +887,9 @@ pub struct StaticEvaluator<'f> {
     /// namespace". Without it an unprefixed **type** name in a `use-when`
     /// expression would expand differently here than it does at run time.
     xpath_default_namespace: String,
+    /// Whether the processor is schema-aware (§21.2): `xsl:is-schema-aware`,
+    /// and every built-in type in §3.12's "In scope type definitions".
+    schema_aware: bool,
 }
 
 impl<'f> StaticEvaluator<'f> {
@@ -880,6 +902,24 @@ impl<'f> StaticEvaluator<'f> {
             functions,
             namespaces,
             xpath_default_namespace,
+            schema_aware: false,
+        }
+    }
+
+    /// Evaluates as a schema-aware processor (§21.2) would.
+    pub fn schema_aware(mut self, schema_aware: bool) -> Self {
+        self.schema_aware = schema_aware;
+        self
+    }
+
+    /// §3.12's "In scope type definitions: The type definitions that would be
+    /// available in the absence of any `xsl:import-schema` declaration" — never
+    /// an imported one.
+    fn type_scope(&self) -> TypeScope<'static> {
+        if self.schema_aware {
+            TypeScope::BuiltIn
+        } else {
+            TypeScope::Basic
         }
     }
 
@@ -926,7 +966,7 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
             XsltFn::SystemProperty => {
                 let (uri, local) = expand()?;
                 Ok(XPathValue::string(if uri == crate::names::XSLT_NS {
-                    system_property(local)
+                    system_property(local, self.schema_aware)
                 } else {
                     ""
                 }))
@@ -944,18 +984,23 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
                 // false in respect of such functions". §18.1.1: the
                 // two-argument form asks about one arity only.
                 let arity = arity_argument(args.get(1)).map_err(XsltError::into_xpath_error)?;
+                let scope = self.type_scope();
                 Ok(XPathValue::boolean(match arity {
-                    None => (0..=MAX_ARITY)
-                        .any(|arity| self.functions.is_available_in_use_when(&uri, local, arity)),
-                    Some(Some(arity)) => {
-                        self.functions.is_available_in_use_when(&uri, local, arity)
-                    }
+                    None => (0..=MAX_ARITY).any(|arity| {
+                        self.functions
+                            .is_available_in_use_when(&uri, local, arity, scope)
+                    }),
+                    Some(Some(arity)) => self
+                        .functions
+                        .is_available_in_use_when(&uri, local, arity, scope),
                     Some(None) => false,
                 }))
             }
             XsltFn::TypeAvailable => {
                 let (uri, local) = expand()?;
-                Ok(XPathValue::boolean(type_available(&uri, local)))
+                Ok(XPathValue::boolean(
+                    self.type_scope().type_available(&uri, local),
+                ))
             }
             // \[Functions and Operators\] §15.5.4 `fn:doc`: if the argument is
             // the empty sequence the result is the empty sequence. No URI is
@@ -1180,9 +1225,15 @@ pub fn expand_name_argument<'n>(
 
 // ── The three functions that are answerable without a running transformation
 
-/// §16.6.5: the value of a system property in the XSLT namespace.
-pub fn system_property(local: &str) -> &'static str {
+/// §16.6.5: the value of a system property in the XSLT namespace, for a basic
+/// or (`schema_aware`) a schema-aware processor.
+///
+/// > `xsl:is-schema-aware`, returns the string "yes" in the case of a processor
+/// > that claims conformance as a schema-aware XSLT processor, or "no" in the
+/// > case of a basic XSLT processor.
+pub fn system_property(local: &str, schema_aware: bool) -> &'static str {
     match local {
+        "is-schema-aware" if schema_aware => "yes",
         "version" => "2.0",
         "vendor" => "semyonc",
         "vendor-url" => "https://github.com/semyonc/xsd-schema",
@@ -1237,10 +1288,61 @@ pub fn function_available(
     uri: &str,
     local: &str,
     arity: Option<usize>,
+    scope: TypeScope<'_>,
 ) -> bool {
     match arity {
-        Some(arity) => functions.is_available(uri, local, arity),
-        None => (0..=MAX_ARITY).any(|arity| functions.is_available(uri, local, arity)),
+        Some(arity) => functions.is_available(uri, local, arity, scope),
+        None => (0..=MAX_ARITY).any(|arity| functions.is_available(uri, local, arity, scope)),
+    }
+}
+
+/// The in-scope schema types an expression sees (§3.13), which decide
+/// `type-available()` (§18.1.4) and the constructor functions
+/// `function-available()` reports (XPath 2.0 §3.10.4).
+#[derive(Clone, Copy, Debug)]
+pub enum TypeScope<'s> {
+    /// A basic processor (§21.1): §3.13's list.
+    Basic,
+    /// A schema-aware processor without the imported types: every built-in
+    /// type — what a `use-when` expression sees (§3.12).
+    BuiltIn,
+    /// A schema-aware stylesheet compiled against this set: the built-in types
+    /// and every type of the set (M4 plan D-7).
+    Schema(&'s xsd_schema::SchemaSet),
+}
+
+impl TypeScope<'_> {
+    /// §18.1.4: whether a type of this expanded name is available.
+    pub fn type_available(self, uri: &str, local: &str) -> bool {
+        match self {
+            Self::Basic => type_available(uri, local),
+            Self::BuiltIn => {
+                uri == crate::names::XSD_NS && crate::schema::built_in_type(local).is_some()
+            }
+            Self::Schema(set) => crate::schema::in_scope_type(set, uri, local).is_some(),
+        }
+    }
+
+    /// Whether `{namespace}local` with `arity` arguments is a constructor
+    /// function: arity 1, and an instantiable atomic type in scope (XPath 2.0
+    /// §3.10.4).
+    pub fn has_constructor(self, namespace: &str, local: &str, arity: usize) -> bool {
+        if arity != 1 {
+            return false;
+        }
+        match self {
+            Self::Basic => is_constructor_function(namespace, local, arity),
+            Self::BuiltIn => {
+                namespace == crate::names::XSD_NS && crate::schema::built_in_has_constructor(local)
+            }
+            Self::Schema(set) => {
+                if namespace == crate::names::XSD_NS {
+                    crate::schema::built_in_has_constructor(local)
+                } else {
+                    crate::schema::has_user_constructor(set, namespace, local)
+                }
+            }
+        }
     }
 }
 
@@ -1464,8 +1566,8 @@ mod tests {
     #[test]
     fn builtin_functions_still_resolve_through_the_same_catalog() {
         let functions = XsltFunctions::new();
-        assert!(functions.is_available(FN_NS, "substring", 2));
-        assert!(functions.is_available(FN_NS, "current", 0));
-        assert!(!functions.is_available(FN_NS, "no-such-function", 1));
+        assert!(functions.is_available(FN_NS, "substring", 2, TypeScope::Basic));
+        assert!(functions.is_available(FN_NS, "current", 0, TypeScope::Basic));
+        assert!(!functions.is_available(FN_NS, "no-such-function", 1, TypeScope::Basic));
     }
 }

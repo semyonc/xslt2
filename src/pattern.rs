@@ -177,7 +177,7 @@ pub enum NodeTest {
 /// so the test holds only for an element that has none.
 /// `Some(false)` — `xs:anyType`, which every element type derives from
 /// (`xs:untyped` included), so the test holds for every element.
-/// `None` — any other type name, which needs a schema (M4).
+/// `None` — any other type name, which needs a schema (typed patterns, M4c).
 fn universal_element_type(uri: &str, local: &str) -> Option<bool> {
     if uri != XSD_NS {
         return None;
@@ -965,13 +965,14 @@ fn parse_kind_test(
                     };
                     match decided {
                         Some(untyped_only) => Some(untyped_only),
-                        // Every other type name needs a schema (M4).
+                        // Every other type name needs a schema: typed patterns
+                        // are M4c's (M4_PLAN §4).
                         None => {
                             return Err(XsltError::not_implemented(
                                 format!(
                                     "the typed node test {kind}({arg}, {type_name}) in a pattern"
                                 ),
-                                "M4",
+                                "M4c",
                             ))
                         }
                     }
@@ -1011,7 +1012,7 @@ fn parse_kind_test(
         }
         "schema-element" | "schema-attribute" => Err(XsltError::not_implemented(
             format!("the schema-aware node test {kind}({arg}) in a pattern"),
-            "M4",
+            "M4c",
         )),
         other => Err(bad_pattern(source, format!("{other}() is not a node test"))),
     }

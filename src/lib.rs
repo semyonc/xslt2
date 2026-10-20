@@ -54,6 +54,7 @@ pub mod receiver;
 pub(crate) mod regex;
 pub mod resolver;
 pub mod runtime;
+pub mod schema;
 pub mod serialize;
 pub mod store;
 pub mod stylesheet;
@@ -75,4 +76,5 @@ pub use runtime::{
     run_on_large_stack, Message, Outcome, SecondaryResult, TransformOptions, Transformation,
     DEFAULT_MAX_RECURSION_DEPTH, DEFAULT_STACK_SIZE, OTHER_THREAD_STACK_LIMIT,
 };
+pub use schema::{ImportSource, SchemaContext, SchemaContextBuilder, SchemaImport};
 pub use store::{DocId, DocumentStore, StoredDocument};

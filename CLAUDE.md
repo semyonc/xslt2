@@ -42,6 +42,7 @@ PSVI, `BufferDocument`). Separate git repository.
 | `src/compile/decimal_format.rs` | `xsl:decimal-format` (§16.4.1): values recorded per attribute with their import precedence, merged attribute by attribute after the declaration pass (XTSE1290 for two values at the top precedence), then XTSE1295 / XTSE1300 on the merged format; `char` attributes untrimmed, one character (XTSE0020). `CompiledStylesheet::decimal_format(name)` |
 | `src/functions.rs` | The §16 function library as an XPath catalog, plus the `use-when` evaluator. No stub is left since M3d (`stubs` holds only §3.8's fallback error function) |
 | `src/collation.rs`, `src/collation/uca.rs`, `src/collation/uca/search.rs` | The collation registry (`CollationResolver`): codepoint, HTML ASCII case-insensitive, host-registered; `CaseOrderCollation` for `xsl:sort lang` / `case-order`; with the `icu-collation` feature the F&O 3.1 §5.3.3 UCA URIs and locale-tailored sorting on ICU4X 1.5 (`uca.rs`) and the substring search under them (`uca/search.rs`) |
+| `src/schema.rs` | The schema-aware mode (M4a; M4 plan D-1, D-7, D-9): `SchemaContext` (caller-owned; owns the `SchemaSet`, whose `NameTable` is the stylesheet's) and `SchemaContextBuilder` — a **pre-scan** of the module graph with the compiler's own `Loader` (schema-aware `use-when`), §3.14's highest-precedence `xsl:import-schema` per namespace (`plan`), loaded by location through the compiler's `Resolver` (`ResolverLoader`; a `file:` URI is handed to `xsd-schema` as its path, so C15a is avoided **for `file:` URIs only**: under another base `ResolverLoader::request` removes the dot segments `xsd-schema` keeps, and passes a relative location on relative, never absolutized against the working directory — but `xsd-schema` still keys a document by its own spelling, so one non-`file:` document under two spellings loads twice, C15a), by namespace only (the embedded `xml.xsd` / `xlink.xsd`, also the fallback when a location of those namespaces cannot be read; the built-in `xsi:` declarations; the Schema for Schemas is not available, so an import of the XML Schema namespace is not `found()`), or inline as a **slice** of the module text with the inherited namespace bindings injected after `<xs:schema`, the elements §3.12 `use-when` excludes blanked out byte for byte (`blank_excluded`), and the location `<base URI>#schema-N` (N from 1 per module; a module reached twice loads its inline schemas once, `DeclarationId`; errors mapped back to the module line). A document that cannot be read is no error (§3.14); one that is not a valid schema, or has another target namespace than the declaration's, is XTSE0220; XTSE0215 for an inline schema with `schema-location` or a conflicting `namespace`; XTSE0010 for content other than one `xs:schema`. `check_coverage`: `Compiler::schema_aware` refuses a stylesheet whose imports the context did not load (`XSLT2-INTERNAL`) — a namespace-only import is satisfied by a context that holds the namespace's components (`SchemaContext::covers`). `in_scope_type` / `built_in_type` / `has_user_constructor`: the in-scope types for XTSE1520 / XTSE1530, `type-available` and `function-available` (`functions::TypeScope`) |
 | `src/regex.rs` | §15 regular expressions: `regexml`'s XPath 2.0 dialect (`Regex::xpath20`, the constructor `xsd-schema`'s `fn:matches` uses too), XTDE1140 / XTDE1145 / XTDE1150 by `ErrorKind`, and the engine's 64-level nesting limit as `XSLT2-INTERNAL` |
 
 ## Build
@@ -52,7 +53,7 @@ cargo clippy --all-targets         # 0 warnings expected
 cargo test                         # unit tests + every tests/*.rs except the W3C harness (it skips itself in debug): m0b…m2a, m2c, m2d_sorting, m2e_functions, m2f_keys, m2g_grouping, m2g_review, m2h_regex, m2i_core_defects, m2l_pattern_predicates, ns_inherit, q33_depth, …
                                    # + fn_error + m2b_namespaces + m2c_static_checks + m3a_serialization + m3a_review + m3a_review2
                                    # + m3b_result_documents + m3b_review + m3b_review2 + m3c_numbering + m3c_followup
-                                   # + m3d_formatting + m3e_compat
+                                   # + m3d_formatting + m3e_compat + m4a_schema_loading
                                    # (tests/common/mod.rs: `common::body` drops the default XML
                                    # declaration for the tests written before M3a)
                                    # (the W3C harness skips itself in a debug build)
@@ -101,6 +102,22 @@ Save verbose output to a file and grep it:
 ```bash
 cargo test --test xslts --release -- -v > /tmp/xslts.txt 2>&1
 grep -E "^  (FAIL|WRONG-ERROR|HARNESS-ERROR|NOT-IMPL)" /tmp/xslts.txt
+```
+
+**Schema-aware runs** (`--schema-aware`, M4a): `feature=schema_aware` is satisfied, so the 584 schema-aware cases
+run and the 16 basic twins do not; the adapter then compiles **every** case with a schema-aware processor —
+`SchemaContext::builder().stylesheet_file(…).build()` from the stylesheet's own `xsl:import-schema` declarations,
+then `Compiler::schema_aware` — so every basic case must keep its default-run status (§2.8, M4 plan §2.2). The
+environment's `<schema>` elements and `source/@validation` are not used yet (M4b), so sources are untyped. **The M4b
+fence** (M4a review R7; `RunOutput::untyped_input_fence`): a case whose environment has a source with
+`validation="strict"` or `"lax"` that **fails** (`fail` / `wrongError`) after its stylesheet compiled is reported as
+NOT-IMPL (M4b), its untyped run's reason first; a pass stays a pass (so the zero pass→non-pass gate still guards it),
+and a static error, a harness error, or a case that accepts only static errors (`filter::expects_only_static_errors`,
+§2.9) is not fenced. Run it beside the default run and diff each against its own baseline (the first schema-aware one is
+`../../baselines/xslts-sa-5794-at-xsd-27180f2-xslt2-8340257.xml`):
+
+```bash
+cargo test --release --test xslts -- -s ../../xslt30-test --skip unicode-90 --schema-aware --report /tmp/sa.xml
 ```
 
 **Per-case diff against a baseline** — the zero pass→non-pass gate. Baseline reports and the XSD FAIL-name
@@ -228,6 +245,26 @@ backwards-compatible first-item rules take the first *atomized* item without mer
 
 A deeply recursive stylesheet needs `xslt2::run_on_large_stack(DEFAULT_STACK_SIZE, || …)` around
 the whole job (compile included): everything involved is `!Send`, so the closure has to own it.
+
+**Schema-aware mode** (§21.2, M4a; `tests/m4a_schema_loading.rs`). `Compiler::new` is a basic processor:
+`xsl:import-schema` is XTSE1650 (checked in `compile/checks.rs`, so a `use-when`-excluded one is not), `[xsl:]type`
+and a non-`strip` `[xsl:]validation` / `default-validation` XTSE1660, typed input XTDE1665. A schema-aware stylesheet
+is compiled with `Compiler::schema_aware(&context, &functions)` against a `SchemaContext` built from **the same**
+stylesheet first (`SchemaContext::builder().with_resolver(…).stylesheet_file(…)?.build()?`): the module graph is
+parsed twice (the pre-scan costs about 3 % of a compile — 4.2 ms of 162 ms for a 460 KB, 3,000-template module — and
+a schema set 9–27 µs). Every XPath static context gets the set (`with_schema_set`), so the imported types work in
+`instance of`, `cast as`, `castable as`, constructor functions (upstream C37) and `as`; `use-when` sees every
+built-in type but no imported one (§3.12). The static checks of `[xsl:]type` (XTSE1520, XTSE1530 — the whole set is
+in scope, D-7), `[xsl:]validation` / `default-validation` values (XTSE0020) and XTSE1505 are in `compile/checks.rs`;
+the value is read into `model::Validation` on every node constructor (the module's `default-validation` filling an
+absent one) and **fenced at evaluation** (`runtime/eval.rs` `validation_fence`, `Validation::owner`): anything but
+`strip` is `XSLT2-NOTIMPL` naming M4d (constructed elements and attributes, `type` on `xsl:attribute`), M4e (copies,
+`xsl:document`, `xsl:result-document`, the implicit final result tree under the principal module's
+`default-validation="preserve"`) or M4f (`type` elsewhere, `lax`); a typed input tree is fenced with M4b (when the
+run starts), typed patterns with M4c (when the pattern **compiles**: a stylesheet with one does not compile). A
+stylesheet function with the name and arity 1 of a user atomic type's constructor function is XTSE0770, whatever
+`override` says (decision D-A, `compile/functions.rs`); one in the XML Schema namespace is XTSE0080 (§3.2). Known upstream limits: QName / NOTATION enumerations compare lexical forms (C33), a restriction of
+an enumerated type loses the enumeration (C44).
 
 ## The `regexml` engine
 

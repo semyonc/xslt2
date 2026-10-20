@@ -55,6 +55,14 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             if !sc.xpath_default_namespace.is_empty() {
                 ctx = ctx.with_default_element_ns(self.names.add(&sc.xpath_default_namespace));
             }
+            // §3.13 / §3.14: in schema-aware mode the in-scope schema
+            // components — the built-in types and everything the context's set
+            // holds (M4 plan D-7) — are those of the caller's schema set,
+            // looked up by the ids of its own name table, which is
+            // `self.names` (D-1).
+            if let Some(set) = self.schema {
+                ctx = ctx.with_schema_set(set);
+            }
             // §10.3: the binder also sees the stylesheet functions — before
             // the processor's own functions for `override="yes"`, after them
             // for `override="no"`, and before the §3.8 fallback in either case.

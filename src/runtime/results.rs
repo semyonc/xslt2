@@ -131,6 +131,11 @@ impl<'a, 't> Transformation<'a, 't> {
                  xsl:value-of, xsl:message, sort key, key, stylesheet function or xsl:document",
             ));
         }
+        super::eval::validation_fence(
+            &rd.validation,
+            crate::model::Constructor::Document,
+            "xsl:result-document",
+        )?;
         let sc = self.sheet.static_contexts.get(instruction.ctx);
         let resolve = |prefix: &str| sc.resolve_prefix(prefix);
 

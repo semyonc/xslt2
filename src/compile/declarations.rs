@@ -80,24 +80,10 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             }
         }
 
-        // A declaration not implemented yet is reported before any template
-        // body is compiled: otherwise a template calling a function that
-        // `xsl:function` would have declared fails first, and the case is
-        // classified as a wrong answer rather than a missing feature.
-        for unit in &self.modules.units {
-            for (module_id, nav, kind) in &unit.decls {
-                if *kind != DeclKind::Declaration || nav.namespace_uri() != XSLT_NS {
-                    continue;
-                }
-                if let Some(milestone) = unimplemented_declaration(nav.local_name()) {
-                    return Err(XsltError::not_implemented(
-                        format!("xsl:{}", nav.local_name()),
-                        milestone,
-                    )
-                    .with_location(self.modules.module(*module_id).location(nav)));
-                }
-            }
-        }
+        // (Every XSLT 2.0 declaration is implemented since M4a: the pass that
+        // reported a declaration not implemented yet before any template body
+        // was compiled — so that the case was classified as a missing feature —
+        // had only `xsl:import-schema` left, which is the schema context's.)
         self.declare_globals(&global_decls)?;
         // §11.1.4 is a whole-stylesheet mapping resolved by import precedence,
         // so it is settled before the first literal result element compiles.
@@ -304,11 +290,10 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             // Collected by `collect_aliases` before this pass; only the
             // attribute check above still applies here.
             "namespace-alias" => Ok(()),
-            name if unimplemented_declaration(name).is_some() => Err(XsltError::not_implemented(
-                format!("xsl:{name}"),
-                unimplemented_declaration(name).expect("checked"),
-            )
-            .with_location(module.location(nav))),
+            // §3.14: loaded into the caller's `SchemaContext` before this
+            // compilation started (`crate::schema`); a basic processor
+            // rejected it with XTSE1650 in `checks.rs`.
+            "import-schema" => Ok(()),
             other => {
                 // §3.9: in forwards-compatible mode an unknown XSLT
                 // declaration is ignored.
@@ -903,13 +888,4 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             None => VarValue::Empty,
         })
     }
-}
-
-/// The stylesheet declarations this processor parses but does not implement
-/// yet, and the roadmap sub-milestone (§4) that owns each.
-fn unimplemented_declaration(local: &str) -> Option<&'static str> {
-    Some(match local {
-        "import-schema" => "M4",
-        _ => return None,
-    })
 }

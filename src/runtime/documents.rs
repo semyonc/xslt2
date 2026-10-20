@@ -246,11 +246,24 @@ impl<'a, 't> Transformation<'a, 't> {
     /// `input-type-annotations="strip"` would make the error "not arise", but
     /// this crate does not implement that attribute at all (it is accepted and
     /// ignored), so there is nothing to honour here yet.
+    ///
+    /// A **schema-aware** processor (§21.2) has no XTDE1665: it accepts typed
+    /// input. Admitting one — checking it is bound to the stylesheet's schema
+    /// set, `input-type-annotations` — is M4b's (typed source documents, M4
+    /// plan D-2, D-13), so until then a typed input tree is fenced with
+    /// `XSLT2-NOTIMPL` naming it, rather than processed with annotations
+    /// nothing has checked against the context.
     pub(super) fn check_input_annotations(&self, node: &Nav<'t>) -> Result<(), XsltError> {
         let mut root = node.clone();
         root.move_to_root();
         if !root.document().has_type_annotations() {
             return Ok(());
+        }
+        if self.sheet.is_schema_aware() {
+            return Err(XsltError::not_implemented(
+                "a schema-typed input tree in schema-aware mode",
+                "M4b",
+            ));
         }
         // Nothing is remembered between calls: a rejected tree must be rejected
         // again if the same `Transformation` is run a second time, and an

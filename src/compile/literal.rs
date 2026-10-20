@@ -128,13 +128,10 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                             .map_err(|e| e.with_location(module.location(nav)))?;
                     }
                     other if STANDARD_ATTRS.contains(&other) => {}
-                    kind @ ("type" | "validation") => {
-                        return Err(XsltError::not_implemented(
-                            format!("xsl:{kind} on a literal result element"),
-                            "M4",
-                        )
-                        .with_location(module.location(nav)))
-                    }
+                    // §11.1.1; read by `validation_of` below, checked by
+                    // `checks.rs` (XTSE1660 for a basic processor; XTSE1505,
+                    // XTSE1520, XTSE0020 for a schema-aware one).
+                    "type" | "validation" => {}
                     // §3.9: "if an element has an attribute that XSLT 2.0 does
                     // not allow the element to have, then the attribute must
                     // be ignored" — a literal result element included.
@@ -160,6 +157,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             ));
         }
 
+        let validation = self.validation_of(nav, module, ctx, true)?;
         let body = self.sequence_constructor(nav, module_id)?;
         Ok(InstructionKind::LiteralElement {
             name,
@@ -167,6 +165,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             attrs,
             attr_sets,
             inherit_namespaces,
+            validation,
             body,
         })
     }

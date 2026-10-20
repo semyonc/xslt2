@@ -15,7 +15,8 @@ use xsd_schema::xpath::functions::XPathValue;
 use xsd_schema::xpath::{XPathContext, XPathExpr};
 
 use xslt2::{
-    Compiler, MemoryResolver, ModeKey, QName, Resolver, TransformOptions, XsltError, XsltFunctions,
+    Compiler, MemoryResolver, ModeKey, QName, Resolver, SchemaContext, TransformOptions, XsltError,
+    XsltFunctions,
 };
 
 use crate::catalog::QName as CatalogQName;
@@ -70,6 +71,17 @@ struct Job {
     /// `assert-result-document/@uri`): "It is supplied as a relative URI, interpreted as being
     /// relative to an implementation defined base output URI as chosen by the test driver".
     base_output_uri: String,
+    /// `--schema-aware`: compile with a schema-aware processor (XSLT 2.0 §21.2), against a
+    /// `SchemaContext` built from the stylesheet's own `xsl:import-schema` declarations. The
+    /// environment's `<schema>` elements are not used yet (M4b): a `stylesheet-import` schema is
+    /// the stylesheet's business, which it imports itself.
+    schema_aware: bool,
+    /// The M4b fence (M4a review R7), schema-aware runs only: the message for a source the catalog
+    /// asks to validate (`validation="strict"` or `"lax"`; the catalog: "whether the source
+    /// document is to be validated against the schema defined for that environment, and if so
+    /// whether validation is to be strict or lax"). The harness builds untyped trees until M4b, so
+    /// a case that fails on one is not implemented (`RunOutput::untyped_input_fence`).
+    validation_fence: Option<String>,
 }
 
 impl Job {
@@ -78,6 +90,21 @@ impl Job {
             .stylesheet
             .clone()
             .ok_or_else(|| "the test case names no stylesheet".to_string())?;
+
+        let validation_fence = if run.schema_aware {
+            run.env
+                .sources
+                .iter()
+                .find_map(|entry| match entry.validation.as_deref() {
+                    Some(mode @ ("strict" | "lax")) => Some(format!(
+                        "a source document with validation=\"{mode}\" (a typed input tree; the \
+                         harness builds untyped ones) is not implemented (M4b)"
+                    )),
+                    _ => None,
+                })
+        } else {
+            None
+        };
 
         let mut source = None;
         let mut extra = Vec::new();
@@ -180,6 +207,8 @@ impl Job {
             // `path_to_uri` of a directory has no trailing slash, and without one a relative
             // href would resolve against the directory's parent.
             base_output_uri: format!("{}/", xslt2::resolver::path_to_uri(&run.base_dir)),
+            schema_aware: run.schema_aware,
+            validation_fence,
         })
     }
 
@@ -203,17 +232,37 @@ impl Job {
     }
 
     fn execute(self) -> RunOutput {
-        let names = NameTable::new();
         let functions = XsltFunctions::new();
         let resolver = self.resolver();
 
-        let compiled = match Compiler::new(&names, &functions)
+        // Schema-aware (M4 plan D-1): the context first — a pre-scan of the stylesheet's
+        // `xsl:import-schema` declarations, loaded into one schema set — then the stylesheet,
+        // compiled with the set's name table. A basic run keeps its own table.
+        let basic_names = NameTable::new();
+        let context = if self.schema_aware {
+            match SchemaContext::builder()
+                .with_resolver(Arc::clone(&resolver))
+                .stylesheet_file(&self.stylesheet, &functions)
+                .and_then(|builder| builder.build())
+            {
+                Ok(context) => Some(context),
+                Err(e) => return failure(e),
+            }
+        } else {
+            None
+        };
+        let compiler = match &context {
+            Some(context) => Compiler::schema_aware(context, &functions),
+            None => Compiler::new(&basic_names, &functions),
+        };
+        let compiled = match compiler
             .with_resolver(Arc::clone(&resolver))
             .compile_file(&self.stylesheet)
         {
             Ok(compiled) => compiled,
             Err(e) => return failure(e),
         };
+        let names = compiled.names();
 
         let arena = Bump::new();
         let options = TransformOptions {
@@ -228,7 +277,7 @@ impl Job {
             .with_resolver(Arc::clone(&resolver));
 
         for (name, select, as_type) in &self.params {
-            match eval_param(&names, &functions, select, as_type.as_deref()) {
+            match eval_param(names, &functions, select, as_type.as_deref()) {
                 Ok(value) => transformation = transformation.with_param(name.clone(), value),
                 // The harness evaluates catalog parameters itself; a failure there is the
                 // harness's, not the engine's.
@@ -252,7 +301,8 @@ impl Job {
             .map(|m| m.content)
             .collect();
 
-        match outcome {
+        // From here on the stylesheet has compiled: a source was read untyped (the M4b fence).
+        let mut output = match outcome {
             Ok(outcome) => {
                 let messages = if messages.is_empty() {
                     outcome.messages.iter().map(|m| m.content.clone()).collect()
@@ -288,7 +338,9 @@ impl Job {
                 messages,
                 ..failure(e)
             },
-        }
+        };
+        output.validation_fence = self.validation_fence;
+        output
     }
 }
 
@@ -693,6 +745,100 @@ pub fn self_test() -> usize {
                 ),
             ],
         "other inline sources",
+    );
+
+    // M4a review R7, the M4b fence: a schema-aware run of a case whose source asks for
+    // validation (strict or lax, on any source) carries the fence; a basic run, and
+    // `validation="skip"`, do not.
+    let validated = |validation: &str, role: Option<&str>| ResolvedSource {
+        validation: Some(validation.to_string()),
+        ..inline(role, None, "<a/>")
+    };
+    let fence_of = |sources: Vec<ResolvedSource>, schema_aware: bool| {
+        let run = TestRun {
+            schema_aware,
+            ..probe_run(sources)
+        };
+        Job::from(&run)
+            .expect("the probe job builds")
+            .validation_fence
+    };
+    let strict = fence_of(vec![validated("strict", Some("."))], true);
+    check(
+        strict.as_deref().is_some_and(|m| {
+            m.contains("validation=\"strict\"") && crate::report::notimpl_owner(m) == Some("M4b")
+        }),
+        "a strict source in a schema-aware run is fenced with M4b",
+    );
+    check(
+        fence_of(
+            vec![inline(Some("."), None, "<a/>"), validated("lax", None)],
+            true,
+        )
+        .is_some(),
+        "a lax source available to doc() is fenced",
+    );
+    check(
+        fence_of(vec![validated("strict", Some("."))], false).is_none(),
+        "a basic run carries no fence",
+    );
+    check(
+        fence_of(vec![validated("skip", Some("."))], true).is_none(),
+        "validation=\"skip\" carries no fence",
+    );
+    // … and the verdict it replaces: a failure (fail or wrongError) becomes not implemented, with
+    // the untyped run's reason first and the owner last; a pass, or a case without the fence, stays.
+    let fenced = RunOutput {
+        validation_fence: strict.clone(),
+        ..Default::default()
+    };
+    let message = fenced.untyped_input_fence(true, Some("assert-xml mismatch"));
+    check(
+        message.as_deref().is_some_and(|m| {
+            m.starts_with("on an untyped input tree: assert-xml mismatch; ")
+                && crate::report::notimpl_owner(m) == Some("M4b")
+        }),
+        "a failure under the fence is not implemented (M4b)",
+    );
+    check(
+        fenced.untyped_input_fence(false, None).is_none(),
+        "a pass under the fence stays a pass",
+    );
+    check(
+        RunOutput::default()
+            .untyped_input_fence(true, Some("x"))
+            .is_none(),
+        "a failure without the fence stays a failure",
+    );
+    // A case that accepts only static errors is never fenced (§2.9: they are detected "before the
+    // source document … [is] available").
+    let expecting = |result: Assertion| TestCase {
+        name: "probe".into(),
+        description: String::new(),
+        dependencies: Vec::new(),
+        environment: None,
+        test: TestSpec::default(),
+        result,
+        line: 0,
+    };
+    let error = |code: &str| Assertion::Error { code: code.into() };
+    check(
+        crate::filter::expects_only_static_errors(&expecting(error("XTSE0770")))
+            && crate::filter::expects_only_static_errors(&expecting(Assertion::AnyOf(vec![
+                error("XTSE1520"),
+                error("XPST0017"),
+            ]))),
+        "static errors only",
+    );
+    check(
+        !crate::filter::expects_only_static_errors(&expecting(error("XTTE1510")))
+            && !crate::filter::expects_only_static_errors(&expecting(error("*")))
+            && !crate::filter::expects_only_static_errors(&expecting(Assertion::AnyOf(vec![
+                error("XTSE1520"),
+                error("XTTE0570"),
+            ])))
+            && !crate::filter::expects_only_static_errors(&expecting(Assertion::AllOf(Vec::new()))),
+        "not only static errors",
     );
 
     // P1-1: the inline principal is the *base* of its document, not the resource at the test-set

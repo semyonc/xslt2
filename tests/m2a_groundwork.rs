@@ -420,7 +420,7 @@ fn a_type_test_that_needs_a_schema_is_still_not_implemented() {
         let error =
             transform(&body, "<r><a/></r>").expect_err(&format!("{pattern} unexpectedly compiled"));
         assert!(
-            error.is_not_implemented() && error.to_string().contains("M4"),
+            error.is_not_implemented() && error.to_string().contains("(M4c)"),
             "pattern {pattern}: {error}"
         );
     }
@@ -451,13 +451,17 @@ fn every_notimpl_names_its_sub_milestone() {
         // (xsl:function was NOT-IMPL until M2e — `tests/m2e_functions.rs`.)
         // (xsl:decimal-format was NOT-IMPL until M3d —
         // `tests/m3d_formatting.rs`.)
+        // (xsl:import-schema was NOT-IMPL until M4a, which made it XTSE1650
+        // for a basic processor and loads it for a schema-aware one —
+        // `tests/m4a_schema_loading.rs`.)
+        // pattern.rs: a typed node test in a pattern, M4c's.
         (
             format!(
-                r#"<xsl:import-schema namespace="urn:s"/>{}"#,
+                r#"{}<xsl:template match="element(*, xs:integer)"/>"#,
                 template("")
             ),
-            "xsl:import-schema",
-            "M4",
+            "the typed node test",
+            "M4c",
         ),
         // (xsl:character-map, the html/xhtml methods, doctype-* and the output
         // encodings were NOT-IMPL until M3a — `tests/m3a_serialization.rs`.)

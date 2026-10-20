@@ -242,8 +242,10 @@ impl<'a, 't> Transformation<'a, 't> {
                 attrs,
                 attr_sets,
                 inherit_namespaces,
+                validation,
                 body,
             } => {
+                validation_fence(validation, Constructor::Element, "a literal result element")?;
                 out.start_element(name, None, false)?;
                 if !*inherit_namespaces {
                     out.no_inherit_namespaces()?;
@@ -270,8 +272,10 @@ impl<'a, 't> Transformation<'a, 't> {
                 namespace,
                 attr_sets,
                 inherit_namespaces,
+                validation,
                 body,
             } => {
+                validation_fence(validation, Constructor::Element, "xsl:element")?;
                 let lexical = self.avt(name, frame, cx)?;
                 let (prefix, local) =
                     lexical_qname(whitespace::trim(&lexical)).ok_or_else(|| {
@@ -308,8 +312,10 @@ impl<'a, 't> Transformation<'a, 't> {
                 name,
                 namespace,
                 separator,
+                validation,
                 value,
             } => {
+                validation_fence(validation, Constructor::Attribute, "xsl:attribute")?;
                 let lexical = self.avt(name, frame, cx)?;
                 let (prefix, local) =
                     lexical_qname(whitespace::trim(&lexical)).ok_or_else(|| {
@@ -402,7 +408,8 @@ impl<'a, 't> Transformation<'a, 't> {
                 out.pi(target, &repair_pi_data(whitespace::trim_start(&text)))
             }
 
-            InstructionKind::Document { body } => {
+            InstructionKind::Document { validation, body } => {
+                validation_fence(validation, Constructor::Document, "xsl:document")?;
                 // §11.5: a new document node whose content is the sequence
                 // constructor; in element content it contributes its children.
                 // "The temporary tree rooted at this document node forms the
@@ -425,24 +432,30 @@ impl<'a, 't> Transformation<'a, 't> {
                 copy_namespaces,
                 inherit_namespaces,
                 attr_sets,
+                validation,
                 body,
-            } => self.copy_shallow(
-                ShallowCopyNamespaces {
-                    copy: copy_scope(*copy_namespaces),
-                    inherit: *inherit_namespaces,
-                },
-                attr_sets,
-                body,
-                &self.sheet.static_contexts.get(instruction.ctx).base_uri,
-                frame,
-                cx,
-                out,
-            ),
+            } => {
+                validation_fence(validation, Constructor::Copy, "xsl:copy")?;
+                self.copy_shallow(
+                    ShallowCopyNamespaces {
+                        copy: copy_scope(*copy_namespaces),
+                        inherit: *inherit_namespaces,
+                    },
+                    attr_sets,
+                    body,
+                    &self.sheet.static_contexts.get(instruction.ctx).base_uri,
+                    frame,
+                    cx,
+                    out,
+                )
+            }
 
             InstructionKind::CopyOf {
                 select,
                 copy_namespaces,
+                validation,
             } => {
+                validation_fence(validation, Constructor::Copy, "xsl:copy-of")?;
                 let value = self.eval_expr(*select, frame, cx)?;
                 let scope = copy_scope(*copy_namespaces);
                 for item in value.into_vec() {
@@ -824,5 +837,26 @@ fn constructed_attribute_value(name: &Name, value: String) -> String {
         whitespace::tokens(&value).collect::<Vec<_>>().join(" ")
     } else {
         value
+    }
+}
+
+/// The M4a fence (ROADMAP §5.1 rule 1): a node constructor whose
+/// `[xsl:]validation` / `[xsl:]type` is anything but `strip` raises
+/// `XSLT2-NOTIMPL` naming the sub-milestone that implements it
+/// ([`Validation::owner`]) — at evaluation, so that a stylesheet whose
+/// non-`strip` instruction is never evaluated runs. Only a schema-aware
+/// stylesheet can get here with one: a basic processor rejected it with
+/// XTSE1660 (§21.1).
+pub(super) fn validation_fence(
+    validation: &Validation,
+    constructor: Constructor,
+    what: &str,
+) -> Result<(), XsltError> {
+    match validation.owner(constructor) {
+        None => Ok(()),
+        Some(owner) => Err(XsltError::not_implemented(
+            format!("{} on {what}", validation.describe()),
+            owner,
+        )),
     }
 }

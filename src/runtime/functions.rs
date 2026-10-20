@@ -617,7 +617,7 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
         if uri != XSLT_NS {
             return Ok(String::new());
         }
-        Ok(crate::functions::system_property(local).to_string())
+        Ok(crate::functions::system_property(local, self.run.sheet.is_schema_aware()).to_string())
     }
 
     /// §18.2.2 element-available. §5.1 lists it as one of only three places
@@ -653,7 +653,13 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
         };
         let name = crate::names::QName::new(uri.as_str(), local);
         Ok(self.run.sheet.has_stylesheet_function(&name, arity)
-            || crate::functions::function_available(self.run.sheet.functions(), &uri, local, arity))
+            || crate::functions::function_available(
+                self.run.sheet.functions(),
+                &uri,
+                local,
+                arity,
+                self.run.sheet.type_scope(),
+            ))
     }
 
     /// §18.1.4 type-available.
@@ -670,7 +676,7 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
     /// and no built-in type matches it.
     fn type_available(&self, name: &str) -> Result<bool, XsltError> {
         let (uri, local) = expand_name_argument(&self.name_scope(), XsltFn::TypeAvailable, name)?;
-        Ok(crate::functions::type_available(&uri, local))
+        Ok(self.run.sheet.type_scope().type_available(&uri, local))
     }
 }
 /// An `xs:anyURI` atomic value.

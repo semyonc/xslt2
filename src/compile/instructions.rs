@@ -327,12 +327,14 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     .map(|v| parse_yes_no(&v, "inherit-namespaces"))
                     .transpose()?
                     .unwrap_or(true);
+                let validation = self.validation_of(nav, module, ctx, false)?;
                 let body = self.sequence_constructor(nav, module_id)?;
                 Ok(InstructionKind::Element {
                     name,
                     namespace,
                     attr_sets,
                     inherit_namespaces: inherit,
+                    validation,
                     body,
                 })
             }
@@ -346,11 +348,13 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     Some(text) => Some(self.avt(&text, ctx)?),
                     None => None,
                 };
+                let validation = self.validation_of(nav, module, ctx, false)?;
                 let value = self.value_source(nav, module_id, ctx, codes::XTSE0840)?;
                 Ok(InstructionKind::Attribute {
                     name,
                     namespace,
                     separator,
+                    validation,
                     value,
                 })
             }
@@ -369,6 +373,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 Ok(InstructionKind::ProcessingInstruction { name, value })
             }
             "document" => Ok(InstructionKind::Document {
+                validation: self.validation_of(nav, module, ctx, false)?,
                 body: self.sequence_constructor(nav, module_id)?,
             }),
             "copy" => {
@@ -381,11 +386,13 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                     .transpose()?
                     .unwrap_or(true);
                 let attr_sets = self.qname_list(nav, "use-attribute-sets", ctx, module)?;
+                let validation = self.validation_of(nav, module, ctx, false)?;
                 let body = self.sequence_constructor(nav, module_id)?;
                 Ok(InstructionKind::Copy {
                     copy_namespaces: copy_ns,
                     inherit_namespaces: inherit,
                     attr_sets,
+                    validation,
                     body,
                 })
             }
@@ -398,6 +405,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 Ok(InstructionKind::CopyOf {
                     select,
                     copy_namespaces: copy_ns,
+                    validation: self.validation_of(nav, module, ctx, false)?,
                 })
             }
             "variable" => {

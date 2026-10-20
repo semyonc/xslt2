@@ -3,8 +3,8 @@
 Schema-aware XSLT 2.0 processor in Rust, built on the
 [`xsd-schema`](../xsd-schema) validator and its XPath 2.0 engine.
 
-Status: **M3 — numbering, formatting, serialization, compatibility** (M1 and M2 done; M3a serialization, M3b result
-documents, M3c numbering, M3d number and date formatting and M3e compatibility done). Stylesheets are loaded,
+Status: **M4 — schema-aware**, in progress (M1–M3 done; M4a, schema loading and the schema-aware mode, done — see
+"Schema-aware mode" below). Stylesheets are loaded,
 compiled and run: the module graph with import precedence, the lexical static contexts of §5.4.1,
 template rules with the §6.4 priorities and conflict resolution, the built-in rules,
 `xsl:apply-imports` and `xsl:next-match`, variables and parameters (tunnel included), attribute
@@ -44,6 +44,36 @@ let outcome = run.transform_uri("file:///tmp/in.xml")?;
 println!("{}", sheet.serialize_primary(&outcome)?);
 # Ok::<(), xslt2::XsltError>(())
 ```
+
+## Schema-aware mode
+
+`Compiler::new` is a *basic* XSLT processor (§21.1: `xsl:import-schema` is XTSE1650, `[xsl:]type` and a
+`[xsl:]validation` / `default-validation` other than `strip` are XTSE1660). A *schema-aware* compilation (§21.2) is
+two steps: a caller-owned `SchemaContext`, built before the stylesheet compiles from a pre-scan of its
+`xsl:import-schema` declarations (by location, by namespace only — the XML and XLink namespaces' schemas are built in
+—, or inline), and `Compiler::schema_aware(&context, &functions)`, which compiles against the context's schema set
+and its name table:
+
+```rust
+let functions = XsltFunctions::new();
+let context = SchemaContext::builder()
+    .with_resolver(resolver.clone())
+    .stylesheet_file("report.xsl".as_ref(), &functions)?
+    .build()?;                                   // XTSE0215, XTSE0220 (and the module errors) here
+let sheet = Compiler::schema_aware(&context, &functions)
+    .with_resolver(resolver)
+    .compile_file("report.xsl".as_ref())?;
+```
+
+The imported types are in scope for every XPath expression and `as` attribute (`cast as`, `castable as`,
+`instance of`, constructor functions of user-defined atomic types), `type-available()` and
+`system-property('xsl:is-schema-aware')` answer as a schema-aware processor, and the static rules of `[xsl:]type`
+and `[xsl:]validation` (XTSE1505, XTSE1520, XTSE1530, XTSE0020) apply. Not implemented yet, each raising
+`XSLT2-NOTIMPL` naming the sub-milestone (`../../xslt_doc/M4_PLAN.md` §4): typed source documents (M4b) and
+validation of constructed elements and attributes (M4d), of copies and document nodes (M4e), and `type` on elements
+and `lax` (M4f) when the construct is **evaluated** — a stylesheet that never reaches one runs; typed patterns (M4c)
+when the pattern is **compiled** — a stylesheet that contains one does not compile. XML Schema 1.0 only (1.1 is
+M4g).
 
 **Deep recursion.** Recursive templates and stylesheet functions use the native stack. A run checks
 how much stack it has used and stops with a depth error instead of overflowing. On a thread
@@ -101,13 +131,19 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 | XSLT 2.0-applicable | 6,619 |
 | excluded (documented in `tests/xslts/filter.rs`) | 64 |
 | runnable (dependencies satisfied) | 5,792 |
-| pass | 5,758 |
+| pass | 5,759 |
 | fail / wrongError / harnessError | 28 / 0 / 3 |
-| not implemented (`XSLT2-NOTIMPL`: M2k without its feature, M4) | 3 |
-| pass rate over runnable | 99.41% |
-| headline (basic profile, non-regex families) | 4,283 / 4,313 = **99.3%** |
+| not implemented (`XSLT2-NOTIMPL`: M2k without its feature) | 2 |
+| pass rate over runnable | 99.43% |
+| headline (basic profile, non-regex families) | 4,284 / 4,313 = **99.3%** |
 
-With `--features icu-collation` the two M2k cases pass too: 5,760.
+With `--features icu-collation` the two M2k cases pass too: 5,761.
+
+**Schema-aware run** (`--schema-aware`: the 584 cases that need a schema-aware processor become runnable and the 16
+that need a basic one are not run; every case is compiled schema-aware): 5,863 of 6,355 runnable pass, the
+schema-aware profile 120 of 579 (M4a and its review fixes, 2026-10-20; 51 before), and every basic case keeps its
+status. Sources are not validated yet (M4b): a case whose source asks for `validation="strict"` or `"lax"` and that
+fails on the untyped tree is counted as not implemented (M4b) — 91 of the 422 not implemented.
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the
@@ -149,7 +185,9 @@ its `range`, `../../XSLT2_M3C_FOLLOWUP_REPORT.md`) to 5,560 of 5,793 the same da
 and forwards-compatible processing, `../../XSLT2_M3E_REPORT.md`) took it to 5,755 of 5,792 on 2026-10-15
 (`next-match-039`, whose expected result is XSLT 3.0's, is excluded); every remaining failure has an owner in that
 report. `xsd-schema` Wave B batch (a) (the `wave-b` branch: `xs:QName` / `xs:NOTATION` values convert to their
-lexical form) took it to 5,758 on 2026-10-18 (`element-0308`, `message-0306`, `type-0143`).
+lexical form) took it to 5,758 on 2026-10-18 (`element-0308`, `message-0306`, `type-0143`), and M4a (schema loading and
+the schema-aware mode, `../../XSLT2_M4A_REPORT.md`) to 5,759 on 2026-10-20: `import-schema-191`, which expects a basic
+processor to reject `xsl:import-schema` with XTSE1650.
 
 The sixteen test-sets M1 targets:
 

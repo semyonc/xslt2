@@ -50,6 +50,10 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     /// > or more functions with the same expanded-QName, the same arity, and the
     /// > same import precedence, unless there is another function with the same
     /// > expanded-QName and arity, and a higher import precedence.
+    ///
+    /// In schema-aware mode also for a winning stylesheet function that has the
+    /// name and arity of a user atomic type's constructor function (decision
+    /// D-A).
     pub(super) fn collect_functions(&mut self) -> Result<(), XsltError> {
         let modules = self.modules;
         let mut decls: Vec<FunctionDecl<'t>> = Vec::new();
@@ -95,6 +99,36 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
 
         let mut winners: Vec<usize> = won.into_values().collect();
         winners.sort_unstable();
+
+        // Decision D-A (user, 2026-10-20; `type-functions-0503`): a constructor function of a user
+        // atomic type (XPath 2.0 §3.10.4: "For every atomic type in the in-scope schema types …, a
+        // constructor function is implicitly defined") has arity 1 and the type's expanded name.
+        // §10.3's `override` does not decide a clash with it — it "defines what happens if this
+        // function has the same name and arity as a function provided by the implementer or made
+        // available in the static context using an implementation-defined mechanism", and the
+        // standard `xsl:import-schema` is neither — while XPath 2.0 §2.1.1 identifies a function by
+        // "its expanded QName and its arity" and counts "the signatures of constructor functions"
+        // among the function signatures. Two functions under one name and arity is the clash XTSE0770
+        // names, whatever `override` says. The built-in constructors live in the XML Schema
+        // namespace, which a stylesheet function cannot use (§3.2, XTSE0080).
+        if let Some(set) = self.schema {
+            for index in &winners {
+                let decl = &decls[*index];
+                if decl.arity == 1
+                    && crate::schema::has_user_constructor(set, &decl.name.uri, &decl.name.local)
+                {
+                    return Err(XsltError::new(
+                        codes::XTSE0770,
+                        format!(
+                            "the stylesheet function {} with 1 parameter has the name and arity of \
+                             the constructor function of the imported atomic type {}",
+                            decl.name, decl.name
+                        ),
+                    )
+                    .with_location(self.modules.module(decl.module).location(&decl.nav)));
+                }
+            }
+        }
         let handles = self.functions.mint_handles(winners.len());
         let mut table = StylesheetFunctionTable::default();
         for (slot, (index, handle)) in winners.iter().zip(handles).enumerate() {

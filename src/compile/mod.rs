@@ -40,6 +40,7 @@ use crate::names::QName;
 use crate::output::OutputDefinition;
 use crate::pattern::Pattern;
 use crate::resolver::{self, FileResolver, Resolver};
+use crate::schema::SchemaContext;
 use crate::stylesheet::{static_context_of, CompatMode, Loader, ModuleSet, StaticContexts};
 
 /// Compiles stylesheets against a caller-owned name table and function set.
@@ -48,10 +49,18 @@ use crate::stylesheet::{static_context_of, CompatMode, Loader, ModuleSet, Static
 /// document that takes part in a transformation (§6.6), and `XPathContext`
 /// keeps its function catalog as a reference, so a `CompiledStylesheet` that
 /// owned the set would be self-referential (M0b, Q35).
+///
+/// [`Compiler::new`] is a **basic** XSLT processor (§21.1: XTSE1650 for
+/// `xsl:import-schema`, XTSE1660 for `[xsl:]type` and a non-`strip`
+/// validation, XTDE1665 for typed input); [`Compiler::schema_aware`] is a
+/// **schema-aware** one (§21.2), compiling against a caller-owned
+/// [`SchemaContext`] (M4 plan D-1, D-6: a run-time choice, not a cargo
+/// feature).
 pub struct Compiler<'a> {
     names: &'a NameTable,
     functions: &'a XsltFunctions,
     resolver: Arc<dyn Resolver>,
+    schema: Option<&'a SchemaContext>,
 }
 
 impl<'a> Compiler<'a> {
@@ -61,7 +70,32 @@ impl<'a> Compiler<'a> {
             names,
             functions,
             resolver: Arc::new(FileResolver),
+            schema: None,
         }
+    }
+
+    /// A schema-aware compiler (§21.2) for stylesheets whose
+    /// `xsl:import-schema` declarations `context` was built from
+    /// ([`SchemaContext::builder`]).
+    ///
+    /// The stylesheet's names are the context's: its schema set owns the name
+    /// table, which the XPath binder looks schema types up by and which every
+    /// document of every transformation is built with (DESIGN §6.6). Every
+    /// XPath expression sees the set's types and declarations (§3.13, M4 plan
+    /// D-7). Compiling a stylesheet that imports something the context did not
+    /// load is refused (`XSLT2-INTERNAL`).
+    pub fn schema_aware(context: &'a SchemaContext, functions: &'a XsltFunctions) -> Self {
+        Self {
+            names: context.names(),
+            functions,
+            resolver: Arc::new(FileResolver),
+            schema: Some(context),
+        }
+    }
+
+    /// Whether this is a schema-aware compiler.
+    pub fn is_schema_aware(&self) -> bool {
+        self.schema.is_some()
     }
 
     /// Where `xsl:include`, `xsl:import` and `document()` read from.
@@ -100,6 +134,7 @@ impl<'a> Compiler<'a> {
         // SAFETY-free lifetime note: `modules` borrows `arena`, and every value
         // that escapes this function is owned, so the arena dies here.
         let modules = Loader::new(&arena, self.names, self.resolver.as_ref(), self.functions)
+            .schema_aware(self.schema.is_some())
             .load(uri, text)?;
         // §10.3: the stylesheet functions join the in-scope functions of every
         // expression. The catalog that adds them lives only as long as the
@@ -111,7 +146,12 @@ impl<'a> Compiler<'a> {
             backwards: StylesheetCatalog::new(self.functions, &table, true),
             table: &table,
         };
-        let mut builder = Builder::new(self.names, self.functions, &modules, &catalogs);
+        let schema = self.schema.map(SchemaContext::schema_set);
+        let mut builder = Builder::new(self.names, self.functions, &modules, &catalogs, schema);
+        if let Some(context) = self.schema {
+            // D-1: the context must have been built from this stylesheet.
+            crate::schema::check_coverage(context, &modules)?;
+        }
         builder.build()
     }
 }
@@ -147,6 +187,13 @@ struct CompileCatalogs<'a, 'm> {
 struct Builder<'a, 'm, 't> {
     names: &'a NameTable,
     functions: &'a XsltFunctions,
+    /// The schema set of a schema-aware compilation (§21.2), in every XPath
+    /// static context; `None` for a basic one.
+    schema: Option<&'a xsd_schema::SchemaSet>,
+    /// Each module's `default-validation` (§3.6), by `ModuleId`: the
+    /// validation of a node constructor that has no `[xsl:]validation` or
+    /// `[xsl:]type` of its own.
+    module_validation: Vec<Validation>,
     modules: &'m ModuleSet<'t>,
     catalogs: &'m CompileCatalogs<'a, 'm>,
     static_contexts: StaticContexts,
@@ -231,10 +278,17 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         functions: &'a XsltFunctions,
         modules: &'m ModuleSet<'t>,
         catalogs: &'m CompileCatalogs<'a, 'm>,
+        schema: Option<&'a xsd_schema::SchemaSet>,
     ) -> Self {
         Self {
             names,
             functions,
+            schema,
+            module_validation: modules
+                .modules
+                .iter()
+                .map(attributes::module_default_validation)
+                .collect(),
             modules,
             catalogs,
             static_contexts: StaticContexts::default(),
@@ -274,7 +328,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         // §3.4: the element table first, over every module, so that a misplaced
         // element or a content model the spec does not allow is reported even
         // when it stands in a subtree nothing would compile (M2c).
-        checks::check(self.modules, self.functions.collations())?;
+        checks::check(self.modules, self.functions.collations(), self.schema)?;
         // §10.3: every stylesheet function is in the static context of every
         // expression, wherever it is declared — so they are all collected, and
         // their winners settled, before the first expression is compiled.
@@ -347,6 +401,8 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             module_uris: self.modules.modules.iter().map(|m| m.uri.clone()).collect(),
             base_uri,
             principal_compat,
+            schema: self.schema,
+            final_validation: self.module_validation[self.modules.principal.0 as usize].clone(),
         })
     }
 }

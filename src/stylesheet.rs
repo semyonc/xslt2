@@ -214,6 +214,10 @@ pub struct Module<'t> {
     /// Byte offset of the start of every line, for turning a source span into
     /// a line and column.
     line_starts: Vec<usize>,
+    /// The module's text, as parsed: the source spans of `doc` are byte ranges
+    /// of it. An inline schema of `xsl:import-schema` is cut out of it
+    /// (`crate::schema`, M4 plan D-9).
+    pub(crate) text: String,
     /// The element node references §3.12 effectively excludes from this module.
     ///
     /// Computed once, by [`Loader`], **before** `xsl:include` and `xsl:import`
@@ -284,7 +288,7 @@ impl<'t> Module<'t> {
     }
 
     /// 1-based line and column of a byte offset.
-    fn line_column(&self, offset: usize) -> (u32, u32) {
+    pub(crate) fn line_column(&self, offset: usize) -> (u32, u32) {
         let line = match self.line_starts.binary_search(&offset) {
             Ok(i) => i,
             Err(i) => i - 1,
@@ -392,6 +396,10 @@ pub struct Loader<'a, 't> {
     /// The `input-type-annotations` values the modules of this stylesheet ask
     /// for, for §3.6's XTSE0265 across the whole module graph.
     input_type_annotations: HashSet<String>,
+    /// Whether the processor is schema-aware (§21.2), which a `use-when`
+    /// expression can observe through `system-property('xsl:is-schema-aware')`
+    /// and `type-available()` (§3.12).
+    schema_aware: bool,
 }
 
 impl<'a, 't> Loader<'a, 't> {
@@ -411,7 +419,17 @@ impl<'a, 't> Loader<'a, 't> {
             stack: Vec::new(),
             next_precedence: 0,
             input_type_annotations: HashSet::new(),
+            schema_aware: false,
         }
+    }
+
+    /// Loads as a schema-aware processor (§21.2): `use-when` sees
+    /// `system-property('xsl:is-schema-aware') = 'yes'` and every built-in
+    /// type (§3.12: "The type definitions that would be available in the
+    /// absence of any `xsl:import-schema` declaration").
+    pub fn schema_aware(mut self, schema_aware: bool) -> Self {
+        self.schema_aware = schema_aware;
+        self
     }
 
     /// Loads the principal module at `uri` and everything it imports or
@@ -536,14 +554,19 @@ impl<'a, 't> Loader<'a, 't> {
             doc,
             root,
             line_starts: line_starts(&text),
+            text,
             excluded: HashSet::new(),
         });
         // §3.12, as early as it can be: before `xsl:include`/`xsl:import` are
         // resolved (an excluded one must not load its module at all) and before
         // any static validation (§3.12: "no static or dynamic errors will be
         // reported in respect of the element and its contents").
-        let excluded =
-            use_when_exclusions(&self.modules[id.0 as usize], self.names, self.functions)?;
+        let excluded = use_when_exclusions(
+            &self.modules[id.0 as usize],
+            self.names,
+            self.functions,
+            self.schema_aware,
+        )?;
         self.modules[id.0 as usize].excluded = excluded;
         Ok(id)
     }
@@ -760,6 +783,7 @@ fn use_when_exclusions(
     module: &Module<'_>,
     names: &NameTable,
     functions: &XsltFunctions,
+    schema_aware: bool,
 ) -> Result<HashSet<u32>, XsltError> {
     let mut excluded = HashSet::new();
     let root = match module.root {
@@ -773,7 +797,7 @@ fn use_when_exclusions(
         }
     };
 
-    if !keeps(&root, module, names, functions)? {
+    if !keeps(&root, module, names, functions, schema_aware)? {
         let is_stylesheet = root.namespace_uri() == XSLT_NS
             && matches!(root.local_name(), "stylesheet" | "transform");
         if is_stylesheet {
@@ -808,7 +832,7 @@ fn use_when_exclusions(
         }
         loop {
             if child.node_type() == DomNodeType::Element {
-                if keeps(&child, module, names, functions)? {
+                if keeps(&child, module, names, functions, schema_aware)? {
                     stack.push(child.clone());
                 } else {
                     excluded.insert(child.current_ref());
@@ -828,13 +852,14 @@ fn keeps(
     module: &Module<'_>,
     names: &NameTable,
     functions: &XsltFunctions,
+    schema_aware: bool,
 ) -> Result<bool, XsltError> {
     // §3.5 spells a standard attribute `use-when` on an XSLT element and
     // `xsl:use-when` on any other.
     let Some(source) = standard_attr(nav, "use-when") else {
         return Ok(true);
     };
-    evaluate_use_when(&source, nav, module, names, functions)
+    evaluate_use_when(&source, nav, module, names, functions, schema_aware)
 }
 
 /// Evaluates one `use-when` expression in the static and dynamic context §3.12
@@ -858,6 +883,7 @@ fn evaluate_use_when(
     module: &Module<'_>,
     names: &NameTable,
     functions: &XsltFunctions,
+    schema_aware: bool,
 ) -> Result<bool, XsltError> {
     let sc = use_when_static_context(nav, module);
     // §3.12's "In scope functions" row: the F&O core plus `element-available`,
@@ -901,7 +927,8 @@ fn evaluate_use_when(
         functions,
         sc.namespaces.clone(),
         sc.xpath_default_namespace.clone(),
-    );
+    )
+    .schema_aware(schema_aware);
     let outcome = expr
         .evaluator(&ctx)
         .run_with_node_and_setup::<Nav<'_>, _>(None, |ev| {

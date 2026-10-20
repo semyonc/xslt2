@@ -114,12 +114,14 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             location: loc.clone(),
         });
 
+        let validation = self.validation_of(nav, self.modules.module(module_id), ctx, false)?;
         let body = self.sequence_constructor(nav, module_id)?;
         Ok(InstructionKind::ResultDocument(Box::new(ResultDocument {
             format,
             href,
             serialization,
             use_character_maps,
+            validation,
             body,
         })))
     }
