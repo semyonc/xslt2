@@ -896,7 +896,9 @@ fn xtse0080_a_function_named_xsl_initial_template() {
 /// as xml:lang, xml:space, and xml:id" and "The namespace
 /// `http://www.w3.org/2000/xmlns/` is reserved for use as described in
 /// \[Namespaces in XML 1.0\]". So XTSE0080 holds for a stylesheet function, a
-/// named template and an attribute set named in either — while attributes in
+/// named template and an attribute set named in the XML namespace (no prefix
+/// can be bound to the xmlns one: the module is not namespace-well-formed and
+/// is refused when it is read) — while attributes in
 /// the XML namespace stay legal, because they are not declared names: "Reserved
 /// namespaces may be used without restriction to refer to the names of elements
 /// and attributes in source documents and result documents."
@@ -906,15 +908,30 @@ fn xtse0080_the_xml_and_xmlns_namespaces_are_reserved() {
         r#"<xsl:function name="xml:g"><xsl:sequence select="1"/></xsl:function>"#,
         r#"<xsl:template name="xml:t"/>"#,
         r#"<xsl:attribute-set name="xml:s"/>"#,
-        // The parser accepts a prefix bound to the xmlns namespace, so the
-        // name does expand into it.
-        r#"<xsl:function name="r:g" xmlns:r="http://www.w3.org/2000/xmlns/"><xsl:sequence select="1"/></xsl:function>"#,
     ] {
         let main = sheet(&format!(
             r#"{declaration}<xsl:template match="/"><out/></xsl:template>"#
         ));
         assert_code(&main, "XTSE0080");
     }
+    // A prefix bound to the xmlns namespace cannot reach the check: §1.1 "a
+    // stylesheet, whose syntax is well-formed XML [XML 1.0] conforming to the
+    // Namespaces in XML Recommendation", and Namespaces in XML 1.0 §3 (NSC:
+    // Reserved Prefixes and Namespace Names) says of that namespace "Other
+    // prefixes MUST NOT be bound to this namespace name" — the parser
+    // refuses the module.
+    let main = sheet(
+        r#"<xsl:function name="r:g" xmlns:r="http://www.w3.org/2000/xmlns/"><xsl:sequence select="1"/></xsl:function>
+           <xsl:template match="/"><out/></xsl:template>"#,
+    );
+    let error = error_of(&main);
+    assert_eq!(error.code, "XTSE0165", "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("Reserved Prefixes and Namespace Names"),
+        "{error}"
+    );
     let attributes = sheet(
         r#"<xsl:template match="/"><out xml:lang="en"><xsl:attribute name="xml:space">preserve</xsl:attribute>
              <xsl:attribute name="xml:base" select="'http://example.com/'"/><e xml:id="i1"/></out></xsl:template>"#,

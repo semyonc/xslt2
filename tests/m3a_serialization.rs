@@ -394,7 +394,8 @@ fn the_byte_order_mark() {
 fn cdata_section_elements() {
     let result = out(
         r#"<xsl:output cdata-section-elements="c p:d" xmlns:p="urn:p" encoding="US-ASCII"/>"#,
-        r#"<out><c>a]]>b&#xE9;c</c><d xmlns="urn:p">&lt;x</d><e>&lt;</e></out>"#,
+        // `]]&gt;`: XML 1.0 [14] CharData excludes a literal `]]>`.
+        r#"<out><c>a]]&gt;b&#xE9;c</c><d xmlns="urn:p">&lt;x</d><e>&lt;</e></out>"#,
     )
     .unwrap();
     assert_eq!(

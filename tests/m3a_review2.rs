@@ -160,7 +160,9 @@ fn f2_cdata_sections_close_around_round_trip_references() {
     // first or last opens no empty section.
     let mixed = out(
         output,
-        "<r><xsl:text>&#13;a&#9;b&#10;c]]>&#13;</xsl:text></r>",
+        // `]]>` is written `]]&gt;` in the stylesheet: XML 1.0 [14] CharData
+        // excludes the literal sequence.
+        "<r><xsl:text>&#13;a&#9;b&#10;c]]&gt;&#13;</xsl:text></r>",
     )
     .unwrap();
     assert_eq!(mixed, "<r>&#xD;<![CDATA[a\tb\nc]]]]><![CDATA[>]]>&#xD;</r>");
