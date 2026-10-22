@@ -99,31 +99,6 @@ pub struct RunOutput {
     /// `<error code="*"/>` assertion must not be satisfied by the harness refusing the case, so
     /// `compare::evaluate` turns this into a `harnessError` before looking at any assertion.
     pub harness_error: Option<String>,
-    /// The M4b fence (M4a review R7): the case asks for a validated source document (the catalog's
-    /// `source/@validation`, "whether the source document is to be validated against the schema
-    /// defined for that environment, and if so whether validation is to be strict or lax"), which
-    /// the harness does not build yet, and the stylesheet compiled — so the run saw an **untyped**
-    /// tree. Holds the `… is not implemented (M4b)` message; see [`RunOutput::untyped_input_fence`].
-    pub validation_fence: Option<String>,
-}
-
-impl RunOutput {
-    /// The message a verdict is replaced by under the M4b fence: when the case failed (`failed`:
-    /// `fail` or `wrongError`) after the stylesheet compiled, and it needed a validated source, the
-    /// failure is M4b's — reported as not implemented, with the untyped run's reason first. `None`
-    /// when the verdict stands: a pass (an assertion that holds on the untyped tree too stays a
-    /// pass, so the zero pass→non-pass gate still guards it), a static error (raised before any
-    /// source is read, so not the fence's), a harness error, or a case without a validated source.
-    pub fn untyped_input_fence(&self, failed: bool, why: Option<&str>) -> Option<String> {
-        let fence = self.validation_fence.as_deref()?;
-        if !failed {
-            return None;
-        }
-        Some(match why {
-            Some(why) => format!("on an untyped input tree: {why}; {fence}"),
-            None => fence.to_string(),
-        })
-    }
 }
 
 pub trait Engine {

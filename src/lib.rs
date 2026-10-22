@@ -73,8 +73,8 @@ pub use receiver::{
 };
 pub use resolver::{FileResolver, MemoryResolver, Resolver};
 pub use runtime::{
-    run_on_large_stack, Message, Outcome, SecondaryResult, TransformOptions, Transformation,
-    DEFAULT_MAX_RECURSION_DEPTH, DEFAULT_STACK_SIZE, OTHER_THREAD_STACK_LIMIT,
+    run_on_large_stack, Message, Outcome, SecondaryResult, SourceValidation, TransformOptions,
+    Transformation, DEFAULT_MAX_RECURSION_DEPTH, DEFAULT_STACK_SIZE, OTHER_THREAD_STACK_LIMIT,
 };
 pub use schema::{ImportSource, SchemaContext, SchemaContextBuilder, SchemaImport};
 pub use store::{DocId, DocumentStore, StoredDocument};

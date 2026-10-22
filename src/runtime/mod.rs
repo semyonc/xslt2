@@ -28,6 +28,7 @@ mod patterns;
 mod results;
 mod serialize;
 mod sort;
+mod typed_sources;
 mod variables;
 
 pub use content::SimpleDefault;
@@ -166,6 +167,48 @@ pub struct TransformOptions {
     /// the primary result is `file:///o/out` itself; against `file:///o/out/`
     /// it is `file:///o/out/a.xml`.
     pub base_output_uri: Option<String>,
+    /// How a source document is validated when it enters the run (M4 plan D-4): the default for
+    /// every source-tree loader — [`Transformation::transform_source`],
+    /// [`transform_uri`](Transformation::transform_uri), `document()`, `doc()` and a registered
+    /// source — which [`Transformation::transform_source_with`],
+    /// [`load_document_with`](Transformation::load_document_with) and
+    /// [`register_source_with`](Transformation::register_source_with) override per document.
+    /// Default [`SourceValidation::Skip`]: nothing is validated unless the host asks.
+    ///
+    /// The default is for the documents the run transforms and reads; it does **not** apply to a
+    /// stylesheet module of this stylesheet read with `document()` / `doc()` — `document('')`,
+    /// which "refers to the document node of the containing stylesheet module" (§16.1) — which is
+    /// read unvalidated unless the host sets a mode for its URI
+    /// ([`Transformation::set_source_validation`]; M4b decision D-V). Any other document the
+    /// stylesheet reads by URI is validated by the default, so with `Strict` a document that is
+    /// not an instance of the schema set is an error (FODC0002); exempt one with
+    /// `set_source_validation(uri, SourceValidation::Skip)`.
+    pub source_validation: SourceValidation,
+}
+
+/// Whether, and how, a source document is validated against the stylesheet's schema set when it
+/// enters a run (M4 plan D-4; [`TransformOptions::source_validation`]).
+///
+/// XSLT 2.0 leaves it to the processor: §2.8 "where the source document has undergone schema
+/// validity assessment, the XSLT processor has access to the type information associated with
+/// individual nodes", and F&O 1.0 §15.5.4 (`fn:doc`): "It is ·implementation-defined· whether DTD
+/// validation and/or schema validation is applied to the source document". The schemas are those
+/// of the stylesheet's `SchemaContext` — its `xsl:import-schema` declarations and the schemas the
+/// host added (§3.13's implementation-defined mechanism, D-2); `xsi:schemaLocation` hints in the
+/// document are not followed. A document that is not valid is an error.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SourceValidation {
+    /// Not validated: the tree is untyped (every element `xs:untyped`, every attribute
+    /// `xs:untypedAtomic`), as on a basic processor.
+    #[default]
+    Skip,
+    /// Strict validation: the document element must have a top-level element declaration (or an
+    /// `xsi:type`), and the document must be valid.
+    Strict,
+    /// Lax validation: as strict for a document element that has a declaration (or an
+    /// `xsi:type`); for one that has none, not implemented yet (M4f: lax assessment of the
+    /// validation root, upstream C36).
+    Lax,
 }
 
 impl Default for TransformOptions {
@@ -179,6 +222,7 @@ impl Default for TransformOptions {
             stack_limit: None,
             base_uri: None,
             base_output_uri: None,
+            source_validation: SourceValidation::Skip,
         }
     }
 }
@@ -477,6 +521,16 @@ pub struct Transformation<'a, 't> {
     /// Whether anything has been written to the primary result: the initial
     /// template's result sequence is non-empty (§2.4).
     primary_written: std::cell::Cell<bool>,
+    /// The stylesheet's schema set (schema-aware mode), at the lifetime of the
+    /// run's trees, which a typed source tree borrows.
+    schema_set: Option<&'t xsd_schema::SchemaSet>,
+    /// The validator source documents are validated with, made on first use
+    /// (M4b, D-12: one per transformation).
+    validator: std::cell::OnceCell<xsd_schema::validation::SchemaValidator<'a>>,
+    /// The validation modes `register_source_with` recorded, by URI (D-4).
+    source_modes: RefCell<HashMap<String, SourceValidation>>,
+    /// See [`Transformation::take_warnings`].
+    warnings: RefCell<Vec<String>>,
 }
 
 impl<'a> CompiledStylesheet<'a> {
@@ -515,6 +569,10 @@ impl<'a> CompiledStylesheet<'a> {
             message_sink: None,
             results: RefCell::new(results::FinalResults::default()),
             primary_written: std::cell::Cell::new(false),
+            schema_set: self.schema,
+            validator: std::cell::OnceCell::new(),
+            source_modes: RefCell::new(HashMap::new()),
+            warnings: RefCell::new(Vec::new()),
         }
     }
 }
@@ -556,6 +614,26 @@ impl<'a, 't> Transformation<'a, 't> {
         self.transform_document(id)
     }
 
+    /// Parses `xml`, validated as `validation` says (rather than as
+    /// [`TransformOptions::source_validation`]), and runs over it; see
+    /// [`load_document_with`](Self::load_document_with).
+    pub fn transform_source_with(
+        &self,
+        uri: &str,
+        xml: &str,
+        validation: SourceValidation,
+    ) -> Result<Outcome<'t>, XsltError> {
+        let id = self.load_document_with(uri, xml, validation)?;
+        self.transform_document(id)
+    }
+
+    /// The warnings of the run so far: things the run did on its own that the host may want to
+    /// know — a source tree typed against another schema set than the stylesheet's, whose
+    /// annotations were stripped (M4 plan D-2).
+    pub fn take_warnings(&self) -> Vec<String> {
+        std::mem::take(&mut self.warnings.borrow_mut())
+    }
+
     /// Loads the document the resolver serves at `uri` and runs over it.
     pub fn transform_uri(&self, uri: &str) -> Result<Outcome<'t>, XsltError> {
         let id = self.load_uri(uri)?;
@@ -589,7 +667,12 @@ impl<'a, 't> Transformation<'a, 't> {
     // ── Running ──────────────────────────────────────────────────────────
 
     /// Runs the transformation over a source document already in the store.
+    ///
+    /// A tree the host built and put into the store with type annotations is admitted first: taken
+    /// as it is, stripped, or refused (XTDE1665 on a basic processor) — see
+    /// `DocumentStore::insert` and M4 plan D-2, D-13.
     pub fn transform_document(&self, source: DocId) -> Result<Outcome<'t>, XsltError> {
+        self.admit_stored(source)?;
         let root = self.store.borrow().navigator(source);
         self.run(Some(root))
     }
@@ -625,11 +708,9 @@ impl<'a, 't> Transformation<'a, 't> {
         let _stack = self.stack_scope(stack_position());
         // §21.1 XTDE1665, before anything can observe a typed node: "the input
         // to the processor" is the tree containing the initial context node and
-        // every tree passed as a stylesheet parameter. Both are checked here,
-        // once per document.
-        if let Some(node) = &initial {
-            self.check_input_annotations(node)?;
-        }
+        // every tree passed as a stylesheet parameter. The first was admitted by
+        // `transform_document` (`admit_stored`); the parameters are checked
+        // here, once per document.
         let param_nodes: Vec<Nav<'t>> = self
             .params
             .borrow()
@@ -641,7 +722,7 @@ impl<'a, 't> Transformation<'a, 't> {
             })
             .collect();
         for node in &param_nodes {
-            self.check_input_annotations(node)?;
+            self.check_parameter_annotations(node)?;
         }
 
         *self.initial_root.borrow_mut() = initial.clone().map(|mut n| {

@@ -371,6 +371,9 @@ pub struct ModuleSet<'t> {
     pub principal: ModuleId,
     /// Whether the principal module is a simplified stylesheet (§3.7).
     pub simplified: bool,
+    /// §4.3: "Stripping of type annotations takes place if at least one stylesheet module in the
+    /// stylesheet specifies input-type-annotations="strip"".
+    pub strip_input_annotations: bool,
 }
 
 impl<'t> ModuleSet<'t> {
@@ -454,6 +457,7 @@ impl<'a, 't> Loader<'a, 't> {
             units: self.units,
             principal,
             simplified,
+            strip_input_annotations: self.input_type_annotations.contains("strip"),
         })
     }
 

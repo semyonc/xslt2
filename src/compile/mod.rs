@@ -403,6 +403,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             principal_compat,
             schema: self.schema,
             final_validation: self.module_validation[self.modules.principal.0 as usize].clone(),
+            strip_input_annotations: self.modules.strip_input_annotations,
         })
     }
 }

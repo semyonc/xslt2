@@ -1,5 +1,5 @@
-//! How a source document enters a run: admission, whitespace stripping
-//! (§4.4) and URI resolution (§16.1).
+//! How a source document enters a run: admission, validation (M4b, in
+//! `typed_sources.rs`), whitespace stripping (§4.4) and URI resolution (§16.1).
 
 use xsd_schema::document::BufferDocument;
 use xsd_schema::navigator::{DomNavigator, DomNodeType, NamespaceAxisScope};
@@ -15,9 +15,55 @@ use crate::whitespace;
 
 impl<'a, 't> Transformation<'a, 't> {
     /// Parses `xml` as the document named `uri` and registers it, applying
-    /// `xsl:strip-space` (§4.4).
+    /// `xsl:strip-space` (§4.4), validated as
+    /// [`TransformOptions::source_validation`](super::TransformOptions::source_validation) says.
     pub fn load_document(&self, uri: &str, xml: &str) -> Result<DocId, XsltError> {
         self.admit(Some(uri), xml)
+    }
+
+    /// [`load_document`](Self::load_document), validated as `validation` says rather than as the
+    /// run's default (M4 plan D-4).
+    ///
+    /// `Strict` and `Lax` validate the document against the stylesheet's schema set — the schemas
+    /// of its `SchemaContext`: the stylesheet's imports and the host's own
+    /// (`SchemaContextBuilder::schema_uri`) — as it is parsed, and the run sees it typed: its nodes
+    /// carry their type annotations and atomize to typed values (§2.8). A document that is not
+    /// valid is an error (the code this loader reports a document it cannot parse with; the message
+    /// names the first errors and the nodes they are about). `Lax` validation of a document whose
+    /// root element has no declaration is not implemented yet (M4f). A **basic** processor has no
+    /// schema: `Strict` or `Lax` is XTDE1665 (§21.1). `Skip` parses the document untyped.
+    ///
+    /// If the URI was loaded before, its document is returned as it is, whatever `validation` says
+    /// (§16.1: the same URI is the same document).
+    pub fn load_document_with(
+        &self,
+        uri: &str,
+        xml: &str,
+        validation: super::SourceValidation,
+    ) -> Result<DocId, XsltError> {
+        self.admit_with(Some(uri), xml, codes::XTDE1170, validation)
+    }
+
+    /// Sets how a later load of `uri` by URI — `document()`, `doc()`,
+    /// [`transform_uri`](Self::transform_uri) — is validated (`uri` absolute, as they resolve it), instead of the run's default — for a document the resolver serves, without
+    /// supplying its text ([`register_source_with`](Self::register_source_with) does both). It also
+    /// overrides the exemption of the stylesheet's own modules from the default (see
+    /// [`TransformOptions::source_validation`](super::TransformOptions::source_validation)). A URI
+    /// already loaded keeps its document.
+    pub fn set_source_validation(&self, uri: &str, validation: super::SourceValidation) {
+        self.source_modes
+            .borrow_mut()
+            .insert(uri.to_string(), validation);
+    }
+
+    /// [`register_source`](Self::register_source), recording how a later `document()` or `doc()`
+    /// of `uri` validates it (see [`load_document_with`](Self::load_document_with)) instead of the
+    /// run's default.
+    pub fn register_source_with(&self, uri: &str, xml: &str, validation: super::SourceValidation) {
+        self.store.borrow_mut().register_source(uri, xml);
+        self.source_modes
+            .borrow_mut()
+            .insert(uri.to_string(), validation);
     }
 
     /// The **one** way a source document enters the store.
@@ -30,16 +76,23 @@ impl<'a, 't> Transformation<'a, 't> {
     /// document's own base URI are applied exactly once, in one place, and no
     /// future loader can forget them.
     pub(super) fn admit(&self, uri: Option<&str>, xml: &str) -> Result<DocId, XsltError> {
-        self.admit_with(uri, xml, codes::XTDE1170)
+        self.admit_with(uri, xml, codes::XTDE1170, self.options.source_validation)
     }
 
-    /// [`admit`](Self::admit), reporting a document that cannot be parsed
-    /// with `parse_code`. (A re-entrant load keeps XTDE1170, §9.1.)
+    /// [`admit`](Self::admit), reporting a document that cannot be parsed —
+    /// or is not valid — with `parse_code`, and validating it as `validation`
+    /// says (M4 plan D-4; `typed_sources.rs`). (A re-entrant load keeps
+    /// XTDE1170, §9.1.)
+    ///
+    /// A typed tree is admitted by `admit_typed` (§4.3 annotation stripping
+    /// and §4.4 whitespace stripping with its simple-content exemption); an
+    /// untyped one by [`strip_source`](Self::strip_source), as before (D-13).
     fn admit_with(
         &self,
         uri: Option<&str>,
         xml: &str,
         parse_code: &str,
+        validation: super::SourceValidation,
     ) -> Result<DocId, XsltError> {
         if let Some(uri) = uri {
             if let Some(id) = self.store.borrow().id_of_uri(uri) {
@@ -50,20 +103,30 @@ impl<'a, 't> Transformation<'a, 't> {
         if let Some(uri) = uri {
             self.store.borrow_mut().enter_load(uri)?;
         }
-        let parsed = self.store.borrow().parse(xml, uri);
+        let parsed = match validation {
+            super::SourceValidation::Skip => {
+                self.store.borrow().parse(xml, uri).map_err(|mut e| {
+                    e.code = parse_code.to_string();
+                    e
+                })
+            }
+            _ => self.parse_validated(xml, uri, validation, parse_code),
+        };
         if let Some(uri) = uri {
             self.store.borrow_mut().leave_load(uri);
         }
-        let parsed = parsed.map_err(|mut e| {
-            e.code = parse_code.to_string();
-            e
-        })?;
-        let doc = self.strip_source(parsed, uri)?;
+        let parsed = parsed?;
+        let doc = if parsed.has_type_annotations() {
+            self.admit_typed(parsed, uri, true)?
+        } else {
+            self.strip_source(parsed, uri)?
+        };
         let stripped = !std::ptr::eq(doc, parsed);
         if let Some(uri) = uri {
             self.store.borrow_mut().register_source(uri, xml);
         }
         let id = self.store.borrow_mut().insert_ref(doc, uri);
+        self.store.borrow_mut().mark_admitted(id);
         if stripped {
             self.store.borrow_mut().mark_stripped(id);
         }
@@ -185,7 +248,7 @@ impl<'a, 't> Transformation<'a, 't> {
     /// §4.4 resolves conflicts between `xsl:strip-space` and
     /// `xsl:preserve-space` "using the rules for conflict resolution of
     /// template rules": import precedence first, then priority.
-    fn strips(&self, nav: &Nav<'t>) -> bool {
+    pub(super) fn strips(&self, nav: &Nav<'t>) -> bool {
         let (uri, local) = (nav.namespace_uri(), nav.local_name());
         let mut best: Option<&SpaceRule> = None;
         for rule in self.sheet.space_rules() {
@@ -208,6 +271,67 @@ impl<'a, 't> Transformation<'a, 't> {
 
     // ── §21.1 XTDE1665: the input may not be schema-typed ─────────────────
 
+    /// Admits a tree the host put into the store (`DocumentStore::insert`) as the source tree of a
+    /// run, when it carries type annotations (M4 plan D-2, D-13).
+    ///
+    /// Every path a host-inserted tree enters the run by goes through here: as the source of
+    /// [`transform_document`](Self::transform_document), and as the result of `doc()` /
+    /// `document()` of its URI (§4.4: "any document returned by the functions document, doc"). A
+    /// tree this run loaded itself was admitted when it was loaded, and an untyped tree is taken as
+    /// it is. A typed one: on a basic processor it is stripped under `input-type-annotations="strip"`
+    /// (§21.1: XTDE1665 "will not arise if the input-type-annotations attribute is set to strip") and
+    /// refused with XTDE1665 otherwise; on a schema-aware processor it is taken as it is when it is
+    /// bound to the stylesheet's own schema set, stripped under `strip` (§4.3), and stripped with a
+    /// warning when it is bound to another set (D-2: its annotations name components the stylesheet
+    /// does not know). The stripped copy replaces it in the store, under its `DocId` and URI. The
+    /// host's tree is not whitespace-stripped (§4.4), typed or not.
+    pub(super) fn admit_stored(&self, id: DocId) -> Result<(), XsltError> {
+        let (doc, uri, admitted) = {
+            let store = self.store.borrow();
+            let stored = store
+                .get(id)
+                .ok_or_else(|| XsltError::internal("the DocId does not belong to this run"))?;
+            (stored.doc, stored.uri.clone(), stored.admitted)
+        };
+        if admitted || !doc.has_type_annotations() {
+            return Ok(());
+        }
+        if !self.sheet.is_schema_aware() && !self.sheet.strips_input_annotations() {
+            // Not marked admitted: a refused tree is refused again by a later call.
+            return self.check_input_annotations(&doc.create_navigator());
+        }
+        let copy = self.admit_typed(doc, uri.as_deref(), false)?;
+        if std::ptr::eq(copy, doc) {
+            self.store.borrow_mut().mark_admitted(id);
+        } else {
+            self.store.borrow_mut().replace_ref(id, copy);
+        }
+        Ok(())
+    }
+
+    /// A node-valued stylesheet parameter (§21.1's "trees passed as stylesheet parameters"): a basic
+    /// processor refuses a typed one (XTDE1665, [`check_input_annotations`](Self::check_input_annotations)
+    /// — `input-type-annotations` concerns source trees only, §4.3, §4.4); a schema-aware one takes a
+    /// node of a tree bound to the stylesheet's schema set, and refuses one bound to another set
+    /// (`XSLT2-INTERNAL`): its annotations cannot be read, and a stripped copy would be another node
+    /// (D-2 strips source trees only).
+    pub(super) fn check_parameter_annotations(&self, node: &Nav<'t>) -> Result<(), XsltError> {
+        let doc = node.document();
+        if !doc.has_type_annotations() {
+            return Ok(());
+        }
+        if !self.sheet.is_schema_aware() {
+            return self.check_input_annotations(node);
+        }
+        match (doc.schema_set(), self.sheet.schema_set()) {
+            (Some(a), Some(b)) if std::ptr::eq(a, b) => Ok(()),
+            _ => Err(XsltError::internal(
+                "a stylesheet parameter holds a node of a tree typed against another schema set \
+                 than the stylesheet's; build it with the SchemaContext's set, or untyped",
+            )),
+        }
+    }
+
     /// Rejects an externally supplied tree that carries type annotations.
     ///
     /// > \[ERR XTDE1665\] A basic XSLT processor must raise a non-recoverable
@@ -221,17 +345,21 @@ impl<'a, 't> Transformation<'a, 't> {
     /// > stylesheet parameters, trees accessed using the `document`, `doc` and
     /// > `collection` functions, and trees returned by extension functions.
     ///
-    /// Of that list, only two can reach this processor already typed. Every
-    /// tree it reads itself — [`load_document`](Self::load_document),
+    /// Of that list, only a tree a caller built elsewhere can reach a basic
+    /// processor already typed. Every tree it reads itself —
+    /// [`load_document`](Self::load_document),
     /// [`register_source`](Self::register_source), `document()`, `doc()` — is
-    /// parsed without a schema, and [`admit`](Self::admit) marks it as such;
-    /// there are no extension functions and no `collection()`. What is left is
-    /// a document a caller built elsewhere and handed to
+    /// parsed without a schema (asking it to validate one is XTDE1665 at load,
+    /// `parse_validated`); there are no extension functions and no
+    /// `collection()`. A tree built elsewhere comes in three ways: handed to
     /// [`DocumentStore::insert`](crate::store::DocumentStore::insert) or
-    /// [`insert_ref`](crate::store::DocumentStore::insert_ref), and a node-valued
-    /// stylesheet parameter. Both are checked here, on the way into
-    /// [`Transformation::run`](Self::run) — the point where they first become
-    /// *input*.
+    /// [`insert_ref`](crate::store::DocumentStore::insert_ref) and run over
+    /// ([`transform_document`](Self::transform_document)), the same tree reached
+    /// by `doc()` / `document()` of its URI (both through `admit_stored`), and a
+    /// node of it passed as a stylesheet parameter
+    /// (`check_parameter_annotations`, on the way into
+    /// [`Transformation::run`](Self::run)). Each is checked where it first
+    /// becomes *input*.
     ///
     /// The question is asked of the document, in constant time:
     /// [`BufferDocument::has_type_annotations`] is exact — `true` iff some
@@ -243,27 +371,18 @@ impl<'a, 't> Transformation<'a, 't> {
     /// the walk can still come back empty when the annotations belong to another
     /// tree of the same document, and then this tree is admitted.
     ///
-    /// `input-type-annotations="strip"` would make the error "not arise", but
-    /// this crate does not implement that attribute at all (it is accepted and
-    /// ignored), so there is nothing to honour here yet.
+    /// `input-type-annotations="strip"` makes the error "not arise" for a
+    /// source tree, which [`admit_stored`](Self::admit_stored) strips instead
+    /// of calling this.
     ///
     /// A **schema-aware** processor (§21.2) has no XTDE1665: it accepts typed
-    /// input. Admitting one — checking it is bound to the stylesheet's schema
-    /// set, `input-type-annotations` — is M4b's (typed source documents, M4
-    /// plan D-2, D-13), so until then a typed input tree is fenced with
-    /// `XSLT2-NOTIMPL` naming it, rather than processed with annotations
-    /// nothing has checked against the context.
+    /// input ([`admit_stored`](Self::admit_stored),
+    /// [`check_parameter_annotations`](Self::check_parameter_annotations)).
     pub(super) fn check_input_annotations(&self, node: &Nav<'t>) -> Result<(), XsltError> {
         let mut root = node.clone();
         root.move_to_root();
         if !root.document().has_type_annotations() {
             return Ok(());
-        }
-        if self.sheet.is_schema_aware() {
-            return Err(XsltError::not_implemented(
-                "a schema-typed input tree in schema-aware mode",
-                "M4b",
-            ));
         }
         // Nothing is remembered between calls: a rejected tree must be rejected
         // again if the same `Transformation` is run a second time, and an
@@ -286,9 +405,13 @@ impl<'a, 't> Transformation<'a, 't> {
         }
     }
 
-    /// Registers text a later `document()` call should find at `uri`.
+    /// Registers text a later `document()` call should find at `uri`, validated by the run's default
+    /// (a mode an earlier [`register_source_with`](Self::register_source_with) or
+    /// [`set_source_validation`](Self::set_source_validation) set for the URI is dropped: the later
+    /// registration wins).
     pub fn register_source(&self, uri: &str, xml: &str) {
         self.store.borrow_mut().register_source(uri, xml);
+        self.source_modes.borrow_mut().remove(uri);
     }
     /// The base URI the *caller's* relative references resolve against — the
     /// initial source document of [`transform_uri`](Self::transform_uri).
@@ -315,7 +438,7 @@ impl<'a, 't> Transformation<'a, 't> {
     /// > static context otherwise (this will usually be the base URI of the
     /// > stylesheet module).
     pub(super) fn load_relative_to(&self, base: &str, uri: &str) -> Result<DocId, XsltError> {
-        self.load_with_code(base, uri, codes::XTDE1170)
+        self.load_with_code(base, uri, codes::XTDE1170, false)
     }
 
     /// The load behind `document()` and `fn:doc` (§16.1), which report the
@@ -327,14 +450,24 @@ impl<'a, 't> Transformation<'a, 't> {
     /// a resource that cannot be retrieved, or whose content cannot be parsed,
     /// raises FODC0002. XTDE1170 is `unparsed-text()`'s code (§16.2).
     pub(super) fn load_for_doc(&self, base: &str, uri: &str) -> Result<DocId, XsltError> {
-        self.load_with_code(base, uri, "FODC0002")
+        self.load_with_code(base, uri, "FODC0002", true)
     }
 
     /// Loads `uri` resolved against `base`, reporting a resource that cannot
-    /// be read or parsed with `code`.
-    fn load_with_code(&self, base: &str, uri: &str, code: &str) -> Result<DocId, XsltError> {
+    /// be read or parsed with `code`; `by_stylesheet` when `doc()` /
+    /// `document()` asks (see [`validation_of`](Self::validation_of)).
+    fn load_with_code(
+        &self,
+        base: &str,
+        uri: &str,
+        code: &str,
+        by_stylesheet: bool,
+    ) -> Result<DocId, XsltError> {
         let absolute = resolver::resolve_uri(base, uri);
-        if let Some(id) = self.store.borrow().id_of_uri(&absolute) {
+        let stored = self.store.borrow().id_of_uri(&absolute);
+        if let Some(id) = stored {
+            // A tree the host inserted under this URI is admitted on this path too (review F1).
+            self.admit_stored(id)?;
             return Ok(id);
         }
         // A pre-registered source wins over the resolver, so that a caller who
@@ -351,7 +484,22 @@ impl<'a, 't> Transformation<'a, 't> {
                 .resolve_text(&absolute)
                 .map_err(|e| XsltError::new(code, format!("cannot read {absolute:?}: {e}")))?,
         };
-        self.admit_with(Some(&absolute), &text, code)
+        let validation = self.validation_of(&absolute, by_stylesheet);
+        self.admit_with(Some(&absolute), &text, code, validation)
+    }
+
+    /// How a document loaded by URI is validated (D-4): a mode the host set for the URI
+    /// (`set_source_validation`, `register_source_with`); else, when `doc()` / `document()` reads a
+    /// stylesheet module of this stylesheet (`document('')`, or a module's URI), `Skip` (decision
+    /// D-V: a stylesheet module is not a source the host asked to validate); else the run's default.
+    fn validation_of(&self, absolute: &str, by_stylesheet: bool) -> super::SourceValidation {
+        if let Some(mode) = self.source_modes.borrow().get(absolute) {
+            return *mode;
+        }
+        if by_stylesheet && self.sheet.is_module_uri(absolute) {
+            return super::SourceValidation::Skip;
+        }
+        self.options.source_validation
     }
 }
 

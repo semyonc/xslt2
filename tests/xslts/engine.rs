@@ -15,8 +15,8 @@ use xsd_schema::xpath::functions::XPathValue;
 use xsd_schema::xpath::{XPathContext, XPathExpr};
 
 use xslt2::{
-    Compiler, MemoryResolver, ModeKey, QName, Resolver, SchemaContext, TransformOptions, XsltError,
-    XsltFunctions,
+    Compiler, MemoryResolver, ModeKey, QName, Resolver, SchemaContext, SourceValidation,
+    TransformOptions, XsltError, XsltFunctions,
 };
 
 use crate::catalog::QName as CatalogQName;
@@ -57,8 +57,12 @@ struct Job {
     /// The initial context document: `(uri, text)`, read from a file or from
     /// the catalog's inline `<content>`.
     source: Option<(String, String)>,
+    /// How the initial context document is validated (`source/@validation`; schema-aware runs).
+    source_validation: SourceValidation,
     /// Every other source the case declares, so `document()` can find them.
     extra: Vec<(String, String)>,
+    /// How each of `extra` is validated, in the same order.
+    extra_validation: Vec<SourceValidation>,
     params: Vec<(QName, String, Option<String>)>,
     initial_template: Option<QName>,
     initial_mode: Option<ModeKey>,
@@ -72,16 +76,62 @@ struct Job {
     /// relative to an implementation defined base output URI as chosen by the test driver".
     base_output_uri: String,
     /// `--schema-aware`: compile with a schema-aware processor (XSLT 2.0 §21.2), against a
-    /// `SchemaContext` built from the stylesheet's own `xsl:import-schema` declarations. The
-    /// environment's `<schema>` elements are not used yet (M4b): a `stylesheet-import` schema is
-    /// the stylesheet's business, which it imports itself.
+    /// `SchemaContext` built from the stylesheet's own `xsl:import-schema` declarations and the
+    /// environment's schemas (`schemas`).
     schema_aware: bool,
-    /// The M4b fence (M4a review R7), schema-aware runs only: the message for a source the catalog
-    /// asks to validate (`validation="strict"` or `"lax"`; the catalog: "whether the source
-    /// document is to be validated against the schema defined for that environment, and if so
-    /// whether validation is to be strict or lax"). The harness builds untyped trees until M4b, so
-    /// a case that fails on one is not implemented (`RunOutput::untyped_input_fence`).
-    validation_fence: Option<String>,
+    /// Schema-aware runs: the environment's `<schema>` documents the context is given as host
+    /// schemas (XSLT 2.0 §3.13's implementation-defined mechanism; `context_schema`).
+    schemas: Vec<PathBuf>,
+}
+
+/// Whether an environment `<schema>` of this `role` goes into the schema context of a
+/// schema-aware run (M4b).
+///
+/// The catalog (`admin/catalog-schema.xsd`): "An element which provides information about a schema
+/// to be used to validate a source document", with the roles `source-reference`,
+/// `stylesheet-import` and `secondary`. A `source-reference` schema, and one with no role, is the
+/// one the sources are validated against: it goes in. A `secondary` one is a document another
+/// schema of the environment includes or imports: it is loaded transitively, through that
+/// schema's directives, not on its own.
+///
+/// A `stylesheet-import` one is the schema the stylesheet imports (`xsl:import-schema`), and it
+/// goes in too (M4b report, decision D-N): where the stylesheet's own import names the same
+/// document the context loads it once, and `import-schema-185a` / `b` / `c` find their
+/// namespace's components only there (their `schema-location` does not exist). Measured: of the
+/// 431 schema-aware cases with such a schema, these three change (to M4f's fence) and nothing
+/// else.
+fn context_schema(role: Option<&str>) -> bool {
+    matches!(
+        role,
+        None | Some("source-reference") | Some("stylesheet-import")
+    )
+}
+
+/// The validation of a source document in a run: the catalog's `source/@validation` ("whether
+/// the source document is to be validated against the schema defined for that environment, and if
+/// so whether validation is to be strict or lax"; values `strict`, `lax`, `skip`) in a
+/// schema-aware run, `skip` in a basic one (a basic processor validates nothing, §21.1).
+///
+/// **No `validation` attribute** (`has_source_schema`: the environment has a `source-reference`
+/// schema): strict when the environment has a `source-reference` schema — "a schema to be used to
+/// validate a source document" (the catalog's `schema` element) — and skip otherwise. The
+/// catalog's own documentation of the default ("The default is "strip"", which is no permitted
+/// value) does not settle it; the seven applicable cases with a `source-reference` schema and no
+/// `validation` attribute do: two expect typed values from their source (`type-functions-0101`,
+/// `-0401`: "arguments coming from typed nodes in input source"), and the other five give the same
+/// result either way (M4b report, decision D-M).
+fn source_validation(
+    validation: Option<&str>,
+    has_source_schema: bool,
+    schema_aware: bool,
+) -> SourceValidation {
+    match validation {
+        _ if !schema_aware => SourceValidation::Skip,
+        Some("strict") => SourceValidation::Strict,
+        Some("lax") => SourceValidation::Lax,
+        None if has_source_schema => SourceValidation::Strict,
+        _ => SourceValidation::Skip,
+    }
 }
 
 impl Job {
@@ -91,23 +141,15 @@ impl Job {
             .clone()
             .ok_or_else(|| "the test case names no stylesheet".to_string())?;
 
-        let validation_fence = if run.schema_aware {
-            run.env
-                .sources
-                .iter()
-                .find_map(|entry| match entry.validation.as_deref() {
-                    Some(mode @ ("strict" | "lax")) => Some(format!(
-                        "a source document with validation=\"{mode}\" (a typed input tree; the \
-                         harness builds untyped ones) is not implemented (M4b)"
-                    )),
-                    _ => None,
-                })
-        } else {
-            None
-        };
-
+        let has_source_schema = run
+            .env
+            .schemas
+            .iter()
+            .any(|schema| schema.role.as_deref() == Some("source-reference"));
         let mut source = None;
+        let mut source_mode = SourceValidation::Skip;
         let mut extra = Vec::new();
+        let mut extra_validation = Vec::new();
         for (index, entry) in run.env.sources.iter().enumerate() {
             // `select` makes a node *inside* the source document the initial context item (the
             // catalog: "an XPath expression to select the initial context item within the
@@ -162,10 +204,17 @@ impl Job {
                 (None, None) => continue,
             };
             let Some(uri) = uri else { continue };
+            let mode = source_validation(
+                entry.validation.as_deref(),
+                has_source_schema,
+                run.schema_aware,
+            );
             if entry.role.as_deref() == Some(".") {
                 source = Some((uri, text));
+                source_mode = mode;
             } else {
                 extra.push((uri, text));
+                extra_validation.push(mode);
             }
         }
 
@@ -189,10 +238,23 @@ impl Job {
             params.push((qname_of(&param.name), select, param.as_type.clone()));
         }
 
+        let schemas = if run.schema_aware {
+            run.env
+                .schemas
+                .iter()
+                .filter(|schema| context_schema(schema.role.as_deref()))
+                .filter_map(|schema| schema.path.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         Ok(Self {
             stylesheet,
             source,
+            source_validation: source_mode,
             extra,
+            extra_validation,
             params,
             initial_template: run.case.test.initial_template.as_ref().map(qname_of),
             initial_mode: run.case.test.initial_mode.as_ref().and_then(mode_of),
@@ -208,7 +270,7 @@ impl Job {
             // href would resolve against the directory's parent.
             base_output_uri: format!("{}/", xslt2::resolver::path_to_uri(&run.base_dir)),
             schema_aware: run.schema_aware,
-            validation_fence,
+            schemas,
         })
     }
 
@@ -240,7 +302,13 @@ impl Job {
         // compiled with the set's name table. A basic run keeps its own table.
         let basic_names = NameTable::new();
         let context = if self.schema_aware {
-            match SchemaContext::builder()
+            let builder = self
+                .schemas
+                .iter()
+                .fold(SchemaContext::builder(), |builder, path| {
+                    builder.schema_file(path)
+                });
+            match builder
                 .with_resolver(Arc::clone(&resolver))
                 .stylesheet_file(&self.stylesheet, &functions)
                 .and_then(|builder| builder.build())
@@ -286,13 +354,16 @@ impl Job {
         }
 
         // Every source the case declares is registered so that `document()`
-        // and `doc()` resolve them without touching the file system.
-        for (uri, text) in &self.extra {
-            transformation.register_source(uri, text);
+        // and `doc()` resolve them without touching the file system, each with
+        // its own validation.
+        for ((uri, text), validation) in self.extra.iter().zip(&self.extra_validation) {
+            transformation.register_source_with(uri, text, *validation);
         }
 
         let outcome = match &self.source {
-            Some((uri, text)) => transformation.transform_source(uri, text),
+            Some((uri, text)) => {
+                transformation.transform_source_with(uri, text, self.source_validation)
+            }
             None => transformation.transform_without_source(),
         };
         let messages: Vec<String> = transformation
@@ -301,8 +372,7 @@ impl Job {
             .map(|m| m.content)
             .collect();
 
-        // From here on the stylesheet has compiled: a source was read untyped (the M4b fence).
-        let mut output = match outcome {
+        match outcome {
             Ok(outcome) => {
                 let messages = if messages.is_empty() {
                     outcome.messages.iter().map(|m| m.content.clone()).collect()
@@ -338,9 +408,7 @@ impl Job {
                 messages,
                 ..failure(e)
             },
-        };
-        output.validation_fence = self.validation_fence;
-        output
+        }
     }
 }
 
@@ -633,7 +701,7 @@ pub fn self_test() -> usize {
     use std::collections::HashMap;
 
     use crate::catalog::{Assertion, TestCase, TestSet, TestSpec};
-    use crate::environment::{ResolvedEnvironment, ResolvedSource};
+    use crate::environment::{ResolvedEnvironment, ResolvedSchema, ResolvedSource};
 
     let mut checks = 0;
     let mut check = |ok: bool, what: &str| {
@@ -747,98 +815,90 @@ pub fn self_test() -> usize {
         "other inline sources",
     );
 
-    // M4a review R7, the M4b fence: a schema-aware run of a case whose source asks for
-    // validation (strict or lax, on any source) carries the fence; a basic run, and
-    // `validation="skip"`, do not.
+    // M4b: in a schema-aware run each source is validated as its `validation` says (`skip` and no
+    // value: not at all); a basic run validates nothing.
     let validated = |validation: &str, role: Option<&str>| ResolvedSource {
         validation: Some(validation.to_string()),
         ..inline(role, None, "<a/>")
     };
-    let fence_of = |sources: Vec<ResolvedSource>, schema_aware: bool| {
-        let run = TestRun {
-            schema_aware,
-            ..probe_run(sources)
+    let job_of =
+        |sources: Vec<ResolvedSource>, schemas: Vec<ResolvedSchema>, schema_aware: bool| {
+            let run = TestRun {
+                schema_aware,
+                env: ResolvedEnvironment {
+                    sources,
+                    schemas,
+                    ..Default::default()
+                },
+                ..probe_run(Vec::new())
+            };
+            Job::from(&run).expect("the probe job builds")
         };
-        Job::from(&run)
-            .expect("the probe job builds")
-            .validation_fence
+    let modes = job_of(
+        vec![
+            validated("strict", Some(".")),
+            validated("lax", None),
+            validated("skip", None),
+            inline(None, None, "<b/>"),
+        ],
+        Vec::new(),
+        true,
+    );
+    check(
+        modes.source_validation == SourceValidation::Strict
+            && modes.extra_validation
+                == [
+                    SourceValidation::Lax,
+                    SourceValidation::Skip,
+                    SourceValidation::Skip,
+                ],
+        "strict, lax, skip and no validation attribute in a schema-aware run",
+    );
+    let basic = job_of(
+        vec![validated("strict", Some(".")), validated("lax", None)],
+        Vec::new(),
+        false,
+    );
+    check(
+        basic.source_validation == SourceValidation::Skip
+            && basic.extra_validation == [SourceValidation::Skip],
+        "a basic run validates nothing",
+    );
+    // … and the context gets the environment's `source-reference` and `stylesheet-import`
+    // schemas and those with no role, never a `secondary` one (loaded through the directives of
+    // the schema that includes it); a basic run none.
+    let schema = |file: &str, role: Option<&str>| ResolvedSchema {
+        path: Some(dir.join(file)),
+        uri: None,
+        role: role.map(str::to_string),
+        xsd_version: None,
     };
-    let strict = fence_of(vec![validated("strict", Some("."))], true);
-    check(
-        strict.as_deref().is_some_and(|m| {
-            m.contains("validation=\"strict\"") && crate::report::notimpl_owner(m) == Some("M4b")
-        }),
-        "a strict source in a schema-aware run is fenced with M4b",
-    );
-    check(
-        fence_of(
-            vec![inline(Some("."), None, "<a/>"), validated("lax", None)],
-            true,
-        )
-        .is_some(),
-        "a lax source available to doc() is fenced",
-    );
-    check(
-        fence_of(vec![validated("strict", Some("."))], false).is_none(),
-        "a basic run carries no fence",
-    );
-    check(
-        fence_of(vec![validated("skip", Some("."))], true).is_none(),
-        "validation=\"skip\" carries no fence",
-    );
-    // … and the verdict it replaces: a failure (fail or wrongError) becomes not implemented, with
-    // the untyped run's reason first and the owner last; a pass, or a case without the fence, stays.
-    let fenced = RunOutput {
-        validation_fence: strict.clone(),
-        ..Default::default()
+    let schemas = || {
+        vec![
+            schema("a.xsd", Some("source-reference")),
+            schema("b.xsd", None),
+            schema("c.xsd", Some("secondary")),
+            schema("d.xsd", Some("stylesheet-import")),
+        ]
     };
-    let message = fenced.untyped_input_fence(true, Some("assert-xml mismatch"));
     check(
-        message.as_deref().is_some_and(|m| {
-            m.starts_with("on an untyped input tree: assert-xml mismatch; ")
-                && crate::report::notimpl_owner(m) == Some("M4b")
-        }),
-        "a failure under the fence is not implemented (M4b)",
+        job_of(Vec::new(), schemas(), true).schemas
+            == [dir.join("a.xsd"), dir.join("b.xsd"), dir.join("d.xsd")],
+        "source-reference, stylesheet-import and role-less schemas go into the context",
+    );
+    // A source without `validation` is validated strictly when the environment has a
+    // `source-reference` schema (decision D-M), and not otherwise.
+    let unvalidated = || vec![inline(Some("."), None, "<a/>")];
+    check(
+        job_of(unvalidated(), schemas(), true).source_validation == SourceValidation::Strict
+            && job_of(unvalidated(), vec![schema("b.xsd", None)], true).source_validation
+                == SourceValidation::Skip
+            && job_of(unvalidated(), schemas(), false).source_validation == SourceValidation::Skip,
+        "no validation attribute: strict with a source-reference schema, else skip",
     );
     check(
-        fenced.untyped_input_fence(false, None).is_none(),
-        "a pass under the fence stays a pass",
-    );
-    check(
-        RunOutput::default()
-            .untyped_input_fence(true, Some("x"))
-            .is_none(),
-        "a failure without the fence stays a failure",
-    );
-    // A case that accepts only static errors is never fenced (§2.9: they are detected "before the
-    // source document … [is] available").
-    let expecting = |result: Assertion| TestCase {
-        name: "probe".into(),
-        description: String::new(),
-        dependencies: Vec::new(),
-        environment: None,
-        test: TestSpec::default(),
-        result,
-        line: 0,
-    };
-    let error = |code: &str| Assertion::Error { code: code.into() };
-    check(
-        crate::filter::expects_only_static_errors(&expecting(error("XTSE0770")))
-            && crate::filter::expects_only_static_errors(&expecting(Assertion::AnyOf(vec![
-                error("XTSE1520"),
-                error("XPST0017"),
-            ]))),
-        "static errors only",
-    );
-    check(
-        !crate::filter::expects_only_static_errors(&expecting(error("XTTE1510")))
-            && !crate::filter::expects_only_static_errors(&expecting(error("*")))
-            && !crate::filter::expects_only_static_errors(&expecting(Assertion::AnyOf(vec![
-                error("XTSE1520"),
-                error("XTTE0570"),
-            ])))
-            && !crate::filter::expects_only_static_errors(&expecting(Assertion::AllOf(Vec::new()))),
-        "not only static errors",
+        job_of(Vec::new(), schemas(), false).schemas.is_empty(),
+        "a basic run has no schema context",
     );
 
     // P1-1: the inline principal is the *base* of its document, not the resource at the test-set

@@ -7,7 +7,11 @@
 //!    with the compiler's own [`Loader`] (so `use-when` and the include / import precedence are exactly
 //!    the compiler's), collects every `xsl:import-schema`, keeps for each namespace only the
 //!    declarations of the highest import precedence, and [`SchemaContextBuilder::build`] loads them
-//!    into one schema set.
+//!    into one schema set — together with the schemas the host adds
+//!    ([`SchemaContextBuilder::schema_uri`], `schema_file`, `schema_str`; §3.13: "An implementation
+//!    may define mechanisms that allow additional schema components to be added to the in-scope
+//!    schema components for the stylesheet"), against which source documents are validated (M4b,
+//!    D-2: one set per compiled stylesheet).
 //! 2. `Compiler::schema_aware(&context, &functions)` compiles the same stylesheet with the set's own
 //!    `NameTable` as its names (the XPath binder looks schema types up by the ids of its context's table)
 //!    and the set in every XPath static context. It parses the module graph a second time — the "double
@@ -27,8 +31,9 @@
 //!   copy of its schema this processor knows (below);
 //! * by namespace only — the XML namespace's schema (`xml.xsd`) and XLink's, which `xsd-schema`
 //!   embeds; the XML Schema instance namespace's built-in attribute declarations; any other
-//!   namespace contributes nothing (host schemas are M4b's; the Schema for Schemas is not
-//!   available, so the XML Schema namespace is not "found");
+//!   namespace is found when a host schema (or a document one of the set's directives loaded) has it
+//!   as its target namespace, and contributes nothing otherwise (the Schema for Schemas is not
+//!   available, so the XML Schema namespace is not "found" unless a host gives it);
 //! * inline — the `xs:schema` element is cut out of the module text by its source span (D-9, "the
 //!   slice approach", proven on 517 WSDLs by SOAP S0), the in-scope namespace bindings it does not
 //!   declare itself are written into its start tag on the same line, the elements of it that §3.12
@@ -121,6 +126,8 @@ const XSI_NS: &str = "http://www.w3.org/2001/XMLSchema-instance";
 pub struct SchemaContext {
     set: SchemaSet,
     imports: Vec<SchemaImport>,
+    /// The locations of the host schemas, in the order they were given.
+    hosts: Vec<String>,
 }
 
 impl std::fmt::Debug for SchemaContext {
@@ -145,6 +152,7 @@ impl SchemaContext {
         Self {
             set: SchemaSet::new(),
             imports: Vec::new(),
+            hosts: Vec::new(),
         }
     }
 
@@ -153,6 +161,7 @@ impl SchemaContext {
         SchemaContextBuilder {
             resolver: Arc::new(FileResolver),
             plans: Vec::new(),
+            hosts: Vec::new(),
         }
     }
 
@@ -165,6 +174,13 @@ impl SchemaContext {
     /// transformations, uses.
     pub fn names(&self) -> &NameTable {
         &self.set.name_table
+    }
+
+    /// The locations of the schema documents the host added to the context
+    /// ([`SchemaContextBuilder::schema_uri`], `schema_file`, `schema_str`), in the order first given,
+    /// each once.
+    pub fn host_schemas(&self) -> &[String] {
+        &self.hosts
     }
 
     /// The `xsl:import-schema` declarations the context loaded: those that won their namespace by
@@ -192,21 +208,27 @@ impl SchemaContext {
     /// Whether the set has components in `namespace`: the built-in ones of the XML Schema and XML
     /// Schema instance namespaces, or a loaded schema document with that target namespace.
     fn holds_namespace(&self, namespace: Option<&str>) -> bool {
-        if matches!(namespace, Some(XSD_NS | XSI_NS)) {
-            return true;
-        }
-        let id = match namespace {
-            Some(ns) => match self.set.name_table.get(ns) {
-                Some(id) => Some(id),
-                None => return false,
-            },
-            None => None,
-        };
-        self.set
-            .documents
-            .iter()
-            .any(|document| document.target_namespace == id)
+        matches!(namespace, Some(XSD_NS | XSI_NS)) || self.holds_loaded_namespace(namespace)
     }
+
+    /// Whether a schema document with the target namespace `namespace` is loaded in the set.
+    fn holds_loaded_namespace(&self, namespace: Option<&str>) -> bool {
+        has_document_of(&self.set, namespace)
+    }
+}
+
+/// Whether `set` holds a parsed schema document whose target namespace is `namespace`.
+fn has_document_of(set: &SchemaSet, namespace: Option<&str>) -> bool {
+    let id = match namespace {
+        Some(ns) => match set.name_table.get(ns) {
+            Some(id) => Some(id),
+            None => return false,
+        },
+        None => None,
+    };
+    set.documents
+        .iter()
+        .any(|document| document.target_namespace == id)
 }
 
 /// One `xsl:import-schema` declaration a [`SchemaContext`] loaded.
@@ -271,12 +293,30 @@ struct ImportKey {
 pub struct SchemaContextBuilder {
     resolver: Arc<dyn Resolver>,
     plans: Vec<PlannedImport>,
+    hosts: Vec<HostSchema>,
+}
+
+/// A schema document the host adds to the context (§3.13's implementation-defined mechanism).
+enum HostSchema {
+    /// Read through the resolver at this (absolute) URI.
+    Uri(String),
+    /// Given as text, loaded under `uri`.
+    Text { text: String, uri: String },
+}
+
+impl HostSchema {
+    fn location(&self) -> &str {
+        match self {
+            HostSchema::Uri(uri) | HostSchema::Text { uri, .. } => uri,
+        }
+    }
 }
 
 impl std::fmt::Debug for SchemaContextBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SchemaContextBuilder")
             .field("imports", &self.plans.len())
+            .field("host_schemas", &self.hosts.len())
             .finish_non_exhaustive()
     }
 }
@@ -286,6 +326,43 @@ impl SchemaContextBuilder {
     /// will be compiled with (default: [`FileResolver`]).
     pub fn with_resolver(mut self, resolver: Arc<dyn Resolver>) -> Self {
         self.resolver = resolver;
+        self
+    }
+
+    /// Adds the schema document the resolver serves at `uri` (an absolute URI) to the context.
+    ///
+    /// §3.13: "An implementation may define mechanisms that allow additional schema components to be
+    /// added to the in-scope schema components for the stylesheet" — this is that mechanism (M4 plan
+    /// D-2): the host's schemas join the stylesheet's imports in the **one** schema set of the
+    /// context, against which the stylesheet is compiled and every source document is validated
+    /// (`TransformOptions::source_validation`). Their components are in scope for the whole
+    /// stylesheet (D-7). Host schemas are loaded before the stylesheet's imports: an
+    /// `xsl:import-schema` by namespace only of a namespace a host schema supplies is `found()`, and
+    /// one by location of a document a host schema already loaded (the same URI) loads it once.
+    ///
+    /// The document is read when the context is built ([`build`](Self::build)): one that cannot be
+    /// read, or is not a valid schema, is XTSE0220 there (the in-scope schema components cannot be
+    /// assembled). Its `xs:include` / `xs:import` / `xs:redefine` directives are followed through
+    /// the resolver, as for an imported schema.
+    pub fn schema_uri(mut self, uri: &str) -> Self {
+        self.hosts
+            .push(HostSchema::Uri(resolver::normalize_uri(uri)));
+        self
+    }
+
+    /// Adds the schema document in the file at `path` (see [`schema_uri`](Self::schema_uri)).
+    pub fn schema_file(self, path: &Path) -> Self {
+        let uri = resolver::path_to_uri(path);
+        self.schema_uri(&uri)
+    }
+
+    /// Adds the schema document `text`, loaded under the location `uri` — the base its directives
+    /// resolve against (see [`schema_uri`](Self::schema_uri)).
+    pub fn schema_str(mut self, text: &str, uri: &str) -> Self {
+        self.hosts.push(HostSchema::Text {
+            text: text.to_string(),
+            uri: resolver::normalize_uri(uri),
+        });
         self
     }
 
@@ -338,7 +415,7 @@ impl SchemaContextBuilder {
     /// > and Structure). This includes, without loss of generality, conflicts such as multiple
     /// > definitions of the same name.
     pub fn build(self) -> Result<SchemaContext, XsltError> {
-        Loading::new(Arc::clone(&self.resolver)).run(self.plans)
+        Loading::new(Arc::clone(&self.resolver)).run(self.hosts, self.plans)
     }
 }
 
@@ -860,9 +937,10 @@ struct Loading {
     set: SchemaSet,
     /// Where each inline schema sits in its module, by the location it was loaded under.
     inline: Vec<(String, InlineMap)>,
-    /// The documents loaded for the declarations, by the location they were loaded under (what a
-    /// schema error's location names), with the declaration that loaded each.
-    loaded: HashMap<String, (DocumentId, Location)>,
+    /// The documents loaded for the declarations and the host schemas, by the location they were
+    /// loaded under (what a schema error's location names), with the declaration that loaded each
+    /// (`None` for a host schema).
+    loaded: HashMap<String, (DocumentId, Option<Location>)>,
 }
 
 /// How a line of an inline slice maps back to its module.
@@ -907,9 +985,23 @@ impl Loading {
         }
     }
 
-    fn run(mut self, plans: Vec<PlannedImport>) -> Result<SchemaContext, XsltError> {
+    fn run(
+        mut self,
+        hosts: Vec<HostSchema>,
+        plans: Vec<PlannedImport>,
+    ) -> Result<SchemaContext, XsltError> {
         let mut imports = Vec::with_capacity(plans.len());
         let mut pending: Vec<DocumentId> = Vec::new();
+        // The host's schemas first (§3.13's implementation-defined mechanism), so that the
+        // stylesheet's imports find what they supply.
+        let mut host_locations = Vec::with_capacity(hosts.len());
+        for host in &hosts {
+            self.load_host(host, &mut pending)?;
+            // A schema given twice is loaded once (`load_host`) and listed once.
+            if !host_locations.iter().any(|known| known == host.location()) {
+                host_locations.push(host.location().to_string());
+            }
+        }
         for planned in plans {
             let key = planned.key();
             let (source, found) = match planned.source {
@@ -981,10 +1073,49 @@ impl Loading {
         if let Err(error) = process_loaded_schemas(&mut self.set) {
             return Err(self.xtse0220(&error, None));
         }
-        Ok(SchemaContext {
+        // A namespace-only import is found when the set holds a schema document of its namespace by
+        // now — a host schema's, or one a host schema's (or another import's) directives loaded.
+        let mut context = SchemaContext {
             set: self.set,
             imports,
-        })
+            hosts: host_locations,
+        };
+        for index in 0..context.imports.len() {
+            let import = &context.imports[index];
+            if import.found || import.source != ImportSource::NamespaceOnly {
+                continue;
+            }
+            let held = context.holds_loaded_namespace(import.namespace.as_deref());
+            context.imports[index].found = held;
+        }
+        Ok(context)
+    }
+
+    /// A host schema: read (or given), parsed, its directives resolved with the rest.
+    fn load_host(
+        &mut self,
+        host: &HostSchema,
+        pending: &mut Vec<DocumentId>,
+    ) -> Result<(), XsltError> {
+        let location = schema_location(host.location());
+        if self.loaded.contains_key(&location) {
+            return Ok(());
+        }
+        let text = match host {
+            HostSchema::Text { text, .. } => text.clone(),
+            HostSchema::Uri(uri) => self.resolver.resolve_text(uri).map_err(|why| {
+                XsltError::new(
+                    codes::XTSE0220,
+                    format!("cannot read the schema document {uri} the host added: {why}"),
+                )
+            })?,
+        };
+        let id = parse_schema_only(text.as_bytes(), &location, &mut self.set)
+            .map_err(|e| self.xtse0220(&e, None))?;
+        self.set.mark_loaded(location.clone(), id);
+        self.loaded.insert(location, (id, None));
+        pending.push(id);
+        Ok(())
     }
 
     fn resolve_directives(
@@ -1032,7 +1163,7 @@ impl Loading {
                 let id = parse_schema_only(text.as_bytes(), &location, &mut self.set)
                     .map_err(|e| self.xtse0220(&e, Some(at)))?;
                 self.set.mark_loaded(location.clone(), id);
-                self.loaded.insert(location, (id, at.clone()));
+                self.loaded.insert(location, (id, Some(at.clone())));
                 pending.push(id);
                 id
             }
@@ -1083,14 +1214,15 @@ impl Loading {
         let id = parse_schema_only(inline.text.as_bytes(), &location, &mut self.set)
             .map_err(|e| self.xtse0220(&e, Some(at)))?;
         self.set.mark_loaded(location.clone(), id);
-        self.loaded.insert(location, (id, at.clone()));
+        self.loaded.insert(location, (id, Some(at.clone())));
         pending.push(id);
         Ok(())
     }
 
-    /// A namespace-only import: the schemas `xsd-schema` embeds (the XML namespace, XLink); the
-    /// built-in attribute declarations of the XML Schema instance namespace; nothing for any other
-    /// namespace (host schemas are M4b's).
+    /// A namespace-only import: a host schema of the namespace, loaded before the imports (M4b);
+    /// else the schemas `xsd-schema` embeds (the XML namespace, XLink); the built-in attribute
+    /// declarations of the XML Schema instance namespace; nothing for any other namespace (a
+    /// document a directive loads later still makes it `found()`, `Loading::run`).
     ///
     /// The XML Schema namespace is "found" only with the Schema for Schemas (§3.13's Note: "A
     /// stylesheet that is designed to process XML Schema documents as its input or output may import
@@ -1106,6 +1238,10 @@ impl Loading {
         let Some(namespace) = namespace else {
             return Ok(false);
         };
+        // A host schema of the namespace is what this processor locates first.
+        if has_document_of(&self.set, Some(namespace)) {
+            return Ok(true);
+        }
         if namespace == XSD_NS {
             return Ok(false);
         }
@@ -1125,7 +1261,8 @@ impl Loading {
         let id = parse_schema_only(bytes, location, &mut self.set)
             .map_err(|e| self.xtse0220(&e, Some(at)))?;
         self.set.mark_loaded(location.to_string(), id);
-        self.loaded.insert(location.to_string(), (id, at.clone()));
+        self.loaded
+            .insert(location.to_string(), (id, Some(at.clone())));
         pending.push(id);
         Ok(true)
     }
@@ -1148,7 +1285,7 @@ impl Loading {
                 let declared = located
                     .as_ref()
                     .and_then(|l| self.loaded.get(&l.base_uri))
-                    .map(|(_, at)| at);
+                    .and_then(|(_, at)| at.as_ref());
                 match declared.or(at) {
                     Some(location) => error.with_location(location.clone()),
                     None => error,

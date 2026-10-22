@@ -42,8 +42,13 @@ pub struct StoredDocument<'t> {
     /// reproducible from run to run — see [`DocumentStore::generate_id`].
     pub ordinal: u32,
     /// Whether §4.4 whitespace stripping was applied to this tree, which the
-    /// transformation's admission path records.
+    /// transformation's admission path records. Only that: whether the tree
+    /// has been *admitted* (§4.3, M4 plan D-2) is a separate, private mark,
+    /// which a host cannot set.
     pub stripped: bool,
+    /// Whether the transformation has admitted this tree: loaded it itself, or
+    /// taken a tree the host inserted through `Transformation::admit_stored`.
+    pub(crate) admitted: bool,
 }
 
 /// The documents of one transformation.
@@ -133,12 +138,33 @@ impl<'t> DocumentStore<'t> {
             uri: uri.map(Box::from),
             ordinal,
             stripped: false,
+            admitted: false,
         });
         self.by_serial.insert(serial, id);
         if let Some(uri) = uri {
             self.by_uri.insert(Box::from(uri), id);
         }
         id
+    }
+
+    /// Replaces the document registered as `id` by `doc` (already in the arena) — the admission
+    /// copy of a typed tree the host inserted (`Transformation::admit_stored`), which stands for it
+    /// under the same `DocId` and URI — and marks it admitted.
+    pub(crate) fn replace_ref(&mut self, id: DocId, doc: &'t BufferDocument<'t>) {
+        let Some(stored) = self.docs.get_mut(id) else {
+            return;
+        };
+        self.by_serial.remove(&stored.doc.serial());
+        stored.doc = doc;
+        stored.admitted = true;
+        self.by_serial.insert(doc.serial(), id);
+    }
+
+    /// Marks the document `id` as admitted by the transformation (§4.3, §4.4, M4 plan D-2).
+    pub(crate) fn mark_admitted(&mut self, id: DocId) {
+        if let Some(stored) = self.docs.get_mut(id) {
+            stored.admitted = true;
+        }
     }
 
     /// Parses `xml` into the arena **without** registering it, recording

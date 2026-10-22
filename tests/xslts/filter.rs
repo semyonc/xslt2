@@ -4,7 +4,7 @@
 //! processor. An applicable case is *runnable* when every other dependency is satisfied by
 //! this implementation. Unknown dependency kinds are reported, never silently run.
 
-use crate::catalog::{Assertion, Dependency, EnvRef, TestCase, TestSet};
+use crate::catalog::{Dependency, EnvRef, TestCase, TestSet};
 
 #[derive(Debug, Clone)]
 pub struct Policy {
@@ -197,24 +197,6 @@ pub fn result_may_be_entity(case: &TestCase) -> bool {
         || UNDECLARED_NOT_WELL_FORMED
             .iter()
             .any(|(name, _)| *name == case.name)
-}
-
-/// Whether every outcome the case accepts is a **static** error (`XTSE…`, `XPST…`): XSLT 2.0
-/// §2.9, "An error that can be detected by examining a stylesheet before execution starts (that is,
-/// before the source document and values of stylesheet parameters are available) is referred to as
-/// a static error" — so the source document, typed or not, cannot be why such a case fails, and
-/// the M4b fence (`RunOutput::untyped_input_fence`) leaves it alone.
-pub fn expects_only_static_errors(case: &TestCase) -> bool {
-    fn only_static(assertion: &Assertion) -> bool {
-        match assertion {
-            Assertion::Error { code } => code.starts_with("XTSE") || code.starts_with("XPST"),
-            Assertion::AnyOf(all) | Assertion::AllOf(all) => {
-                !all.is_empty() && all.iter().all(only_static)
-            }
-            _ => false,
-        }
-    }
-    only_static(&case.result)
 }
 
 /// The last `spec` dependency wins (test-set level first, then test-case level).

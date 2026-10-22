@@ -3,8 +3,8 @@
 Schema-aware XSLT 2.0 processor in Rust, built on the
 [`xsd-schema`](../xsd-schema) validator and its XPath 2.0 engine.
 
-Status: **M4 — schema-aware**, in progress (M1–M3 done; M4a, schema loading and the schema-aware mode, done — see
-"Schema-aware mode" below). Stylesheets are loaded,
+Status: **M4 — schema-aware**, in progress (M1–M3 done; M4a, schema loading and the schema-aware mode, and M4b,
+typed source documents, done — see "Schema-aware mode" below). Stylesheets are loaded,
 compiled and run: the module graph with import precedence, the lexical static contexts of §5.4.1,
 template rules with the §6.4 priorities and conflict resolution, the built-in rules,
 `xsl:apply-imports` and `xsl:next-match`, variables and parameters (tunnel included), attribute
@@ -68,12 +68,40 @@ let sheet = Compiler::schema_aware(&context, &functions)
 The imported types are in scope for every XPath expression and `as` attribute (`cast as`, `castable as`,
 `instance of`, constructor functions of user-defined atomic types), `type-available()` and
 `system-property('xsl:is-schema-aware')` answer as a schema-aware processor, and the static rules of `[xsl:]type`
-and `[xsl:]validation` (XTSE1505, XTSE1520, XTSE1530, XTSE0020) apply. Not implemented yet, each raising
-`XSLT2-NOTIMPL` naming the sub-milestone (`../../xslt_doc/M4_PLAN.md` §4): typed source documents (M4b) and
+and `[xsl:]validation` (XTSE1505, XTSE1520, XTSE1530, XTSE0020) apply.
+
+**Typed source documents** (M4b). The host can add schemas of its own to the context (§3.13's implementation-defined
+mechanism) and ask for source documents to be validated against the one schema set, as a default for every
+source-tree loader or per document:
+
+```rust
+let context = SchemaContext::builder()
+    .with_resolver(resolver.clone())
+    .stylesheet_file("report.xsl".as_ref(), &functions)?
+    .schema_file("orders.xsd".as_ref())          // a host schema, in scope for the stylesheet too
+    .build()?;
+let sheet = Compiler::schema_aware(&context, &functions).with_resolver(resolver).compile_file("report.xsl".as_ref())?;
+let arena = bumpalo::Bump::new();
+let options = TransformOptions { source_validation: SourceValidation::Strict, ..Default::default() };
+let run = sheet.transformation(&arena, options);        // doc() / document() validate too
+let outcome = run.transform_source_with("file:///in.xml", &xml, SourceValidation::Strict)?;
+```
+
+A validated document is parsed and typed in one pass; its nodes atomize to typed values (so keys, sort keys and
+grouping keys compare typed values), whitespace in element-only content is not in the tree (XDM 1.0 §6.7.4), and an
+invalid document is an error naming the offending nodes. `Skip` (the default) leaves documents untyped, exactly as
+before. `input-type-annotations="strip"` strips the annotations of every source tree (§4.3; the ids attributes give
+are kept), and `xsl:strip-space` spares elements with simple content (§4.4). A valid attribute or simple-content
+element has its whitespace normalized as its type says (XDM 1.0 §6.2.4, §6.3.4). Not there yet, upstream: an element's
+`default` / `fixed` value as a text node and defaulted attributes (so `strip` cannot keep them), and an element whose
+own typed value is an `xs:ID` in the `id()` index. A stylesheet module read with `document('')` is not validated by
+the transformation-wide default; `set_source_validation(uri, …)` sets the mode of any one URI.
+
+Not implemented yet, each raising `XSLT2-NOTIMPL` naming the sub-milestone (`../../xslt_doc/M4_PLAN.md` §4):
 validation of constructed elements and attributes (M4d), of copies and document nodes (M4e), and `type` on elements
-and `lax` (M4f) when the construct is **evaluated** — a stylesheet that never reaches one runs; typed patterns (M4c)
-when the pattern is **compiled** — a stylesheet that contains one does not compile. XML Schema 1.0 only (1.1 is
-M4g).
+and `lax` — also lax validation of a source whose root has no declaration — (M4f) when the construct is
+**evaluated** — a stylesheet that never reaches one runs; typed patterns (M4c) when the pattern is **compiled** — a
+stylesheet that contains one does not compile. XML Schema 1.0 only (1.1 is M4g).
 
 **Deep recursion.** Recursive templates and stylesheet functions use the native stack. A run checks
 how much stack it has used and stops with a depth error instead of overflowing. On a thread
@@ -140,10 +168,10 @@ Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
 With `--features icu-collation` the two M2k cases pass too: 5,761.
 
 **Schema-aware run** (`--schema-aware`: the 584 cases that need a schema-aware processor become runnable and the 16
-that need a basic one are not run; every case is compiled schema-aware): 5,863 of 6,355 runnable pass, the
-schema-aware profile 120 of 579 (M4a and its review fixes, 2026-10-20; 51 before), and every basic case keeps its
-status. Sources are not validated yet (M4b): a case whose source asks for `validation="strict"` or `"lax"` and that
-fails on the untyped tree is counted as not implemented (M4b) — 91 of the 422 not implemented.
+that need a basic one are not run; every case is compiled schema-aware, against the stylesheet's imports and the
+environment's schemas, and every source is validated as the catalog says): 5,960 of 6,355 runnable pass, the
+schema-aware profile 217 of 579 (M4b on `xsd-schema` `wave-b` `66e3e3f`, 2026-10-22; 120 after M4a, 51 before), and
+every basic case keeps its status; of the 336 not implemented, 334 are M4c–M4f's and 2 M2k's.
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the

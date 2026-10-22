@@ -971,14 +971,14 @@ fn a_typed_pattern_is_fenced_with_m4c() {
     }
 }
 
-/// §21.1's XTDE1665 is a basic processor's rule. A schema-aware processor accepts typed input, which
-/// M4b implements (typed source documents): until then a typed input tree is fenced with M4b rather
-/// than processed with annotations nothing has checked against the context.
+/// §21.1's XTDE1665 is a basic processor's rule. A schema-aware processor accepts typed input (M4b,
+/// typed source documents; M4 plan D-13): a tree the host typed against the context's own schema set
+/// is processed with its annotations (before M4b this was the M4b fence).
 #[test]
-fn a_typed_input_tree_is_fenced_with_m4b_in_schema_aware_mode() {
+fn a_typed_input_tree_of_the_contexts_set_is_accepted_in_schema_aware_mode() {
     let main = sheet(
         r#"<xsl:import-schema><xs:schema><xs:element name="n" type="xs:integer"/></xs:schema></xsl:import-schema>
-           <xsl:template match="/"><out><xsl:value-of select="n + 1"/></out></xsl:template>"#,
+           <xsl:template match="/"><out><xsl:value-of select="n + 1, data(n) instance of xs:integer"/></out></xsl:template>"#,
     );
     let resolver = resolver(&main, &[]);
     let functions = XsltFunctions::new();
@@ -1005,12 +1005,13 @@ fn a_typed_input_tree_is_fenced_with_m4b_in_schema_aware_mode() {
         .store()
         .borrow_mut()
         .insert(doc, Some("file:///m4a/typed.xml"));
-    let error = match run.transform_document(id) {
-        Err(e) => e,
-        Ok(_) => panic!("a typed input tree is M4b's"),
-    };
-    assert!(error.is_not_implemented(), "{error}");
-    assert!(error.message.ends_with("(M4b)"), "{error}");
+    let outcome = run
+        .transform_document(id)
+        .expect("a typed input tree is accepted");
+    assert_eq!(
+        common::body(compiled.serialize_primary(&outcome).unwrap()),
+        "<out>6 true</out>"
+    );
 }
 
 // ── The context (D-1) ───────────────────────────────────────────────────

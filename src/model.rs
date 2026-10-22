@@ -1185,6 +1185,9 @@ pub struct CompiledStylesheet<'a> {
     /// validation applied to the implicit final result tree created in the
     /// absence of an xsl:result-document instruction").
     pub(crate) final_validation: Validation,
+    /// §4.3: some module says `input-type-annotations="strip"`, so the annotations of every source
+    /// tree are stripped.
+    pub(crate) strip_input_annotations: bool,
 }
 
 impl<'a> CompiledStylesheet<'a> {
@@ -1213,6 +1216,13 @@ impl<'a> CompiledStylesheet<'a> {
     /// (`Compiler::schema_aware`, §21.2).
     pub fn is_schema_aware(&self) -> bool {
         self.schema.is_some()
+    }
+
+    /// Whether the type annotations of source trees are stripped (§4.3: "Stripping of type
+    /// annotations takes place if at least one stylesheet module in the stylesheet specifies
+    /// input-type-annotations="strip"").
+    pub fn strips_input_annotations(&self) -> bool {
+        self.strip_input_annotations
     }
 
     /// The schema set of the `SchemaContext` a schema-aware stylesheet was
@@ -1339,6 +1349,21 @@ impl<'a> CompiledStylesheet<'a> {
 
     pub fn space_rules(&self) -> &[SpaceRule] {
         &self.space_rules
+    }
+
+    /// Whether `uri` (an absolute URI; a fragment identifier is ignored) names the resource of one of
+    /// this stylesheet's modules — what `document('')` reads (§16.1). The run's default source
+    /// validation does not apply to such a document (M4b decision D-V).
+    pub fn is_module_uri(&self, uri: &str) -> bool {
+        let resource = |u: &str| {
+            crate::resolver::resource_identity(
+                u.split_once('#').map_or(u, |(document, _)| document),
+            )
+        };
+        let wanted = resource(uri);
+        self.module_uris
+            .iter()
+            .any(|module| resource(module) == wanted)
     }
 
     pub fn module_uri(&self, module: ModuleId) -> Option<&str> {
