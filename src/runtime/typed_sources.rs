@@ -197,8 +197,10 @@ impl ValidationEventHandler for SourceBuild<'_, '_> {
     }
 }
 
-/// Whether the type an element was assessed with is complex with element-only or empty content.
-fn element_only(info: &SchemaInfo) -> bool {
+/// Whether the type an element was assessed with is complex with element-only or empty content —
+/// the elements whose whitespace text XDM 1.0 §6.7.4 makes no text node (module docs); the
+/// validating receiver of constructed trees applies the same rule (`validate::Validating`).
+pub(super) fn element_only(info: &SchemaInfo) -> bool {
     matches!(info.schema_type, Some(TypeKey::Complex(_)))
         && matches!(
             info.content_type,
@@ -227,7 +229,7 @@ fn has_simple_content(nav: &Nav<'_>) -> bool {
 
 impl<'a, 't> Transformation<'a, 't> {
     /// The validator of this run, made on first use (D-12).
-    fn validator(&self, set: &'a SchemaSet) -> &SchemaValidator<'a> {
+    pub(super) fn validator(&self, set: &'a SchemaSet) -> &SchemaValidator<'a> {
         self.validator.get_or_init(|| {
             // Identity constraints are part of schema validity assessment (XML Schema 1.1 Part 1
             // §3.11.4): enforced for a source document.

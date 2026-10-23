@@ -10,7 +10,9 @@ use super::context::XsltContext;
 use super::{Frame, GlobalSlot, Transformation};
 use crate::error::{codes, XsltError};
 use crate::model::*;
-use crate::receiver::{ComplexContentNormalizer, Nav, Receiver, ResultBuilder, SequenceCollector};
+use crate::receiver::{
+    Annotations, Boundary, ComplexContentNormalizer, Nav, Receiver, ResultBuilder,
+};
 
 impl<'a, 't> Transformation<'a, 't> {
     // ── Values ───────────────────────────────────────────────────────────
@@ -30,7 +32,7 @@ impl<'a, 't> Transformation<'a, 't> {
         let raw = match value {
             VarValue::Select(id) => self.eval_expr(*id, frame, cx)?,
             VarValue::Sequence(body) => {
-                let mut collector = SequenceCollector::new(&self.store);
+                let mut collector = self.collector();
                 self.eval_body(body, frame, cx, &mut collector)?;
                 XPathValue::from_sequence(collector.into_items())
             }
@@ -109,12 +111,21 @@ impl<'a, 't> Transformation<'a, 't> {
             let store = self.store.borrow();
             (store.arena(), store.names())
         };
-        let builder = ResultBuilder::new(arena, names, None)?;
-        let mut out = ComplexContentNormalizer::new(builder);
+        let builder = ResultBuilder::new(arena, names, self.schema_set)?;
+        let mut out = ComplexContentNormalizer::with_annotations(
+            self.validating(builder),
+            Annotations::of_copies(self.schema_set),
+        );
+        // §19.2.2: "Document-level validation is not applied to the document
+        // node that is created implicitly when a variable-binding element has
+        // no select attribute and no as attribute … This is equivalent to
+        // using validation="preserve" on xsl:document: nodes within such trees
+        // retain their type annotation."
+        out.validation_boundary(Boundary::Preserve)?;
         out.start_document()?;
         self.eval_body(body, frame, cx, &mut out)?;
         out.end_document()?;
-        let mut doc = out.into_inner().finish()?;
+        let mut doc = out.into_inner().into_inner().finish()?;
         let base = &self.sheet.static_contexts.get(sc).base_uri;
         if !base.is_empty() {
             doc.set_document_base_uri(Some(self.store.borrow().intern_uri(base)));

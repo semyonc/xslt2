@@ -64,6 +64,14 @@ pub struct ResultDocument {
     /// on the effective value of the href attribute"), so that `base-uri()` sees it
     /// (`result-document-0102`). `None` — no base URI — for the primary result and messages.
     pub base_uri: Option<String>,
+    /// For a primary result tree that carries type annotations (a schema-aware run whose final
+    /// result tree keeps annotations, XSLT 2.0 §3.6 / §19.2): every `assert` of the case,
+    /// evaluated on the tree itself while it exists, by expression — the catalog evaluates an
+    /// `assert` "with the document node of the result document as the context item", and a
+    /// re-parse of the serialization would lose the annotations (§19.2.1.3: serialization
+    /// "discards any existing type annotations"). Empty otherwise: an untyped tree's re-parse is
+    /// the same tree.
+    pub typed_asserts: Vec<(String, Result<bool, String>)>,
 }
 
 impl ResultDocument {
@@ -79,6 +87,7 @@ impl ResultDocument {
             serialization_error: None,
             method: None,
             base_uri: None,
+            typed_asserts: Vec::new(),
         }
     }
 }

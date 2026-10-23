@@ -400,7 +400,7 @@ impl<'a, 't> Transformation<'a, 't> {
         }
         self.bind_params(&rule.params, &params, &mut frame, &inner, how)?;
         if rule.as_type.is_some() {
-            let mut collector = SequenceCollector::new(&self.store);
+            let mut collector = self.collector();
             self.eval_body(&rule.body, &mut frame, &inner, &mut collector)?;
             let zero_length_texts = collector.zero_length_text_nodes();
             let value = XPathValue::from_sequence(collector.into_items());

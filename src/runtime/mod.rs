@@ -29,6 +29,7 @@ mod results;
 mod serialize;
 mod sort;
 mod typed_sources;
+pub(crate) mod validate;
 mod variables;
 
 pub use content::SimpleDefault;
@@ -548,7 +549,9 @@ impl<'a> CompiledStylesheet<'a> {
             .collect();
         Transformation {
             sheet: self,
-            store: RefCell::new(DocumentStore::new(arena, self.names())),
+            store: RefCell::new(
+                DocumentStore::new(arena, self.names()).with_schema_set(self.schema),
+            ),
             globals: RefCell::new(globals),
             keys: RefCell::new(keys::KeyIndexes::default()),
             scope_serials: std::cell::Cell::new(0),
@@ -755,12 +758,27 @@ impl<'a, 't> Transformation<'a, 't> {
         let builder = ResultBuilder::new(
             self.store.borrow().arena(),
             self.store.borrow().names(),
-            None,
+            self.schema_set,
         )?;
         // The primary result is written in final output state (§19.1), so
         // `disable-output-escaping` is honoured here (§20.2) — and in the
         // trees `xsl:result-document` creates, each in its own builder.
-        let mut out = ComplexContentNormalizer::new(builder).honouring_disabled_escaping();
+        let mut out = ComplexContentNormalizer::with_annotations(
+            self.validating(builder),
+            crate::receiver::Annotations::of_copies(self.schema_set),
+        )
+        .honouring_disabled_escaping();
+        // §3.6: `default-validation` "also determines the validation applied
+        // to the implicit final result tree created in the absence of an
+        // xsl:result-document instruction" — the principal module's, `strip`
+        // or `preserve`, neither of which validates (§19.2.2: "The values
+        // validation="preserve" and validation="strip" do not request
+        // validation"): the tree's nodes are untyped, or keep what they were
+        // given (decision D-d3).
+        out.validation_boundary(match self.sheet.final_validation {
+            crate::model::Validation::Preserve => crate::receiver::Boundary::Preserve,
+            _ => crate::receiver::Boundary::Strip,
+        })?;
         out.start_document()?;
 
         let mut cx = XsltContext::empty();
@@ -795,7 +813,7 @@ impl<'a, 't> Transformation<'a, 't> {
         }
 
         out.end_document()?;
-        let (mut doc, disabled_escaping) = out.into_inner().finish_with_marks()?;
+        let (mut doc, disabled_escaping) = out.into_inner().into_inner().finish_with_marks()?;
         // §2.4 makes the tree created implicitly an `xsl:result-document
         // href=""`, and §19.1: "The base URI of the document node at the root
         // of the final result tree is based on the effective value of the href
@@ -807,17 +825,6 @@ impl<'a, 't> Transformation<'a, 't> {
         let id = self.store.borrow_mut().insert(doc, None);
         let implicit = self.store.borrow().get(id).expect("just inserted").doc;
         let delivered = self.deliver((implicit, disabled_escaping))?;
-        // §3.6: `default-validation` "also determines the validation applied to
-        // the implicit final result tree created in the absence of an
-        // xsl:result-document instruction" — the principal module's. Fenced
-        // like every other non-`strip` validation (M4e owns document nodes).
-        if delivered.primary_output.is_none() && delivered.primary.is_some() {
-            eval::validation_fence(
-                &self.sheet.final_validation,
-                crate::model::Constructor::Document,
-                "the implicit final result tree (the principal module's default-validation)",
-            )?;
-        }
         let (primary, disabled_escaping) = match delivered.primary {
             Some((doc, marks)) => (Some(doc), marks),
             None => (None, crate::serialize::EscapingMarks::default()),

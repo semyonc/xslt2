@@ -3,14 +3,17 @@
 
 use xsd_schema::document::BufferDocumentOptions;
 use xsd_schema::navigator::DomNavigator;
+use xsd_schema::types::value::XmlValue;
+use xsd_schema::validation::validate_simple_type;
 use xsd_schema::xpath::functions::{atomize_sequence, XPathValue};
 use xsd_schema::xpath::XmlItem;
 
 use super::context::XsltContext;
+use super::validate::Validating;
 use super::{Frame, Transformation};
 use crate::error::XsltError;
 use crate::model::*;
-use crate::receiver::{ComplexContentNormalizer, Name, Nav, Receiver, ResultBuilder};
+use crate::receiver::{Boundary, ComplexContentNormalizer, Name, Nav, Receiver, ResultBuilder};
 
 impl<'a, 't> Transformation<'a, 't> {
     /// §5.6: the effective value of an attribute value template.
@@ -133,11 +136,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 Ok(self.simple_strings(value)?.join(&separator))
             }
             ValueSource::Content(body) => {
-                let (arena, names) = {
-                    let store = self.store.borrow();
-                    (store.arena(), store.names())
-                };
-                let mut collector = SimpleContentCollector::new(arena, names);
+                let mut collector = SimpleContentCollector::new(self);
                 self.eval_body(body, frame, cx, &mut collector)?;
                 collector.finish(&separator)
             }
@@ -162,8 +161,10 @@ impl<'a, 't> Transformation<'a, 't> {
         // §19.1: "… and xsl:message always evaluate the instructions in their
         // contained sequence constructor in temporary output state."
         let cx = &*cx.temporary_output();
-        let builder = ResultBuilder::new(arena, names, None)?;
-        let mut out = ComplexContentNormalizer::new(builder);
+        // The elements of the message are constructed like any others: a `strict` one is
+        // validated (§19.2.1.1).
+        let builder = ResultBuilder::new(arena, names, self.schema_set)?;
+        let mut out = ComplexContentNormalizer::new(self.validating(builder));
         out.start_document()?;
         if let Some(id) = select {
             let value = self.eval_expr(id, frame, cx)?;
@@ -173,7 +174,7 @@ impl<'a, 't> Transformation<'a, 't> {
         }
         self.eval_body(body, frame, cx, &mut out)?;
         out.end_document()?;
-        let doc = out.into_inner().finish()?;
+        let doc = out.into_inner().into_inner().finish()?;
         let doc = self.store.borrow().arena().alloc(doc);
         crate::receiver::serialize_document(doc)
     }
@@ -217,33 +218,49 @@ impl SimpleDefault {
 /// So the distinction the rules turn on is text node versus everything else:
 /// adjacent text nodes merge into one string and are never separated, while
 /// every other item is one string of its own. An element or document node the
-/// sequence constructor *builds* is one item too, and atomizing it gives its
-/// string value — which is the string value of the node §5.7.1 builds, where
-/// adjacent atomic values are joined by spaces and comments and processing
-/// instructions contribute nothing. Such a node is therefore built for real,
-/// through the same [`ComplexContentNormalizer`] every other result tree goes
-/// through, and only its string value is kept (`xsl-document-0601`).
-/// Attribute and namespace nodes atomize to their values (`namespace-2602`).
-struct SimpleContentCollector<'t> {
-    arena: &'t bumpalo::Bump,
-    names: &'t xsd_schema::namespace::NameTable,
+/// sequence constructor *builds* is one item too, and step 3 atomizes it: such a
+/// node is therefore built for real, through the same pipeline every other tree
+/// of the transformation goes through — the [`ComplexContentNormalizer`] (§5.7.1:
+/// adjacent atomic values joined by spaces) and the validating receiver, so a
+/// `strict` element is validated (§19.2.1.1; decision D-d11 of
+/// `XSLT2_M4D_REPORT.md`, reversed in its fix round) — and what it contributes is
+/// its typed value, each atomic value cast to a string (`xsl-document-0601`): an
+/// untyped node's string value, a validated element's value of its type — one
+/// string per item of a list type, an element default it took included (a node
+/// whose typed value is undefined, an element of element-only content, is
+/// FOTY0012). A node that already exists, sequenced into the content, is
+/// atomized the same way — its typed value, as through `select`
+/// (`Transformation::simple_strings`) —, and a copy (`xsl:copy-of`, untyped:
+/// `validation="strip"`) contributes its string value. A parentless attribute
+/// atomizes to its typed value — the value of the type `xsl:attribute`
+/// validated it to, one string per item of a list type — or, unvalidated, to
+/// its string value; a namespace node to its URI (`namespace-2602`). Every
+/// item that is not a text node ends the text before it, even when it atomizes
+/// to nothing (`push_atoms`).
+struct SimpleContentCollector<'r, 'a, 't> {
+    run: &'r Transformation<'a, 't>,
     parts: Vec<String>,
     pending_text: Option<String>,
     /// The element or document node being built at the top level, if any.
-    nested: Option<ComplexContentNormalizer<'t, ResultBuilder<'t>>>,
+    nested: Option<ComplexContentNormalizer<'t, Validating<'r, 't>>>,
+    /// Whether that node is a document node.
+    document: bool,
     /// How many containers of the nested node are open.
     depth: usize,
+    /// The boundary announced for the next top-level node, before it is opened.
+    pending_boundary: Option<Boundary>,
 }
 
-impl<'t> SimpleContentCollector<'t> {
-    fn new(arena: &'t bumpalo::Bump, names: &'t xsd_schema::namespace::NameTable) -> Self {
+impl<'r, 'a, 't> SimpleContentCollector<'r, 'a, 't> {
+    fn new(run: &'r Transformation<'a, 't>) -> Self {
         Self {
-            arena,
-            names,
+            run,
             parts: Vec::new(),
             pending_text: None,
             nested: None,
+            document: false,
             depth: 0,
+            pending_boundary: None,
         }
     }
 
@@ -268,6 +285,16 @@ impl<'t> SimpleContentCollector<'t> {
         self.parts.push(s);
     }
 
+    /// Contributes what a non-text item atomized to (§5.7.2 steps 3 and 4). The item ends the
+    /// text before it even when it atomizes to nothing (a nilled element, an empty list, empty
+    /// content): "Adjacent text nodes in the sequence are merged" — and text nodes with an item
+    /// between them are not adjacent.
+    fn push_atoms(&mut self, atoms: Vec<XmlValue>) {
+        self.flush_text();
+        self.parts
+            .extend(atoms.iter().map(|atom| atom.to_string_value()));
+    }
+
     fn finish(mut self, separator: &str) -> Result<String, XsltError> {
         self.flush_text();
         Ok(self.parts.join(separator))
@@ -281,32 +308,56 @@ impl<'t> SimpleContentCollector<'t> {
         } else {
             BufferDocumentOptions::fragment()
         };
-        let builder = ResultBuilder::with_options(self.arena, self.names, None, options)?;
-        self.nested = Some(ComplexContentNormalizer::new(builder));
+        let (arena, names) = {
+            let store = self.run.store.borrow();
+            (store.arena(), store.names())
+        };
+        let builder = ResultBuilder::with_options(arena, names, self.run.schema_set, options)?;
+        let mut nested = ComplexContentNormalizer::new(self.run.validating(builder));
+        if let Some(boundary) = self.pending_boundary.take() {
+            nested.validation_boundary(boundary)?;
+        }
+        self.nested = Some(nested);
+        self.document = document;
         Ok(())
     }
 
-    /// Closes the top-level node and contributes its string value.
+    /// Closes the top-level node and contributes its atomized value (§5.7.2 steps 3 and 4).
     fn close(&mut self) -> Result<(), XsltError> {
         let Some(nested) = self.nested.take() else {
             return Ok(());
         };
-        let doc = nested.into_inner().finish()?;
-        let value = doc.create_navigator().value();
-        self.push_atomic(value);
+        let doc = nested.into_inner().into_inner().finish()?;
+        let mut node = doc.create_navigator();
+        // An element is built in a fragment, under its root.
+        if !self.document && !node.move_to_first_child() {
+            return Err(XsltError::internal(
+                "simple content: the element was not built",
+            ));
+        }
+        let atoms = atomize_sequence(XPathValue::from_item(XmlItem::Node(node)))
+            .map_err(|e| self.run.xpath_error(e))?;
+        self.push_atoms(atoms);
         Ok(())
     }
 
     fn nested(
         &mut self,
-    ) -> Result<&mut ComplexContentNormalizer<'t, ResultBuilder<'t>>, XsltError> {
+    ) -> Result<&mut ComplexContentNormalizer<'t, Validating<'r, 't>>, XsltError> {
         self.nested
             .as_mut()
             .ok_or_else(|| XsltError::internal("simple content: no node is open"))
     }
 }
 
-impl<'t> Receiver<'t> for SimpleContentCollector<'t> {
+impl<'t> Receiver<'t> for SimpleContentCollector<'_, '_, 't> {
+    fn validation_boundary(&mut self, boundary: Boundary) -> Result<(), XsltError> {
+        if self.depth > 0 {
+            return self.nested()?.validation_boundary(boundary);
+        }
+        self.pending_boundary = Some(boundary);
+        Ok(())
+    }
     fn start_document(&mut self) -> Result<(), XsltError> {
         if self.depth == 0 {
             self.open(true)?;
@@ -354,8 +405,24 @@ impl<'t> Receiver<'t> for SimpleContentCollector<'t> {
         if self.depth > 0 {
             return self.nested()?.attribute(name, value, binding);
         }
-        // A parentless attribute node atomizes to its value (§5.7.2 step 3).
-        self.push_atomic(value.to_string());
+        // A parentless attribute node atomizes to its typed value (§5.7.2 step 3): an attribute
+        // `xsl:attribute` validated (`type`, `strict`, `lax`) to the value of its type — one atomic
+        // value per item of a list type —, an unvalidated one to its string value.
+        let typed = match (binding, self.run.schema_set) {
+            (Some(binding), Some(set)) => validate_simple_type(value, binding.type_key, set)
+                .ok()
+                .map(|result| result.typed_value),
+            _ => None,
+        };
+        match typed {
+            Some(typed) => {
+                let atoms =
+                    atomize_sequence(XPathValue::<Nav<'t>>::from_item(XmlItem::Atomic(typed)))
+                        .map_err(|e| self.run.xpath_error(e))?;
+                self.push_atoms(atoms);
+            }
+            None => self.push_atomic(value.to_string()),
+        }
         Ok(())
     }
     fn end_start_tag(&mut self) -> Result<(), XsltError> {
@@ -412,14 +479,16 @@ impl<'t> Receiver<'t> for SimpleContentCollector<'t> {
                 // cast to a string" — for an xs:QName, its lexical form.
                 self.push_atomic(value.to_string_value());
             }
-            XmlItem::Node(nav) => {
-                let text = nav.value();
-                if nav.node_type().is_text_like() {
-                    // "Adjacent text nodes in the sequence are merged."
-                    self.push_text(&text);
-                } else {
-                    self.push_atomic(text);
-                }
+            XmlItem::Node(nav) if nav.node_type().is_text_like() => {
+                // "Adjacent text nodes in the sequence are merged."
+                self.push_text(&nav.value());
+            }
+            XmlItem::Node(_) => {
+                // Step 3: atomized — a typed node contributes its typed value, one string per
+                // item, as through `select` (`simple_strings`).
+                let atoms = atomize_sequence(XPathValue::from_item(item.clone()))
+                    .map_err(|e| self.run.xpath_error(e))?;
+                self.push_atoms(atoms);
             }
         }
         Ok(())
@@ -432,7 +501,14 @@ impl<'t> Receiver<'t> for SimpleContentCollector<'t> {
         if self.depth > 0 {
             return self.nested()?.append_copy(item, namespaces);
         }
-        // A copy has the same string value as its original.
-        self.append_item(item)
+        // A copy is untyped (`validation="strip"`; any other value is M4e's fence) and has the
+        // same string value as its original, which is its typed value.
+        match item {
+            XmlItem::Node(nav) if !nav.node_type().is_text_like() => {
+                self.push_atomic(nav.value());
+                Ok(())
+            }
+            _ => self.append_item(item),
+        }
     }
 }

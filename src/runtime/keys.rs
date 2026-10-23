@@ -65,7 +65,7 @@ use super::{Frame, Transformation};
 use crate::collation::{Collation, CollationResolver, CODEPOINT_COLLATION_URI};
 use crate::error::{codes, XsltError};
 use crate::model::{Key, KeyDefinition, KeyId, ValueSource};
-use crate::receiver::{Nav, SequenceCollector};
+use crate::receiver::Nav;
 
 /// What a key specifier may observe of the context of the `key()` call it is
 /// evaluated for: its current group and its current captured substrings.
@@ -624,7 +624,7 @@ impl<'a, 't> Transformation<'a, 't> {
         let value = match &declaration.specifier {
             ValueSource::Select(id) => self.eval_expr(*id, &frame, &cx),
             ValueSource::Content(body) => {
-                let mut collector = SequenceCollector::new(&self.store);
+                let mut collector = self.collector();
                 self.eval_body(body, &mut frame, &cx, &mut collector)
                     .map(|()| XPathValue::from_sequence(collector.into_items()))
             }

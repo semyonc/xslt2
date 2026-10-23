@@ -82,6 +82,9 @@ struct Job {
     /// Schema-aware runs: the environment's `<schema>` documents the context is given as host
     /// schemas (XSLT 2.0 §3.13's implementation-defined mechanism; `context_schema`).
     schemas: Vec<PathBuf>,
+    /// Schema-aware runs: the case's expected result, whose `assert`s are evaluated on a typed
+    /// primary result tree while it exists (`ResultDocument::typed_asserts`).
+    assertion: crate::catalog::Assertion,
 }
 
 /// Whether an environment `<schema>` of this `role` goes into the schema context of a
@@ -271,6 +274,11 @@ impl Job {
             base_output_uri: format!("{}/", xslt2::resolver::path_to_uri(&run.base_dir)),
             schema_aware: run.schema_aware,
             schemas,
+            assertion: if run.schema_aware {
+                run.case.result.clone()
+            } else {
+                crate::catalog::Assertion::AllOf(Vec::new())
+            },
         })
     }
 
@@ -379,8 +387,8 @@ impl Job {
                 } else {
                     messages
                 };
-                let results =
-                    primary_result(&compiled, &outcome, self.serialize).and_then(|primary| {
+                let results = primary_result(&compiled, &outcome, self.serialize, &self.assertion)
+                    .and_then(|primary| {
                         let secondary = outcome
                             .secondary
                             .iter()
@@ -426,6 +434,7 @@ fn primary_result(
     compiled: &xslt2::CompiledStylesheet<'_>,
     outcome: &xslt2::Outcome<'_>,
     serialize: bool,
+    assertion: &crate::catalog::Assertion,
 ) -> Result<ResultDocument, XsltError> {
     let (serialized, serialization_error) = match compiled.serialize_primary(outcome) {
         Ok(text) => (text, None),
@@ -446,12 +455,19 @@ fn primary_result(
         // No primary result: `serialize_primary` wrote nothing either.
         None => (Ok(String::new()), None),
     };
+    let typed_asserts = match (outcome.primary, compiled.schema_set()) {
+        (Some(doc), Some(set)) if doc.has_type_annotations() => {
+            crate::compare::typed_asserts(doc, set, assertion)
+        }
+        _ => Vec::new(),
+    };
     Ok(ResultDocument {
         serialized,
         tree,
         serialization_error,
         method,
         base_uri: None,
+        typed_asserts,
     })
 }
 
@@ -480,6 +496,7 @@ fn secondary_result(
         serialization_error,
         method,
         base_uri: Some(result.uri.clone()),
+        typed_asserts: Vec::new(),
     })
 }
 
@@ -943,7 +960,13 @@ pub fn self_test() -> usize {
         let outcome = run
             .transform_source("urn:harness-probe-source", "<in/>")
             .expect("the probe stylesheet runs");
-        primary_result(&compiled, &outcome, true).expect("the probe result serializes")
+        primary_result(
+            &compiled,
+            &outcome,
+            true,
+            &crate::catalog::Assertion::AllOf(Vec::new()),
+        )
+        .expect("the probe result serializes")
     };
     let sheet = |output: &str| {
         format!(
@@ -991,7 +1014,13 @@ pub fn self_test() -> usize {
         let outcome = run
             .transform_source("urn:harness-probe-source", "<in/>")
             .expect("the probe stylesheet runs");
-        primary_result(&compiled, &outcome, serialize).map(|r| {
+        primary_result(
+            &compiled,
+            &outcome,
+            serialize,
+            &crate::catalog::Assertion::AllOf(Vec::new()),
+        )
+        .map(|r| {
             (
                 r.tree.clone(),
                 r.serialization_error.map(|e| e.code),

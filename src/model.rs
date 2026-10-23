@@ -29,8 +29,10 @@ use crate::stylesheet::{CompatMode, ModuleId, StaticContextId, StaticContexts};
 /// > specified, the effect is the same as specifying validation="strip".
 ///
 /// The static rules (XTSE1505, XTSE1520, XTSE1530, XTSE0020; XTSE1660 for a
-/// basic processor) are the checker's (`compile/checks.rs`). Only `Strip` is
-/// evaluated by this processor so far (M4a): every other value raises
+/// basic processor) are the checker's (`compile/checks.rs`). Evaluated so far:
+/// `Strip` everywhere; `Preserve` and `Strict` on literal result elements and
+/// `xsl:element`; `Strict`, `Lax`, `Preserve` and `Type` on `xsl:attribute`
+/// (M4d: `runtime/validate.rs`). Every other combination raises
 /// `XSLT2-NOTIMPL` naming the sub-milestone that owns it (see
 /// [`Validation::owner`]) when the instruction is evaluated.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -83,12 +85,14 @@ impl Validation {
 
     /// The roadmap sub-milestone that implements this validation on a
     /// `constructor` (M4_PLAN §4): M4d constructed elements and attributes
-    /// (`strict`, `preserve`, and `type` on an attribute), M4e copies and
-    /// document nodes, M4f `type` on elements, copies and documents and `lax`
-    /// everywhere. `None` for `strip`, which needs nothing.
+    /// (`strict`, `preserve`, `type` and — decision D-d1 — `lax` on an
+    /// attribute; all done), M4e copies and document nodes, M4f `type` on
+    /// elements, copies and documents and `lax` on everything but an
+    /// attribute. `None` for `strip`, which needs nothing.
     pub fn owner(&self, constructor: Constructor) -> Option<&'static str> {
         Some(match (self, constructor) {
             (Self::Strip, _) => return None,
+            (Self::Lax, Constructor::Attribute) => "M4d",
             (Self::Lax, _) => "M4f",
             (Self::Type(_), Constructor::Attribute) => "M4d",
             (Self::Type(_), _) => "M4f",
@@ -1191,6 +1195,9 @@ pub struct CompiledStylesheet<'a> {
     /// validation applied to the implicit final result tree created in the
     /// absence of an xsl:result-document instruction").
     pub(crate) final_validation: Validation,
+    /// Some node constructor names `strict`, `lax` or a `type` (§19.2), so a run makes its
+    /// validator for the trees it builds; otherwise none is made (M4 plan D-12).
+    pub(crate) validates: bool,
     /// §4.3: some module says `input-type-annotations="strip"`, so the annotations of every source
     /// tree are stripped.
     pub(crate) strip_input_annotations: bool,

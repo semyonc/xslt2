@@ -837,22 +837,41 @@ fn a_validation_value_that_is_not_permitted_is_xtse0020() {
 
 /// A non-`strip` `[xsl:]validation`, and `[xsl:]type`, are accepted when the stylesheet is compiled and
 /// raise `XSLT2-NOTIMPL` naming the owning sub-milestone when the instruction is evaluated (M4_PLAN §4):
-/// M4d constructed elements and attributes, M4e copies and documents, M4f `type` on elements and
-/// copies and `lax` everywhere. `type` on `xsl:attribute` is M4d.
+/// M4e copies and documents, M4f `type` on elements and copies and `lax` but on `xsl:attribute`. What
+/// M4d implements — `preserve` and `strict` on an element constructor, `strict`, `lax` and `type` on
+/// `xsl:attribute` — runs (`tests/m4d_construction_validation.rs` checks what it does).
 #[test]
 fn a_non_strip_validation_is_fenced_with_its_owner_when_evaluated() {
-    let cases = [
-        (r#"<e xsl:validation="strict"/>"#, "M4d"),
-        (r#"<e xsl:validation="preserve"/>"#, "M4d"),
-        (r#"<xsl:element name="e" validation="strict"/>"#, "M4d"),
-        (
-            r#"<e><xsl:attribute name="a" validation="strict">1</xsl:attribute></e>"#,
-            "M4d",
-        ),
+    for (body, expected) in [
+        (r#"<e xsl:validation="preserve"/>"#, Ok("<e/>")),
         (
             r#"<e><xsl:attribute name="a" type="h:hatsize">7</xsl:attribute></e>"#,
-            "M4d",
+            Ok(r#"<e a="7"/>"#),
         ),
+        // XTTE1512: no top-level declaration of `a`, of `e`.
+        (
+            r#"<e><xsl:attribute name="a" validation="strict">1</xsl:attribute></e>"#,
+            Err(codes::XTTE1512),
+        ),
+        (r#"<e xsl:validation="strict"/>"#, Err(codes::XTTE1512)),
+        (
+            r#"<xsl:element name="e" validation="strict"/>"#,
+            Err(codes::XTTE1512),
+        ),
+        // `lax` on an attribute (decision D-d1): no declaration, no validation.
+        (
+            r#"<e><xsl:attribute name="a" validation="lax">1</xsl:attribute></e>"#,
+            Ok(r#"<e a="1"/>"#),
+        ),
+    ] {
+        let main = sheet(&format!("{IMPORT_HATS}{}", root_template(body)));
+        let result = run_sa(&main, &hat_files());
+        match expected {
+            Ok(text) => assert_eq!(result.unwrap(), text, "{body}"),
+            Err(code) => assert_eq!(failure(result), (Stage::Run, code.to_string()), "{body}"),
+        }
+    }
+    let cases = [
         (r#"<xsl:copy-of select="." validation="strict"/>"#, "M4e"),
         (r#"<xsl:copy-of select="." validation="preserve"/>"#, "M4e"),
         (r#"<xsl:copy validation="strict"/>"#, "M4e"),
@@ -869,10 +888,6 @@ fn a_non_strip_validation_is_fenced_with_its_owner_when_evaluated() {
         (r#"<xsl:copy-of select="." type="h:hatType"/>"#, "M4f"),
         (r#"<xsl:document type="h:hatType"/>"#, "M4f"),
         (r#"<e xsl:validation="lax"/>"#, "M4f"),
-        (
-            r#"<e><xsl:attribute name="a" validation="lax">1</xsl:attribute></e>"#,
-            "M4f",
-        ),
         (r#"<xsl:copy-of select="." validation="lax"/>"#, "M4f"),
     ];
     for (body, owner) in cases {
@@ -913,19 +928,27 @@ fn an_unevaluated_or_strip_validation_runs() {
 /// imported stylesheet modules."
 #[test]
 fn default_validation_is_the_default_of_its_own_module_only() {
-    // The imported module says `preserve`; its template is called and constructs an element: M4d.
+    // The imported module says `preserve`; its template is called and constructs an element: M4d
+    // implements `preserve` (part 1), so it runs; an `xsl:copy-of` there, whose validation the
+    // default makes `preserve`, is M4e's.
     let imported = sheet_with(
         r#"default-validation="preserve""#,
-        r#"<xsl:template name="make"><made/></xsl:template>"#,
+        r#"<xsl:template name="make"><made/></xsl:template>
+           <xsl:template name="copy"><xsl:copy-of select="/doc"/></xsl:template>"#,
     );
     let main = sheet(&format!(
         r#"<xsl:import href="imported.xsl"/>{}"#,
         root_template(r#"<out><xsl:call-template name="make"/></out>"#)
     ));
     let files = [("file:///m4a/imported.xsl", imported.as_str())];
+    assert_eq!(run_sa(&main, &files).unwrap(), "<out><made/></out>");
+    let main = sheet(&format!(
+        r#"<xsl:import href="imported.xsl"/>{}"#,
+        root_template(r#"<out><xsl:call-template name="copy"/></out>"#)
+    ));
     assert_eq!(
         fenced(run_sa(&main, &files)),
-        (Stage::Run, "M4d".to_string())
+        (Stage::Run, "M4e".to_string())
     );
 
     // The principal module's own `strip` default is not changed by the imported module.
@@ -942,12 +965,10 @@ fn default_validation_is_the_default_of_its_own_module_only() {
             r#"<out xsl:validation="strip"><xsl:element name="e" validation="strip"/></out>"#,
         ),
     );
-    match run_sa(&main, &[]) {
-        // The final result tree (§3.6: "It also determines the validation applied to the implicit
-        // final result tree") is still under `preserve`: that is M4e's.
-        Err(e) => assert_eq!(fenced(Err(e)), (Stage::Run, "M4e".to_string())),
-        Ok(text) => panic!("the implicit final result tree under preserve is fenced, got {text:?}"),
-    }
+    // The final result tree (§3.6: "It also determines the validation applied to the implicit
+    // final result tree") is under `preserve`, which validates nothing (§19.2.2): it runs since
+    // M4d (decision D-d3; it was fenced as M4e's before).
+    assert_eq!(run_sa(&main, &[]).unwrap(), "<out><e/></out>");
 }
 
 /// Typed patterns were M4c's fence (M4_PLAN §4 M4c) until M4c implemented them: a stylesheet with one

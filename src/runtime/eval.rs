@@ -13,7 +13,7 @@ use crate::error::{codes, XsltError};
 use crate::model::*;
 use crate::names::{is_ncname, lexical_qname, QName, XML_NS};
 use crate::receiver::{
-    namespace_nodes_of, CopyNamespaces, Name, Nav, Receiver, SequenceCollector,
+    namespace_nodes_of, Boundary, CopyNamespaces, Name, Nav, Receiver, SequenceCollector,
     TemporaryOutputState,
 };
 use crate::stylesheet::attr_ns;
@@ -150,7 +150,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 let (items, zero_length_texts) = match select {
                     Some(id) => (self.eval_expr(*id, frame, cx)?.into_vec(), 0),
                     None => {
-                        let mut collector = SequenceCollector::new(&self.store);
+                        let mut collector = self.collector();
                         self.eval_body(body, frame, cx, &mut collector)?;
                         let zero_length_texts = collector.zero_length_text_nodes();
                         (collector.into_items(), zero_length_texts)
@@ -245,7 +245,12 @@ impl<'a, 't> Transformation<'a, 't> {
                 validation,
                 body,
             } => {
-                validation_fence(validation, Constructor::Element, "a literal result element")?;
+                let boundary = super::validate::element_boundary(
+                    validation,
+                    Constructor::Element,
+                    "a literal result element",
+                )?;
+                out.validation_boundary(boundary)?;
                 out.start_element(name, None, false)?;
                 if !*inherit_namespaces {
                     out.no_inherit_namespaces()?;
@@ -275,7 +280,11 @@ impl<'a, 't> Transformation<'a, 't> {
                 validation,
                 body,
             } => {
-                validation_fence(validation, Constructor::Element, "xsl:element")?;
+                let boundary = super::validate::element_boundary(
+                    validation,
+                    Constructor::Element,
+                    "xsl:element",
+                )?;
                 let lexical = self.avt(name, frame, cx)?;
                 let (prefix, local) =
                     lexical_qname(whitespace::trim(&lexical)).ok_or_else(|| {
@@ -298,6 +307,7 @@ impl<'a, 't> Transformation<'a, 't> {
                     })?,
                 };
                 let prefix = if uri.is_empty() { "" } else { prefix };
+                out.validation_boundary(boundary)?;
                 out.start_element(&Name::qualified(prefix, local, &uri), None, false)?;
                 if !*inherit_namespaces {
                     out.no_inherit_namespaces()?;
@@ -315,7 +325,6 @@ impl<'a, 't> Transformation<'a, 't> {
                 validation,
                 value,
             } => {
-                validation_fence(validation, Constructor::Attribute, "xsl:attribute")?;
                 let lexical = self.avt(name, frame, cx)?;
                 let (prefix, local) =
                     lexical_qname(whitespace::trim(&lexical)).ok_or_else(|| {
@@ -358,7 +367,9 @@ impl<'a, 't> Transformation<'a, 't> {
                 )?;
                 let prefix = if uri.is_empty() { "" } else { prefix };
                 let name = Name::qualified(prefix, local, &uri);
-                out.attribute(&name, &constructed_attribute_value(&name, text), None)
+                let text = constructed_attribute_value(&name, text);
+                let (text, binding) = self.validate_attribute(validation, &name, text)?;
+                out.attribute(&name, &text, binding)
             }
 
             InstructionKind::Namespace { name, value } => {
@@ -416,7 +427,12 @@ impl<'a, 't> Transformation<'a, 't> {
                 // result tree", so the content is written in temporary output
                 // state (§19.1) and `disable-output-escaping` is ignored in it
                 // (§20.2), wherever the children end up — and an
-                // xsl:result-document in it is XTDE1480.
+                // xsl:result-document in it is XTDE1480. Only `strip` gets past
+                // the fence (M4e owns the others), and §19.2.2 makes it untype
+                // the tree: "elements within the tree have their type annotation
+                // set to xs:untyped, while attributes have their type annotation
+                // set to xs:untypedAtomic".
+                out.validation_boundary(Boundary::Strip)?;
                 out.start_document()?;
                 out.document_base_uri(&self.sheet.static_contexts.get(instruction.ctx).base_uri)?;
                 self.eval_body(
@@ -559,12 +575,17 @@ impl<'a, 't> Transformation<'a, 't> {
             XmlItem::Node(nav) => nav,
         };
         match nav.node_type() {
+            // `xsl:copy` gets here only with `validation="strip"` (M4e owns
+            // the others): the copy and what its content constructs are
+            // untyped (§11.9.1, §19.2.1.1).
             DomNodeType::Root => {
+                out.validation_boundary(Boundary::Strip)?;
                 out.start_document()?;
                 self.eval_body(body, frame, cx, out)?;
                 out.end_document()
             }
             DomNodeType::Element => {
+                out.validation_boundary(Boundary::Strip)?;
                 out.start_element(&Name::of(&nav), None, false)?;
                 // §11.9.1: "The base URI of a node is copied, except in the
                 // case of an element node having an xml:base attribute, in

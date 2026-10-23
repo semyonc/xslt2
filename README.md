@@ -4,7 +4,8 @@ Schema-aware XSLT 2.0 processor in Rust, built on the
 [`xsd-schema`](../xsd-schema) validator and its XPath 2.0 engine.
 
 Status: **M4 — schema-aware**, in progress (M1–M3 done; M4a, schema loading and the schema-aware mode, M4b,
-typed source documents, and M4c, typed patterns, done — see "Schema-aware mode" below). Stylesheets are loaded,
+typed source documents, M4c, typed patterns, and M4d, validation of constructed elements and attributes, done — see
+"Schema-aware mode" below). Stylesheets are loaded,
 compiled and run: the module graph with import precedence, the lexical static contexts of §5.4.1,
 template rules with the §6.4 priorities and conflict resolution, the built-in rules,
 `xsl:apply-imports` and `xsl:next-match`, variables and parameters (tunnel included), attribute
@@ -112,10 +113,35 @@ that matches by type only (`element(*, T)`) is tried for every element, like `*[
 type of a union counts as derived from the union (`element(*, U)` matches an element of a member type of `U`,
 proposed Wave B item C68).
 
+**Constructed nodes** (M4d). `validation="strict"` on a literal result element or `xsl:element` validates the new
+element against the top-level declaration of its name, through `xsd-schema`'s streaming validation as the tree is
+built (§19.2.1.1): no such declaration is XTTE1512, an invalid element XTTE1510 (with nested validations, the innermost
+failure is the one reported); the validation annotates the element and everything in it, creates defaulted attributes
+and an empty element's default value, sets nilled, makes the text of a valid simple-content element and the value of
+a valid attribute their normalized values, drops whitespace text in element-only content, and checks identity
+constraints but not ID uniqueness or dangling IDREFs (§19.2.1.3). Nested validations run innermost first, each
+validating what the ones inside it produced, and what they produced stays when the annotations go: `strip` around a
+validated element removes its annotations, not its defaults or normalized values. An element constructed in the
+content of `xsl:value-of`, `xsl:attribute`, `xsl:comment`, `xsl:processing-instruction` or `xsl:namespace`, or in an
+`xsl:message`, is validated the same way, and contributes its typed value (§5.7.2). `type`, `validation="strict"`
+and `validation="lax"` on `xsl:attribute` validate the new attribute (§19.2.1.1, §19.2.1.2): against the named type,
+or against the top-level declaration of the attribute's name (its type and its `fixed` value; with `lax`, no
+declaration means no validation); an invalid value is XTTE1540 / XTTE1510 / XTTE1515, a name with no top-level
+declaration under `strict` XTTE1512, a type built from `xs:QName` or `xs:NOTATION` XTTE1545. The valid attribute is annotated with the type and its string
+value is the normalized value. Whether an annotation stays is decided by the constructors around the node — the
+outermost one whose validation is not `preserve` decides: under `strip` (the default) everything is untyped (an
+`xs:ID` attribute still identifies its element for `id()`), under `preserve` a new element is `xs:anyType` and what
+it contains keeps its annotations, under `strict` the validation's annotations stand. A variable's temporary tree is a
+`preserve` document (typed nodes sequenced into it keep their annotations, nilled and ids), and `default-validation`
+applies per module and, for the principal module, to the implicit final result tree. Not there yet, upstream: the
+embedded `xml.xsd` is the 2001 edition (no `xml:id` declaration, no empty `xml:lang`), proposed Wave B item C71; the
+default value of a **local** attribute declaration is not created (only those of global declarations are reported by
+the validator), proposed C74.
+
 Not implemented yet, each raising `XSLT2-NOTIMPL` naming the sub-milestone (`../../xslt_doc/M4_PLAN.md` §4) when the
-construct is **evaluated** — a stylesheet that never reaches one runs: validation of constructed elements and
-attributes (M4d), of copies and document nodes (M4e), and `type` on elements and `lax` — also lax validation of a
-source whose root has no declaration — (M4f). XML Schema 1.0 only (1.1 is M4g).
+construct is **evaluated** — a stylesheet that never reaches one runs: `preserve` / `strict` on copies and document
+nodes (M4e), and `type` on elements and `lax` on elements — and lax validation of a source whose root has no
+declaration — (M4f). XML Schema 1.0 only (1.1 is M4g).
 
 **Deep recursion.** Recursive templates and stylesheet functions use the native stack. A run checks
 how much stack it has used and stops with a depth error instead of overflowing. On a thread
@@ -183,9 +209,12 @@ With `--features icu-collation` the two M2k cases pass too: 5,761.
 
 **Schema-aware run** (`--schema-aware`: the 584 cases that need a schema-aware processor become runnable and the 16
 that need a basic one are not run; every case is compiled schema-aware, against the stylesheet's imports and the
-environment's schemas, and every source is validated as the catalog says): 6,017 of 6,355 runnable pass, the
-schema-aware profile 274 of 579 (M4c on `xsd-schema` `wave-b` `66e3e3f`, 2026-10-22; 217 after M4b, 120 after M4a, 51
-before), and every basic case keeps its status; of the 278 not implemented, 276 are M4d–M4f's and 2 M2k's.
+environment's schemas, and every source is validated as the catalog says): 6,115 of 6,355 runnable pass, the
+schema-aware profile 372 of 579 (M4d on `xsd-schema` `wave-b` `66e3e3f`, 2026-10-23; 274 after M4c, 217 after M4b,
+120 after M4a, 51 before), and every basic case keeps its status; of the 175 not implemented, 173 are M4e's (62) and
+M4f's (111) and 2 M2k's. An `assert` over a primary result tree that carries type annotations is evaluated on the tree
+itself (the catalog: "with the document node of the result document as the context item"; a re-parse of the
+serialization would be untyped), every other one over the re-parse.
 
 `assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
 attribute prefixes and the in-scope namespaces of every element are significant unless the

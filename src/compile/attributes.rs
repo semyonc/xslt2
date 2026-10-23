@@ -227,10 +227,15 @@ impl<'a, 'm, 't> super::Builder<'a, 'm, 't> {
             let sc = self.static_contexts.get(ctx);
             let name = type_attribute_name(&value, sc)
                 .map_err(|e| e.with_location(module.location(nav)))?;
+            self.validates.set(true);
             return Ok(Validation::Type(name));
         }
         if let Some(value) = read("validation") {
-            return validation_value(&value).ok_or_else(|| {
+            let validation = validation_value(&value);
+            if matches!(validation, Some(Validation::Strict | Validation::Lax)) {
+                self.validates.set(true);
+            }
+            return validation.ok_or_else(|| {
                 XsltError::new(
                     codes::XTSE0020,
                     format!(

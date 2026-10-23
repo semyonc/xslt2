@@ -246,12 +246,18 @@ impl<'a, 't> Transformation<'a, 't> {
             let store = self.store.borrow();
             (store.arena(), store.names())
         };
-        let builder = ResultBuilder::new(arena, names, None)?;
-        let mut out = ComplexContentNormalizer::new(builder).honouring_disabled_escaping();
+        let builder = ResultBuilder::new(arena, names, self.schema_set)?;
+        let mut out = ComplexContentNormalizer::with_annotations(
+            self.validating(builder),
+            crate::receiver::Annotations::of_copies(self.schema_set),
+        )
+        .honouring_disabled_escaping();
+        // Only `strip` gets past the fence above (M4e owns the others).
+        out.validation_boundary(crate::receiver::Boundary::Strip)?;
         out.start_document()?;
         self.eval_body(&rd.body, frame, cx, &mut out)?;
         out.end_document()?;
-        let (mut doc, disabled_escaping) = out.into_inner().finish_with_marks()?;
+        let (mut doc, disabled_escaping) = out.into_inner().into_inner().finish_with_marks()?;
         // "The base URI of the document node at the root of the final result
         // tree is based on the effective value of the href attribute."
         if !uri.is_empty() {
@@ -416,6 +422,13 @@ impl<'t> Receiver<'t> for InitialResult<'_, 't> {
 
     fn no_inherit_namespaces(&mut self) -> Result<(), XsltError> {
         self.out.no_inherit_namespaces()
+    }
+
+    fn validation_boundary(
+        &mut self,
+        boundary: crate::receiver::Boundary,
+    ) -> Result<(), XsltError> {
+        self.out.validation_boundary(boundary)
     }
 
     fn append_copy(

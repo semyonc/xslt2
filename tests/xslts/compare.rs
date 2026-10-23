@@ -691,6 +691,39 @@ fn xpath_over_result(
     })
 }
 
+/// Every `assert` of `assertion` that is about the primary result — at the top level, or inside
+/// `all-of`, `any-of`, `not` — evaluated on `doc` itself: a typed final result tree, whose
+/// annotations a re-parse of its serialization would lose (XSLT 2.0 §19.2.1.3: serialization
+/// "discards any existing type annotations"). The static context has the stylesheet's schema
+/// set, so that a type or a declaration the assertion names is known, with the set's name table
+/// as its names (M4 plan D-1), and the assertion's namespaces as `eval_xpath` gives them.
+pub fn typed_asserts(
+    doc: &BufferDocument<'_>,
+    set: &xsd_schema::SchemaSet,
+    assertion: &Assertion,
+) -> Vec<(String, Result<bool, String>)> {
+    fn collect<'a>(a: &'a Assertion, out: &mut Vec<(&'a str, &'a NsBindings)>) {
+        match a {
+            Assertion::Assert { xpath, ns } => out.push((xpath, ns)),
+            Assertion::AllOf(all) | Assertion::AnyOf(all) => {
+                all.iter().for_each(|a| collect(a, out))
+            }
+            Assertion::Not(inner) => collect(inner, out),
+            _ => {}
+        }
+    }
+    let mut asserts = Vec::new();
+    collect(assertion, &mut asserts);
+    asserts
+        .into_iter()
+        .map(|(xpath, ns)| {
+            let nav = BufferDocNavigator::new(doc, doc.root());
+            let value = eval_xpath_in(xpath, ns, nav, &set.name_table, Some(set), ebv);
+            (xpath.to_string(), value)
+        })
+        .collect()
+}
+
 /// The effective boolean value of an assertion XPath over the primary result: `Pass`, `Fail`
 /// with `false_message`, or `HarnessError` when it cannot be evaluated.
 fn ebv_over_primary(
@@ -700,6 +733,19 @@ fn ebv_over_primary(
     cx: &CompareContext<'_>,
     false_message: impl FnOnce() -> String,
 ) -> Verdict {
+    // A typed primary result tree: an `assert` of the case was evaluated on the tree itself
+    // (`ResultDocument::typed_asserts`).
+    if let Some((_, typed)) = out
+        .primary
+        .as_ref()
+        .and_then(|p| p.typed_asserts.iter().find(|(x, _)| x == xpath))
+    {
+        return match typed {
+            Ok(true) => Verdict::pass(),
+            Ok(false) => Verdict::fail(false_message()),
+            Err(e) => Verdict::harness(e.clone()),
+        };
+    }
     let tree = match primary_tree(out) {
         Ok(tree) => tree,
         Err(v) => return v,
@@ -896,6 +942,18 @@ fn eval_xpath<N: xsd_schema::xpath::DomNavigator, T>(
     f: impl FnOnce(&XPathValue<N>) -> Result<T, String>,
 ) -> Result<T, String> {
     let names = NameTable::new();
+    eval_xpath_in(xpath, ns, nav, &names, None, f)
+}
+
+/// [`eval_xpath`] with the names and the schema set of the static context given.
+fn eval_xpath_in<N: xsd_schema::xpath::DomNavigator, T>(
+    xpath: &str,
+    ns: &NsBindings,
+    nav: N,
+    names: &NameTable,
+    schema_set: Option<&xsd_schema::SchemaSet>,
+    f: impl FnOnce(&XPathValue<N>) -> Result<T, String>,
+) -> Result<T, String> {
     let compile = |text: &str, ns: &NsBindings| {
         let mut bindings = Vec::new();
         let have = |p: &str| ns.iter().any(|(q, _)| q == p);
@@ -907,10 +965,13 @@ fn eval_xpath<N: xsd_schema::xpath::DomNavigator, T>(
                 bindings.push((names.add(p), names.add(u)));
             }
         }
-        let ctx = XPathContext::new(&names).with_namespaces(NamespaceContextSnapshot {
+        let mut ctx = XPathContext::new(names).with_namespaces(NamespaceContextSnapshot {
             default_ns: None,
             bindings,
         });
+        if let Some(set) = schema_set {
+            ctx = ctx.with_schema_set(set);
+        }
         XPathExpr::compile_with_vars(text, &ctx, &["result"]).map(|expr| (expr, ctx))
     };
     let (expr, ctx) = match compile(xpath, ns) {
@@ -2158,6 +2219,7 @@ pub mod self_test {
                 serialization_error: Some(xslt2::XsltError::new("SESU0007", "no such encoding")),
                 method: None,
                 base_uri: None,
+                typed_asserts: Vec::new(),
             }),
             ..Default::default()
         };
@@ -2530,6 +2592,7 @@ pub mod self_test {
                 serialization_error: None,
                 method: None,
                 base_uri: None,
+                typed_asserts: Vec::new(),
             }),
             ..Default::default()
         }
@@ -2674,6 +2737,7 @@ pub mod self_test {
                 serialization_error: None,
                 method: None,
                 base_uri: None,
+                typed_asserts: Vec::new(),
             }),
             ..Default::default()
         };
@@ -2798,8 +2862,63 @@ pub mod self_test {
     }
 
     /// Run every self-test; panics on the first failure.
+    /// An `assert` over a typed primary result tree is evaluated on the tree itself
+    /// (`typed_asserts`, filled by the engine while the tree exists) — a re-parse of its
+    /// serialization would see an untyped tree — and the verdict comes from there.
+    fn assert_over_a_typed_result_reads_the_tree() {
+        let xsd = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:element name="r"><xs:complexType><xs:sequence>
+              <xs:element name="n" type="xs:integer"/></xs:sequence></xs:complexType></xs:element>
+          </xs:schema>"#;
+        let context = xslt2::SchemaContext::builder()
+            .schema_str(xsd, "urn:self-test:typed.xsd")
+            .build()
+            .expect("the self-test schema loads");
+        let set = context.schema_set();
+        let arena = Bump::new();
+        let doc = xsd_schema::document::build_typed_document(
+            "<r><n>5</n></r>".as_bytes(),
+            &arena,
+            set,
+            BufferDocumentOptions::default(),
+        )
+        .expect("a typed document");
+        let a = |xpath: &str| Assertion::Assert {
+            xpath: xpath.into(),
+            ns: Vec::new(),
+        };
+        let typed = "/r/n instance of element(n, xs:integer)";
+        let untyped = "/r/n instance of element(*, xs:untyped)";
+        let answers = typed_asserts(&doc, set, &Assertion::AllOf(vec![a(typed), a(untyped)]));
+        assert_eq!(
+            answers,
+            vec![
+                (typed.to_string(), Ok(true)),
+                (untyped.to_string(), Ok(false))
+            ]
+        );
+        let mut result = ResultDocument::same("<r><n>5</n></r>");
+        result.typed_asserts = answers;
+        let run = RunOutput {
+            primary: Some(result),
+            ..Default::default()
+        };
+        check(evaluate(&a(typed), &run, &cx()), Outcome::Pass);
+        check(evaluate(&a(untyped), &run, &cx()), Outcome::Fail);
+        // An assertion of another case is evaluated over the re-parse, as before.
+        check(
+            evaluate(
+                &a("/r/n instance of element(*, xs:untyped)"),
+                &out("<r><n>5</n></r>"),
+                &cx(),
+            ),
+            Outcome::Pass,
+        );
+    }
+
     pub fn run() -> Summary {
         let functions: &[fn()] = &[
+            assert_over_a_typed_result_reads_the_tree,
             assert_xpath_over_result,
             assert_xml_ignores_attribute_order,
             assert_xml_fragments_and_text,

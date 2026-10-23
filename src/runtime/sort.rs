@@ -39,7 +39,7 @@ use crate::collation::{
 };
 use crate::error::{codes, XsltError};
 use crate::model::*;
-use crate::receiver::{Nav, SequenceCollector};
+use crate::receiver::Nav;
 use crate::whitespace;
 
 /// The collation one sort key component compares strings with.
@@ -364,7 +364,7 @@ impl<'a, 't> Transformation<'a, 't> {
         let value = match &key.value {
             ValueSource::Select(id) => self.eval_expr(*id, frame, &inner)?,
             ValueSource::Content(body) => {
-                let mut collector = SequenceCollector::new(&self.store);
+                let mut collector = self.collector();
                 self.eval_body(body, frame, &inner, &mut collector)?;
                 XPathValue::from_sequence(collector.into_items())
             }

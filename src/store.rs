@@ -25,6 +25,7 @@ use slotmap::{new_key_type, SlotMap};
 use xsd_schema::document::{BufferDocNavigator, BufferDocument};
 use xsd_schema::namespace::NameTable;
 use xsd_schema::navigator::{DomNavigator, DomNodeType};
+use xsd_schema::SchemaSet;
 
 new_key_type! {
     /// Identifies one document inside a [`DocumentStore`].
@@ -59,6 +60,9 @@ pub struct StoredDocument<'t> {
 pub struct DocumentStore<'t> {
     arena: &'t Bump,
     names: &'t NameTable,
+    /// The schema set of a schema-aware transformation (M4 plan D-1, D-2), which
+    /// every tree built for it is built with ([`schema_set`](Self::schema_set)).
+    schema_set: Option<&'t SchemaSet>,
     docs: SlotMap<DocId, StoredDocument<'t>>,
     /// `document()`/`doc()` identity: the same URI is the same document (§16.1).
     by_uri: HashMap<Box<str>, DocId>,
@@ -79,6 +83,7 @@ impl<'t> DocumentStore<'t> {
         Self {
             arena,
             names,
+            schema_set: None,
             docs: SlotMap::with_key(),
             by_uri: HashMap::new(),
             by_serial: HashMap::new(),
@@ -96,6 +101,21 @@ impl<'t> DocumentStore<'t> {
     /// The one name table shared by every document of this transformation.
     pub fn names(&self) -> &'t NameTable {
         self.names
+    }
+
+    /// The store of a schema-aware transformation: the trees built for it
+    /// (temporary trees, result trees, the hidden documents of parentless
+    /// nodes) are built with `schema_set`, so the type annotations their nodes
+    /// are given resolve (§19.2; M4 plan D-1: `names` is the set's own table).
+    pub fn with_schema_set(mut self, schema_set: Option<&'t SchemaSet>) -> Self {
+        self.schema_set = schema_set;
+        self
+    }
+
+    /// The schema set the trees of this transformation are built with — `None`
+    /// for a basic processor, whose trees are never typed (§21.1).
+    pub fn schema_set(&self) -> Option<&'t SchemaSet> {
+        self.schema_set
     }
 
     /// How many documents the store holds.

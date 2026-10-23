@@ -20,14 +20,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use xsd_schema::document::{
-    serialize, BufferDocNavigator, BufferDocument, BufferDocumentBuilder, BufferDocumentOptions,
-    CopySource, DocumentKind, NamespaceFixup, NodeSchemaBinding,
+    serialize, BufferDocNavigator, BufferDocument, BufferDocumentBuilder, BufferDocumentError,
+    BufferDocumentOptions, CopySource, DocumentKind, NamespaceFixup, NodeSchemaBinding,
 };
 use xsd_schema::navigator::{DomNavigator, DomNodeType, NamespaceAxisScope, TypedValue};
+use xsd_schema::validation::SchemaValidator;
 use xsd_schema::xpath::XmlItem;
 use xsd_schema::SchemaSet;
 
 use crate::error::{codes, XsltError};
+use crate::runtime::validate::Validating;
 use crate::store::{DocId, DocumentStore};
 
 /// The navigator every receiver in this crate carries nodes of (Q22).
@@ -197,6 +199,61 @@ pub enum Annotations {
     Preserve,
 }
 
+impl Annotations {
+    /// What the pipelines of a transformation read off the nodes they copy into
+    /// a tree through [`Receiver::append_item`]: everything a typed node carries
+    /// when the transformation is schema-aware, so that a node copied into a
+    /// tree keeps its annotation unless a construction boundary around it says
+    /// otherwise ([`Boundary`]; §19.2.1.1: under `preserve` "nodes that are
+    /// copied will retain their type annotations"); nothing for a basic
+    /// processor, whose nodes are never typed (§21.1).
+    pub fn of_copies(schema_set: Option<&SchemaSet>) -> Self {
+        if schema_set.is_some() {
+            Annotations::Preserve
+        } else {
+            Annotations::Strip
+        }
+    }
+}
+
+/// The `[xsl:]validation` of an instruction that constructs a container — an
+/// element or a document node — as far as the tree being built is concerned
+/// (§19.2.1.1, §19.2.2): it decides the annotations of the container and of
+/// every node it contains.
+///
+/// > The `[xsl:]validation` attribute defines the validation action to be
+/// > taken. It determines not only the type annotation of the node that is
+/// > constructed by the relevant instruction itself, but also the type
+/// > annotations of all element and attribute nodes that have the constructed
+/// > node as an ancestor. Conceptually, the validation requested for a child
+/// > element or attribute node is applied before the validation requested for
+/// > its parent element.
+///
+/// So the **outermost** enclosing boundary whose validation is not `preserve`
+/// decides a node's annotation (M4 plan D-5): under a `strip` boundary every
+/// node is untyped; when every enclosing boundary is `preserve`, a new element
+/// is `xs:anyType` and every other node keeps what it was given (a copied node
+/// its source's annotation, an attribute what its own `xsl:attribute`
+/// validated it to); under a `strict` one, the node has what that boundary's
+/// validation gave it — every `strict` boundary still validates what it
+/// contains, for its errors. The validating receiver of the transformation's
+/// pipelines (`runtime::validate::Validating`) applies the rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Boundary {
+    /// `validation="strip"`: the container and every node it contains are
+    /// untyped — elements `xs:untyped`, attributes `xs:untypedAtomic`, nilled
+    /// false — while is-id and is-idrefs are unchanged.
+    Strip,
+    /// `validation="preserve"`: no validation; a new element is `xs:anyType`,
+    /// the nodes it contains keep their annotations. A document node created
+    /// for a variable is one (§9.4, §19.2.2).
+    Preserve,
+    /// `validation="strict"` on an element constructor (§19.2.1.1): the
+    /// element is assessed against the top-level declaration of its name, and
+    /// the assessment annotates it and everything it contains.
+    Strict,
+}
+
 /// A destination for the event stream (§9.2).
 pub trait Receiver<'t> {
     /// Opens a document node.
@@ -277,6 +334,21 @@ pub trait Receiver<'t> {
     /// receiver that sits *behind* a [`ComplexContentNormalizer`]: inheritance
     /// is the normalizer's business.
     fn no_inherit_namespaces(&mut self) -> Result<(), XsltError> {
+        Ok(())
+    }
+
+    /// The container the **next** [`start_element`](Receiver::start_element)
+    /// or [`start_document`](Receiver::start_document) opens is constructed by
+    /// an instruction whose `[xsl:]validation` is `boundary` (§19.2.1.1,
+    /// §19.2.2). A container opened without one — an element a deep copy
+    /// produces, the holder of a parentless node — is no boundary: its nodes
+    /// keep what they arrive with, unless an enclosing boundary strips them.
+    ///
+    /// The default implementation ignores it, which is right for every
+    /// receiver that builds no typed tree: only the validating receiver
+    /// (`runtime::validate::Validating`) applies the rule; the receivers in
+    /// front of it pass the announcement on, in order.
+    fn validation_boundary(&mut self, _boundary: Boundary) -> Result<(), XsltError> {
         Ok(())
     }
 
@@ -398,6 +470,10 @@ impl<'t> Receiver<'t> for TemporaryOutputState<'_, 't> {
         self.out.no_inherit_namespaces()
     }
 
+    fn validation_boundary(&mut self, boundary: Boundary) -> Result<(), XsltError> {
+        self.out.validation_boundary(boundary)
+    }
+
     fn append_copy(
         &mut self,
         item: &XmlItem<Nav<'t>>,
@@ -416,6 +492,10 @@ struct Open {
     name: Option<Name>,
     binding: Option<NodeSchemaBinding>,
     nilled: bool,
+    /// The validation boundary the element's instruction announced
+    /// ([`Receiver::validation_boundary`]), passed on just before the element
+    /// when its start tag is flushed.
+    boundary: Option<Boundary>,
     /// Namespace nodes seen for this element, not yet flushed.
     namespaces: Vec<(String, String)>,
     /// Attributes seen for this element, not yet flushed.
@@ -544,6 +624,25 @@ impl Open {
     }
 }
 
+/// A document node the normalizer has opened (see
+/// [`ComplexContentNormalizer::document_marks`]).
+struct DocumentMark {
+    /// The depth of the normalizer's stack when the document node was opened.
+    depth: usize,
+    /// The validation boundary its instruction announced.
+    boundary: Option<Boundary>,
+    /// Whether `start_document` (and the boundary) has been passed on.
+    ///
+    /// A document node at the document level is passed on at once. One opened
+    /// in element content contributes only its children to the element
+    /// (§5.7.1), and the element's start tag may still be pending — an
+    /// attribute may follow an empty document node — so it is passed on just
+    /// before its first child is, after that start tag; one that turns out
+    /// empty is never passed on. Either way the destination sees it nested
+    /// inside the element, which is what a boundary needs.
+    forwarded: bool,
+}
+
 /// XSLT 2.0 §5.7.1 *Constructing Complex Content*, applied once for every
 /// destination.
 ///
@@ -614,7 +713,10 @@ pub struct ComplexContentNormalizer<'t, R: Receiver<'t>> {
     /// document node", which XTDE0420 forbids an attribute or namespace node
     /// in. The innermost container is such a document node exactly when the
     /// last mark equals the current stack depth.
-    document_marks: Vec<usize>,
+    document_marks: Vec<DocumentMark>,
+    /// The boundary announced for the next container
+    /// ([`Receiver::validation_boundary`]).
+    pending_boundary: Option<Boundary>,
     /// Whether `disable-output-escaping` reaches `out` (§20.2): only for the
     /// pipeline of a final result tree. Every other pipeline is a temporary
     /// destination, written in temporary output state — "If output escaping is
@@ -645,6 +747,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
             annotations,
             copy_namespaces: CopyNamespaces::All,
             document_marks: Vec::new(),
+            pending_boundary: None,
             honour_disabled_escaping: false,
             disabled: Vec::new(),
             _marker: std::marker::PhantomData,
@@ -664,7 +767,30 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
     /// Whether the innermost container being built is a document node, so
     /// that an attribute or namespace node here is XTDE0420.
     fn in_document_content(&self) -> bool {
-        !self.in_element() || self.document_marks.last() == Some(&self.stack.len())
+        !self.in_element()
+            || self.document_marks.last().map(|mark| mark.depth) == Some(self.stack.len())
+    }
+
+    /// Passes on the document nodes opened in element content that enclose the
+    /// node about to be passed on — those opened at a depth of at most `limit`
+    /// — and have not been passed on yet ([`DocumentMark::forwarded`]). The
+    /// ones not passed on are always the innermost.
+    fn forward_documents(&mut self, limit: usize) -> Result<(), XsltError> {
+        let Some(first) = self.document_marks.iter().position(|mark| !mark.forwarded) else {
+            return Ok(());
+        };
+        for index in first..self.document_marks.len() {
+            let mark = &mut self.document_marks[index];
+            if mark.depth > limit {
+                break;
+            }
+            mark.forwarded = true;
+            if let Some(boundary) = mark.boundary {
+                self.out.validation_boundary(boundary)?;
+            }
+            self.out.start_document()?;
+        }
+        Ok(())
     }
 
     /// The default `copy-namespaces` setting of this pipeline.
@@ -700,6 +826,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
             return Ok(());
         }
         self.flush_start_tag()?;
+        self.forward_documents(self.stack.len())?;
         self.top().children_started = true;
         if disabled.is_empty() {
             return self.out.text(&text, false);
@@ -743,6 +870,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         let mut name = open.name.clone().unwrap_or_default();
         let binding = open.binding;
         let nilled = open.nilled;
+        let boundary = open.boundary;
         let mut keep: Vec<(String, String)> = open.namespaces.clone();
         // §5.7.1: the element has no namespace node with no name, so a default
         // namespace already in scope in the result tree must be undeclared.
@@ -809,6 +937,10 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
             decls = merged;
         }
 
+        self.forward_documents(self.stack.len() - 1)?;
+        if let Some(boundary) = boundary {
+            self.out.validation_boundary(boundary)?;
+        }
         self.out.start_element(&name, binding, nilled)?;
         for (prefix, uri) in &decls {
             self.out.namespace(prefix, uri)?;
@@ -1136,7 +1268,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         nav: &Nav<'t>,
         namespaces: CopyNamespaces,
     ) -> Result<(), XsltError> {
-        self.copy_subtree(nav, namespaces)
+        self.copy_subtree(nav, namespaces, self.annotations)
     }
 
     /// The recursive half of [`copy_node`](Self::copy_node).
@@ -1170,13 +1302,18 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
     /// of its own) and `namespace-3004` (the same deep copy attached to a
     /// literal result element with a default namespace: the copy root has none
     /// of its own and inherits that one, and the undeclaration disappears).
-    fn copy_subtree(&mut self, nav: &Nav<'t>, namespaces: CopyNamespaces) -> Result<(), XsltError> {
+    fn copy_subtree(
+        &mut self,
+        nav: &Nav<'t>,
+        namespaces: CopyNamespaces,
+        annotations: Annotations,
+    ) -> Result<(), XsltError> {
         match nav.node_type() {
             DomNodeType::Root => {
                 let mut child = nav.clone();
                 if child.move_to_first_child() {
                     loop {
-                        self.copy_subtree(&child, namespaces)?;
+                        self.copy_subtree(&child, namespaces, annotations)?;
                         if !child.move_to_next_sibling() {
                             break;
                         }
@@ -1185,9 +1322,10 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                 Ok(())
             }
             DomNodeType::Element => {
-                let binding = self.binding_of(nav);
-                let nilled = self.annotations == Annotations::Preserve
-                    && matches!(nav.typed_value(), TypedValue::Nilled);
+                let binding = binding_of(nav, annotations);
+                // Only a typed node can be nilled; asking an untyped one would
+                // still cost a typed-value computation.
+                let nilled = binding.is_some() && matches!(nav.typed_value(), TypedValue::Nilled);
                 self.start_element(&Name::of(nav), binding, nilled)?;
                 self.top().copied = true;
                 // §11.9.2: with `copy-namespaces="no"` none of the namespace
@@ -1202,7 +1340,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                 let mut attr = nav.clone();
                 if attr.move_to_first_attribute() {
                     loop {
-                        self.copy_attribute(&attr)?;
+                        self.copy_attribute(&attr, annotations)?;
                         if !attr.move_to_next_attribute() {
                             break;
                         }
@@ -1212,7 +1350,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                 let mut child = nav.clone();
                 if child.move_to_first_child() {
                     loop {
-                        self.copy_subtree(&child, namespaces)?;
+                        self.copy_subtree(&child, namespaces, annotations)?;
                         if !child.move_to_next_sibling() {
                             break;
                         }
@@ -1220,7 +1358,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                 }
                 self.end_element()
             }
-            DomNodeType::Attribute => self.copy_attribute(nav),
+            DomNodeType::Attribute => self.copy_attribute(nav, annotations),
             DomNodeType::Namespace => {
                 let (prefix, uri) = (nav.local_name().to_string(), nav.value());
                 self.namespace(&prefix, &uri)
@@ -1234,30 +1372,51 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         }
     }
 
-    fn copy_attribute(&mut self, nav: &Nav<'t>) -> Result<(), XsltError> {
-        let binding = self.binding_of(nav);
+    fn copy_attribute(&mut self, nav: &Nav<'t>, annotations: Annotations) -> Result<(), XsltError> {
+        let binding = binding_of(nav, annotations);
         let value = nav.value();
         self.attribute(&Name::of(nav), &value, binding)
     }
+}
 
-    fn binding_of(&self, nav: &Nav<'t>) -> Option<NodeSchemaBinding> {
-        match self.annotations {
-            Annotations::Strip => None,
-            Annotations::Preserve => CopySource::schema_binding(nav),
-        }
+/// The PSVI a copy of the node at `nav` carries.
+fn binding_of(nav: &Nav<'_>, annotations: Annotations) -> Option<NodeSchemaBinding> {
+    match annotations {
+        Annotations::Strip => None,
+        Annotations::Preserve => CopySource::schema_binding(nav),
     }
 }
 
 impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
     fn start_document(&mut self) -> Result<(), XsltError> {
-        self.document_marks.push(self.stack.len());
-        self.out.start_document()
+        let boundary = self.pending_boundary.take();
+        // See `DocumentMark::forwarded`.
+        let forwarded = !self.in_element();
+        self.document_marks.push(DocumentMark {
+            depth: self.stack.len(),
+            boundary,
+            forwarded,
+        });
+        if forwarded {
+            if let Some(boundary) = boundary {
+                self.out.validation_boundary(boundary)?;
+            }
+            self.out.start_document()?;
+        }
+        Ok(())
     }
 
     fn end_document(&mut self) -> Result<(), XsltError> {
         self.flush_text()?;
-        self.document_marks.pop();
-        self.out.end_document()
+        match self.document_marks.pop() {
+            Some(mark) if !mark.forwarded => Ok(()),
+            _ => self.out.end_document(),
+        }
+    }
+
+    fn validation_boundary(&mut self, boundary: Boundary) -> Result<(), XsltError> {
+        self.pending_boundary = Some(boundary);
+        Ok(())
     }
 
     fn start_element(
@@ -1280,10 +1439,12 @@ impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
         // Only the default-namespace half shows in XML 1.0 output (§5.7.3's
         // note); the prefixed half shows on the `namespace` axis of the tree.
         let parent_withholds = !parent.inherit;
+        let boundary = self.pending_boundary.take();
         self.stack.push(Open {
             name: Some(name.clone()),
             binding,
             nilled,
+            boundary,
             no_default: parent_withholds,
             parent_withholds,
             ..Open::inheriting()
@@ -1338,6 +1499,7 @@ impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
     fn comment(&mut self, s: &str) -> Result<(), XsltError> {
         self.flush_text()?;
         self.flush_start_tag()?;
+        self.forward_documents(self.stack.len())?;
         let top = self.top();
         top.children_started = true;
         top.last_atomic = false;
@@ -1347,6 +1509,7 @@ impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
     fn pi(&mut self, target: &str, data: &str) -> Result<(), XsltError> {
         self.flush_text()?;
         self.flush_start_tag()?;
+        self.forward_documents(self.stack.len())?;
         let top = self.top();
         top.children_started = true;
         top.last_atomic = false;
@@ -1397,7 +1560,10 @@ impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
         match item {
             XmlItem::Atomic(_) => self.append_item(item),
             XmlItem::Node(nav) => {
-                self.copy_node(nav, namespaces)?;
+                // `xsl:copy-of` and `xsl:copy` copy untyped: the only validation
+                // of theirs that is evaluated is `strip` (§11.9; `preserve`,
+                // `strict`, `lax` and `type` on them are M4e's and M4f's).
+                self.copy_subtree(nav, namespaces, Annotations::Strip)?;
                 self.top().last_atomic = false;
                 Ok(())
             }
@@ -1412,6 +1578,10 @@ impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
 /// Everything hard happened in the normalizer, so this only buffers the start
 /// tag — the builder wants the namespace declarations as an argument of
 /// `start_element` — and replays `set_node_binding`/`set_nil`.
+///
+/// Every binding is built as it arrives: the annotation rule of §19.2.1.1
+/// ([`Boundary`]) is applied in front of it, by the validating receiver of the
+/// transformation's pipelines (`runtime::validate::Validating`, M4 plan D-5).
 pub struct ResultBuilder<'t> {
     builder: BufferDocumentBuilder<'t>,
     pending: Option<(Name, Option<NodeSchemaBinding>, bool)>,
@@ -1428,6 +1598,9 @@ pub struct ResultBuilder<'t> {
     /// The byte length of the text node being built, while the last event was
     /// `text`.
     text_len: Option<usize>,
+    /// The id values the pending element answers to without an attribute
+    /// bound as an `xs:ID` saying so ([`file_id`](Self::file_id)).
+    filed_ids: Vec<String>,
 }
 
 impl<'t> ResultBuilder<'t> {
@@ -1459,7 +1632,20 @@ impl<'t> ResultBuilder<'t> {
             marks: crate::serialize::EscapingMarks::default(),
             text_nodes: 0,
             text_len: None,
+            filed_ids: Vec::new(),
         })
+    }
+
+    /// The element whose start tag is being built answers to `id` in the id
+    /// index (`fn:id`), although no attribute of it is bound as an `xs:ID`
+    /// saying so: an attribute whose `xs:ID` annotation a `strip` boundary
+    /// took away keeps its is-id property (§19.2.1.1: "The values of the is-id
+    /// and is-idrefs properties are unchanged"). Filed with `register_xml_id`
+    /// when the start tag is flushed; a value another element of the tree
+    /// already answers to stays with that element (no uniqueness check, §9.4,
+    /// §19.2.1.3).
+    pub(crate) fn file_id(&mut self, id: String) {
+        self.filed_ids.push(id);
     }
 
     /// The finished document.
@@ -1519,6 +1705,15 @@ impl<'t> ResultBuilder<'t> {
         }
         if nilled {
             self.builder.set_nil(elem);
+        }
+        for id in std::mem::take(&mut self.filed_ids) {
+            match self.builder.register_xml_id(&id, elem) {
+                // No document-level validation, so no uniqueness check (§9.4,
+                // §19.2.1.3): the first element of the tree keeps the value,
+                // as for any other id.
+                Ok(()) | Err(BufferDocumentError::DuplicateId(_)) => {}
+                Err(e) => return Err(build_error(e)),
+            }
         }
         self.open.push(elem);
         Ok(())
@@ -1875,7 +2070,10 @@ pub struct SequenceCollector<'s, 't> {
     store: &'s RefCell<DocumentStore<'t>>,
     items: Vec<XmlItem<Nav<'t>>>,
     /// The nested pipeline building the current construction group.
-    nested: Option<ComplexContentNormalizer<'t, ResultBuilder<'t>>>,
+    nested: Option<ComplexContentNormalizer<'t, Validating<'s, 't>>>,
+    /// The validator a `strict` boundary in a group validates with
+    /// ([`with_validator`](Self::with_validator)).
+    validator: Option<&'s SchemaValidator<'s>>,
     /// What the open group will produce.
     group: GroupKind,
     /// The base URI the open `GroupKind::Document` group takes (§11.5).
@@ -1885,6 +2083,9 @@ pub struct SequenceCollector<'s, 't> {
     /// How many zero-length text nodes the sequence had that are not in
     /// [`items`](Self::items) — see [`zero_length_text_nodes`](Self::zero_length_text_nodes).
     zero_length_texts: usize,
+    /// A boundary announced while no group is open: it is the next group's
+    /// (`Receiver::validation_boundary`).
+    pending_boundary: Option<Boundary>,
 }
 
 /// What a construction group in a sequence produces (§6.3).
@@ -1915,7 +2116,17 @@ impl<'s, 't> SequenceCollector<'s, 't> {
             base_uri: None,
             depth: 0,
             zero_length_texts: 0,
+            pending_boundary: None,
+            validator: None,
         }
+    }
+
+    /// The collector of a transformation that validates constructed elements
+    /// (§19.2.1.1): a `strict` boundary in one of its groups is validated with
+    /// `validator` — the transformation's one validator (M4 plan D-12).
+    pub(crate) fn with_validator(mut self, validator: Option<&'s SchemaValidator<'s>>) -> Self {
+        self.validator = validator;
+        self
     }
 
     /// How many items of the sequence were zero-length text nodes, which
@@ -1972,16 +2183,25 @@ impl<'s, 't> SequenceCollector<'s, 't> {
 
     fn begin_group(&mut self, group: GroupKind) -> Result<(), XsltError> {
         let builder = self.new_builder(group)?;
-        self.nested = Some(ComplexContentNormalizer::new(builder));
+        let schema_set = self.store.borrow().schema_set();
+        let annotations = Annotations::of_copies(schema_set);
+        let mut nested = ComplexContentNormalizer::with_annotations(
+            Validating::new(builder, schema_set, self.validator),
+            annotations,
+        );
+        if let Some(boundary) = self.pending_boundary.take() {
+            nested.validation_boundary(boundary)?;
+        }
+        self.nested = Some(nested);
         self.group = group;
         self.base_uri = None;
         Ok(())
     }
 
     fn new_builder(&self, group: GroupKind) -> Result<ResultBuilder<'t>, XsltError> {
-        let (arena, names) = {
+        let (arena, names, schema_set) = {
             let store = self.store.borrow();
-            (store.arena(), store.names())
+            (store.arena(), store.names(), store.schema_set())
         };
         let options = match group {
             // A parentless node is built in a hidden document whose root the
@@ -1990,7 +2210,7 @@ impl<'s, 't> SequenceCollector<'s, 't> {
             // A document node is a real document node, with its own identity.
             GroupKind::Document => BufferDocumentOptions::default(),
         };
-        ResultBuilder::with_options(arena, names, None, options)
+        ResultBuilder::with_options(arena, names, schema_set, options)
     }
 
     fn end_group(&mut self) -> Result<(), XsltError> {
@@ -1998,7 +2218,7 @@ impl<'s, 't> SequenceCollector<'s, 't> {
             return Ok(());
         };
         let group = self.group;
-        let mut doc = nested.into_inner().finish()?;
+        let mut doc = nested.into_inner().into_inner().finish()?;
         // §11.5: the document node `xsl:document` builds takes the base URI of
         // the instruction, exactly as §9.4's temporary tree takes that of the
         // variable binding element.
@@ -2264,6 +2484,16 @@ impl<'t> Receiver<'t> for SequenceCollector<'_, 't> {
         match self.nested.as_mut() {
             Some(nested) => nested.no_inherit_namespaces(),
             None => Ok(()),
+        }
+    }
+
+    fn validation_boundary(&mut self, boundary: Boundary) -> Result<(), XsltError> {
+        match self.nested.as_mut() {
+            Some(nested) => nested.validation_boundary(boundary),
+            None => {
+                self.pending_boundary = Some(boundary);
+                Ok(())
+            }
         }
     }
 

@@ -194,6 +194,9 @@ struct Builder<'a, 'm, 't> {
     /// validation of a node constructor that has no `[xsl:]validation` or
     /// `[xsl:]type` of its own.
     module_validation: Vec<Validation>,
+    /// Some node constructor of the stylesheet names `strict`, `lax` or a `type` (§19.2): a
+    /// transformation then makes its validator for the trees it builds (M4 plan D-12).
+    validates: std::cell::Cell<bool>,
     modules: &'m ModuleSet<'t>,
     catalogs: &'m CompileCatalogs<'a, 'm>,
     static_contexts: StaticContexts,
@@ -289,6 +292,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 .iter()
                 .map(attributes::module_default_validation)
                 .collect(),
+            validates: std::cell::Cell::new(false),
             modules,
             catalogs,
             static_contexts: StaticContexts::default(),
@@ -408,6 +412,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             principal_compat,
             schema: self.schema,
             final_validation: self.module_validation[self.modules.principal.0 as usize].clone(),
+            validates: self.validates.get(),
             strip_input_annotations: self.modules.strip_input_annotations,
         })
     }

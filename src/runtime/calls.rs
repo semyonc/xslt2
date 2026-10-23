@@ -10,7 +10,7 @@ use super::context::XsltContext;
 use super::{Frame, Transformation};
 use crate::error::{codes, XsltError};
 use crate::model::*;
-use crate::receiver::{Nav, SequenceCollector};
+use crate::receiver::Nav;
 
 /// How much of [`TransformOptions::max_recursion_depth`] one stylesheet-function
 /// call uses, where a template invocation uses 1.
@@ -103,7 +103,7 @@ impl<'a, 't> Transformation<'a, 't> {
         let cx = XsltContext::empty();
         // §10.3: "a sequence constructor that defines the value to be returned
         // by the function" — a sequence, not a tree.
-        let mut collector = SequenceCollector::new(&self.store);
+        let mut collector = self.collector();
         self.eval_body(&function.body, &mut frame, &cx, &mut collector)?;
         let value = XPathValue::from_sequence(collector.into_items());
         // > \[ERR XTTE0780\] If the `as` attribute is specified, then the result
