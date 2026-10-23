@@ -133,10 +133,8 @@ outermost one whose validation is not `preserve` decides: under `strip` (the def
 `xs:ID` attribute still identifies its element for `id()`), under `preserve` a new element is `xs:anyType` and what
 it contains keeps its annotations, under `strict` the validation's annotations stand. A variable's temporary tree is a
 `preserve` document (typed nodes sequenced into it keep their annotations, nilled and ids), and `default-validation`
-applies per module and, for the principal module, to the implicit final result tree. Not there yet, upstream: the
-embedded `xml.xsd` is the 2001 edition (no `xml:id` declaration, no empty `xml:lang`), proposed Wave B item C71; the
-default value of a **local** attribute declaration is not created (only those of global declarations are reported by
-the validator), proposed C74.
+applies per module and, for the principal module, to the implicit final result tree. Upstream items it needed —
+the current `xml.xsd` (C71) and the defaults of local attribute declarations (C74) — are fixed on `wave-b` `cfe061e`.
 
 Not implemented yet, each raising `XSLT2-NOTIMPL` naming the sub-milestone (`../../xslt_doc/M4_PLAN.md` §4) when the
 construct is **evaluated** — a stylesheet that never reaches one runs: `preserve` / `strict` on copies and document

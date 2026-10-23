@@ -366,10 +366,10 @@ separator; element-only content FOTY0012) — as an existing node sequenced into
 as through `select`) and a parentless attribute `xsl:attribute` validated (its type's value), while a copy contributes
 its string value (untyped); any item that is not a text node separates the text around it, even one that atomizes to
 nothing (a nilled element, an empty list); an `xsl:message`'s document is built through `Validating` too (decision
-D-d11 reversed in the fix round). Known upstream limits: the
-embedded `xml.xsd` is the 2001 edition (no `xml:id`, no empty `xml:lang`) — `attribute-1501`, `-1504`, proposed C71;
-`get_default_attributes` reports only defaults of global attribute declarations (a local one's default is not
-created), proposed C74. Harness: an `assert` over a primary result tree that has type annotations is evaluated on the
+D-d11 reversed in the fix round). Fixed upstream on `wave-b` `cfe061e` (batch (s)): the embedded `xml.xsd` is the
+current W3C edition (`xml:id`, an empty `xml:lang` — `attribute-1501`, `-1504`, C71), and `get_default_attributes` reports
+every defaulted attribute with its type (`DefaultAttribute::type_key`; local declarations, groups, inherited uses, C74).
+Harness: an `assert` over a primary result tree that has type annotations is evaluated on the
 tree itself while it exists (`engine.rs` → `compare::typed_asserts`, `ResultDocument::typed_asserts`; the catalog
 evaluates `assert` "with the document node of the result document as the context item"). Cost (release, 10,000 rows
 of three typed children, transform only, median of 7): no validation 23 ms, `strict` on the whole table 60–61 ms, on
@@ -400,9 +400,10 @@ transform only): name patterns 55–76 ms; 200 `element(eᵢ, tᵢ)` 69–75 ms 
 independent of the rule count); one `schema-element(h)` over a 200-member group 85–89 ms; 200 `element(*, tᵢ)`
 1.9 s (~95 ns per node and rule, linear in both; 1.2 s with `tᵢ?` — upstream reads the nilled property by computing
 the typed value, proposed P21), against 3.0–3.6 s for the same rules written `*[self::eᵢ]` / `*[. instance of
-element(*, tᵢ)]`. Known upstream limit: derives-from counts a member type of a union as derived from the union
-(Structures' *Type Derivation OK (Simple)* clause 2.2.4, not XPath 2.0 §2.5.4's restriction / extension), so
-`element(*, U)` matches an element typed by a member of `U` — `match-197`, proposed C68. Not done: `document-node(E)`
+element(*, tᵢ)]`. Fixed upstream on `wave-b` `cfe061e` (C69): XPath's derives-from no longer counts a member type of a union as
+derived from the union (XPath 2.0 §2.5.4: restriction / extension only; Structures' *Type Derivation OK (Simple)*
+clause 2.2.4 stays validation's rule), so `element(*, U)` no longer matches an element typed by a member of `U` —
+`match-197` passes. Not done: `document-node(E)`
 in a pattern tests the first element child only (XPath §2.5.4.2: exactly one element, besides comments and PIs) —
 pre-existing, also untyped; `instance of` is right. Schema-aware run on `66e3e3f`: 6,017 of 6,355, profile 274 of 579.
 

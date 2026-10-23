@@ -856,13 +856,13 @@ impl<'v, 't> Validating<'v, 't> {
                 } else {
                     self.prefix_for(&uri)
                 };
-                let type_key = set.arenas.attributes[default.attribute_key]
-                    .resolved_type
+                let type_key = default
+                    .type_key
                     .unwrap_or_else(|| TypeKey::Simple(set.builtin_types().any_simple_type));
                 let mut infos: Vec<Option<SchemaInfo>> = (0..runs).map(|_| None).collect();
                 infos[index] = Some(SchemaInfo {
                     schema_type: Some(type_key),
-                    attribute_decl: Some(default.attribute_key),
+                    attribute_decl: default.attribute_key,
                     validity: SchemaValidity::Valid,
                     is_default: true,
                     ..SchemaInfo::empty()

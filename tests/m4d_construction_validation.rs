@@ -711,23 +711,38 @@ fn xml_namespace_attributes_validate_strictly() {
         .code,
         codes::XTTE1510
     );
-    // C71: no declaration of xml:id (the 2009 edition has one: XTTE1510 for an invalid value),
-    // and an empty xml:lang is not an xs:language (the 2009 edition allows it).
+    // The embedded schema for the XML namespace is the current W3C edition (upstream C71,
+    // `wave-b` `cfe061e`): it declares xml:id (an xs:ID, so an invalid value is XTTE1510) and
+    // allows an empty xml:lang.
     assert_eq!(
-        error(
-            import,
-            r#"<xsl:attribute name="xml:id" validation="strict">x1</xsl:attribute>"#
-        )
-        .code,
-        codes::XTTE1512
+        out(
+            &format!(
+                r#"{import}{}"#,
+                parentless(
+                    r#"<xsl:attribute name="xml:id" validation="strict">x1</xsl:attribute>"#
+                )
+            ),
+            "$a instance of schema-attribute(xml:id), data($a) instance of xs:ID"
+        ),
+        "true true"
     );
     assert_eq!(
         error(
             import,
-            r#"<xsl:attribute name="xml:lang" validation="strict" select="''"/>"#
+            r#"<xsl:attribute name="xml:id" validation="strict">1x</xsl:attribute>"#
         )
         .code,
         codes::XTTE1510
+    );
+    assert_eq!(
+        out(
+            &format!(
+                r#"{import}{}"#,
+                parentless(r#"<xsl:attribute name="xml:lang" validation="strict" select="''"/>"#)
+            ),
+            "$a instance of schema-attribute(xml:lang)"
+        ),
+        "true"
     );
 }
 
@@ -901,10 +916,9 @@ fn the_innermost_failure_is_reported_first() {
 /// §19.2.1.3: "If default values for elements or attributes are defined in the schema, the
 /// validation process will where necessary create new nodes containing these default values."
 ///
-/// The defaulted attributes come from upstream's `get_default_attributes`, which reports only the
-/// attribute uses that refer to a global declaration (it returns the declaration's key): the
-/// default of a **local** declaration (`dflt`) is not created — the line marked C74 pins that
-/// (proposed upstream item C74) and changes when it lands.
+/// The defaulted attributes come from upstream's `get_default_attributes`, which reports every
+/// defaulted attribute use with its type since `wave-b` `cfe061e` (upstream C74): the default of a
+/// **local** declaration (`dflt`) is created too.
 #[test]
 fn validation_creates_defaulted_attributes_and_element_values() {
     assert_eq!(
@@ -914,10 +928,13 @@ fn validation_creates_defaulted_attributes_and_element_values() {
         ),
         "g true"
     );
-    // C74: the local `dflt` is missing (it should be "abc").
+    // The local `dflt` (upstream C74).
     assert_eq!(
-        tree(r#"<d:x xsl:validation="strict"/>"#, "count($t/d:x/@dflt)"),
-        "0"
+        tree(
+            r#"<d:x xsl:validation="strict"/>"#,
+            "count($t/d:x/@dflt), string($t/d:x/@dflt)"
+        ),
+        "1 abc"
     );
     assert_eq!(
         tree(
