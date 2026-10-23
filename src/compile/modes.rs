@@ -96,9 +96,16 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     }
 }
 
-/// Files one rule into the bucket its index key names (§8.5).
+/// Files one rule into the bucket its index key names (§8.5) — into several
+/// for `schema-element(N)`, one per name an element it matches can have.
 fn push_into(index: &mut ModeIndex, key: IndexKey, id: RuleId) {
     let bucket = match key {
+        IndexKey::Elements(names) => {
+            for name in names {
+                push_into(index, IndexKey::Element(name), id);
+            }
+            return;
+        }
         IndexKey::Element(name) => index.by_element.entry(name).or_default(),
         IndexKey::Attribute(name) => index.by_attribute.entry(name).or_default(),
         IndexKey::Namespace(uri) => index.by_namespace.entry(uri).or_default(),

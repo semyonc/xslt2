@@ -950,10 +950,11 @@ fn default_validation_is_the_default_of_its_own_module_only() {
     }
 }
 
-/// Typed patterns are M4c's (M4_PLAN §4 M4c): the fence names it, in a schema-aware stylesheet as in a
-/// basic one.
+/// Typed patterns were M4c's fence (M4_PLAN §4 M4c) until M4c implemented them: a stylesheet with one
+/// compiles against the imported types and declarations and runs (`tests/m4c_typed_patterns.rs` checks
+/// what they match).
 #[test]
-fn a_typed_pattern_is_fenced_with_m4c() {
+fn a_typed_pattern_compiles_against_the_imported_schema() {
     for pattern in [
         "element(*, h:hatType)",
         "schema-element(h:hat)",
@@ -963,11 +964,8 @@ fn a_typed_pattern_is_fenced_with_m4c() {
             r#"{IMPORT_HATS}<xsl:template match="{pattern}"/>{}"#,
             root_template("<out/>")
         ));
-        assert_eq!(
-            fenced(run_sa(&main, &hat_files())),
-            (Stage::Compile, "M4c".to_string()),
-            "{pattern}"
-        );
+        let result = run_sa(&main, &hat_files()).unwrap_or_else(|e| panic!("{pattern}: {e:?}"));
+        assert!(result.ends_with("<out/>"), "{pattern}: {result}");
     }
 }
 

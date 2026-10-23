@@ -28,7 +28,7 @@ PSVI, `BufferDocument`). Separate git repository.
 | `src/resolver.rs` | `Resolver` (file, in-memory), URI arithmetic, non-UTF-8 decoding; `syntax_normalized` (RFC 3986 §6.2.2 after `iri-to-uri` escaping — the form result URIs are compared in, XTDE1490); dot segments: RFC 3986 §5.2.4's two-buffer algorithm transcribed under a scheme (`example:a/../c` → `example:/c`), a segment stack keeping a relative path relative without one (`a/../c` → `c`, `../a` kept) |
 | `src/stylesheet.rs` | §3.10 module graph, import precedence, §5.4.1 lexical static contexts, §4.2 whitespace |
 | `src/model.rs` | The `Instruction` tree (§7.4), declaration tables (§7.3), `CompiledStylesheet` |
-| `src/pattern.rs` | Pattern grammar (§5.5.2), the §6.4 default priorities, the dispatch-index key |
+| `src/pattern.rs` | Pattern grammar (§5.5.2), the §6.4 default priorities, the dispatch-index key; the typed node tests (M4c) — `element(N\|*, T[?])`, `attribute(N\|*, T)`, `schema-element(N)`, `schema-attribute(N)`, inside `document-node(…)` too — carry `xsd-schema`'s resolved `ItemType`, which the compiler's `PatternSink::type_test` / `schema_test` build (`compile/patterns.rs`) |
 | `src/compile/checks.rs` | The **static-checking table**: one `ElementSpec` row per XSLT 2.0 element (category, required/optional attributes, AVTs, content model) transcribed from the spec's syntax summaries, and the single pass that validates a module against it before compilation. A new element = a new row here |
 | `src/compile/` | `Compiler`: modules → declarations and instructions. `mod.rs` (builder core), `declarations`, `decimal_format` (`xsl:decimal-format`), `output` (`xsl:output`, `xsl:character-map`), `instructions`, `literal`, `expressions`, `avt`, `patterns`, `modes`, `attributes`, `tree`, `functions` (`xsl:function`), `keys` (`xsl:key`), `grouping` (`xsl:for-each-group`), `analyze` (`xsl:analyze-string`), `result_document` (`xsl:result-document`: written attribute values, the static XTDE1460 / XTSE1590), `number` (`xsl:number`: XTSE0975, `level`, the `count` / `from` patterns, the conversion attributes — fixed values checked here, XTSE0020). Walk stylesheet children **only** through `Module::children()` / `Builder::children()` — it applies §3.12 `use-when` exclusion by construction |
 | `src/runtime/` | `Transformation`: `mod.rs` (entry points), `context` (§5.4; the §19.1 output state is `XsltContext::final_output`: only the initial context is final, `empty()` contexts are temporary, and the listed constructs clear it for their content), `dispatch` (§6), `patterns`, `eval` (instructions), `content`, `variables`, `documents` (loading, §4.4 admission, the admission of host-built typed trees and typed parameters), `typed_sources` (M4b: a source validated as it is parsed, in one pass — `xsd-schema`'s `TypedBuilderHandler` inside this crate's `SourceBuild` handler, which drops the whitespace text of element-only content as XDM 1.0 §6.7.4 says; this crate's sink; one `SchemaValidator` per run, identity constraints on; the typed admission copy for §4.3 `input-type-annotations="strip"` (is-id kept by re-registering ids) and §4.4 with the simple-content exemption), `functions` (the §16 evaluator), `format` (§16.4 / §16.5 glue: the function conversion rules for `$value`, `$picture`, `$language`, `$calendar`, `$country`; the decimal-format name → XTDE1280; `$calendar` expanded with no default namespace, format-date-037), `expressions`, `serialize` (a result tree through `src/serialize/`), `sort` (`xsl:sort`, `xsl:perform-sort`), `calls` (stylesheet functions), `keys` (key indexes), `grouping` (`xsl:for-each-group`), `analyze` (`xsl:analyze-string`, the run's regex cache), `results` (`xsl:result-document`, the base output URI, XTDE1480 / XTDE1490, the §2.4 primary result; `SecondaryResult`), `number` (`xsl:number`: §12.1 `value` with the backwards-compatible NaN rule, XTDE0980; §12.2 the place marker of a node — single / multiple / any, the implied count pattern, walks only up and forward because the navigator's previous-sibling move scans from the first child; XTTE0990 / XTTE1000; XTDE0030 for computed conversion attributes; the nodes before $S are counted by a `Walk` — the tree in document order for `any`, a parent's children for `single` / `multiple` — that counts every implied pattern at once without `count` (`Census`, by node kind and expanded name), keeps an index of the numbers it gave once a node before its frontier is asked for (`Index`), and is kept per instruction (`NumberMemo`; `Walks`, by owner: every tree and every parent — a walk past 32 nodes always, the shorter ones until more than 1,024 walks are kept) while the local variables the patterns read keep their values (`Stability`, compared exactly: nodes by identity, strings / booleans / integers / doubles by type and bits) — numbering is linear in the nodes walked and the evaluations, in any order, over any number of names, namespaces, trees and parents; a pattern calling a stylesheet function counts afresh every time, see "`xsl:number` cost" below) |
@@ -54,7 +54,7 @@ cargo test                         # unit tests + every tests/*.rs except the W3
                                    # + fn_error + m2b_namespaces + m2c_static_checks + m3a_serialization + m3a_review + m3a_review2
                                    # + m3b_result_documents + m3b_review + m3b_review2 + m3c_numbering + m3c_followup
                                    # + m3d_formatting + m3e_compat + m4a_schema_loading + m4a_review
-                                   # + m4b_typed_sources + m4b_review
+                                   # + m4b_typed_sources + m4b_review + m4c_typed_patterns
                                    # (tests/common/mod.rs: `common::body` drops the default XML
                                    # declaration for the tests written before M3a)
                                    # (the W3C harness skips itself in a debug build)
@@ -262,8 +262,8 @@ the value is read into `model::Validation` on every node constructor (the module
 absent one) and **fenced at evaluation** (`runtime/eval.rs` `validation_fence`, `Validation::owner`): anything but
 `strip` is `XSLT2-NOTIMPL` naming M4d (constructed elements and attributes, `type` on `xsl:attribute`), M4e (copies,
 `xsl:document`, `xsl:result-document`, the implicit final result tree under the principal module's
-`default-validation="preserve"`) or M4f (`type` elsewhere, `lax`); typed patterns with M4c (when the pattern
-**compiles**: a stylesheet with one does not compile). A stylesheet function with the name and arity 1 of a user
+`default-validation="preserve"`) or M4f (`type` elsewhere, `lax`). (Typed patterns were fenced with M4c when the
+pattern compiled, until M4c.) A stylesheet function with the name and arity 1 of a user
 atomic type's constructor function is XTSE0770, whatever `override` says (decision D-A, `compile/functions.rs`); one
 in the XML Schema namespace is XTSE0080 (§3.2). (The upstream limits M4a met — QName / NOTATION enumerations compared
 by lexical form, C33; a restriction of an enumerated type losing the enumeration, C44 — are fixed on `wave-b`
@@ -306,6 +306,34 @@ records, `load_document_with`, median of 5, on `wave-b` `66e3e3f`): untyped 45 m
 126–130 ms (40 MB/s, ×2.8; the normalized string values of C66 cost about 3 %, the PSVI typed values left off save
 about 10 %); with `xsl:strip-space` 124 ms untyped / 154–156 ms typed; validated under
 `input-type-annotations="strip"` 153–158 ms. Schema-aware run on `66e3e3f`: 5,960 of 6,355, profile 217 of 579.
+
+**Typed patterns** (M4c; M4 plan D-1, D-13; `tests/m4c_typed_patterns.rs`). A pattern step may use `element(*, T)`,
+`element(N, T)`, `element(N, T?)`, `attribute(*, T)`, `attribute(N, T)`, `schema-element(N)`, `schema-attribute(N)`
+and `document-node(…)` around an element test, in every pattern (`match` of templates and keys, `xsl:number count` /
+`from`, `group-starting-with` / `-ending-with`). The whole pattern is compiled as an XPath expression first, so the
+binder's XPST0008 (an undeclared TypeName or schema-test name, upstream C10) comes before the pattern is read; then
+`pattern::parse` asks its `PatternSink` for the resolved test (`type_test` / `schema_test`, `compile/patterns.rs`):
+a TypeName in the XML Schema namespace is `TypeTest::Untyped` or `BuiltIn(code)`, any other the set's `TypeKey`, names
+interned in the stylesheet's name table (the set's own, D-1) — the binder's own resolution rule. **Matching is
+`xsd-schema`'s** (`ItemType::matches_item` in `CompiledStylesheet::match_context`, the matcher `instance of` runs):
+derives-from over the annotation (none = `xs:untyped` / `xs:untypedAtomic`), the nilled rule (`T?`; for
+`schema-element` the declaration's `nillable`), the substitution group; this crate decides only axis and node kind
+(`runtime/patterns.rs` `node_test_matches`) — no derivation code here. §6.4: `element(*,T)` / `attribute(*,T)` 0,
+the named forms and `schema-element` / `schema-attribute` 0.25, `?` ignored, `document-node(E)` = `E`'s. Dispatch
+index (DESIGN §8.5): `element(N,T)` under `N`, `attribute(N,T)` / `schema-attribute(N)` under `N`, `element(*,T)` /
+`attribute(*,T)` in `other` (tried for every node, like `*[…]`), **`schema-element(N)` under `N` and every global
+element declaration in its substitution group, transitively** (`IndexKey::Elements`; the member list is computed at
+compile time from the set's public tables — `namespaces[ns].elements`, `resolved_substitution_groups` — and only
+selects candidates; upstream still decides). Cost (release, 100,000 validated elements of 200 names, median of 5,
+transform only): name patterns 55–76 ms; 200 `element(eᵢ, tᵢ)` 69–75 ms and 200 `schema-element(eᵢ)` 74–91 ms (keyed,
+independent of the rule count); one `schema-element(h)` over a 200-member group 85–89 ms; 200 `element(*, tᵢ)`
+1.9 s (~95 ns per node and rule, linear in both; 1.2 s with `tᵢ?` — upstream reads the nilled property by computing
+the typed value, proposed P21), against 3.0–3.6 s for the same rules written `*[self::eᵢ]` / `*[. instance of
+element(*, tᵢ)]`. Known upstream limit: derives-from counts a member type of a union as derived from the union
+(Structures' *Type Derivation OK (Simple)* clause 2.2.4, not XPath 2.0 §2.5.4's restriction / extension), so
+`element(*, U)` matches an element typed by a member of `U` — `match-197`, proposed C68. Not done: `document-node(E)`
+in a pattern tests the first element child only (XPath §2.5.4.2: exactly one element, besides comments and PIs) —
+pre-existing, also untyped; `instance of` is right. Schema-aware run on `66e3e3f`: 6,017 of 6,355, profile 274 of 579.
 
 ## The `regexml` engine
 

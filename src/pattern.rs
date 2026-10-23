@@ -13,9 +13,11 @@
 
 use std::borrow::Cow;
 
+use xsd_schema::types::ItemType;
+
 use crate::error::{codes, XsltError};
 use crate::model::ExprId;
-use crate::names::{is_ncname, split_qname, QName, XSD_NS};
+use crate::names::{is_ncname, split_qname, QName};
 use crate::whitespace;
 
 /// A compiled pattern: one or more alternatives, each an independent rule for
@@ -127,80 +129,46 @@ pub enum NodeTest {
     Element(Option<QName>),
     /// `attribute()` / `attribute(a)`
     Attribute(Option<QName>),
-    /// `element(*, T)` / `element(a, T)` where `T` is one of the two type names
-    /// a processor **without a schema** can still decide: `xs:untyped` and
-    /// `xs:anyType`.
+    /// `element(*, T)`, `element(N, T)` and `element(N, T?)` — an `ElementTest`
+    /// with a TypeName (XPath 2.0 §2.5.4.3):
     ///
-    /// The two do not decide the same way, which is what `untyped_only`
-    /// records. XPath 2.0 §2.5.4.3 says an `ElementTest` with a TypeName
-    /// matches an element "if … derives from the type named by the TypeName",
-    /// so:
+    /// > `element(ElementName, TypeName)` matches an element node whose name is
+    /// > ElementName if derives-from(AT, TypeName ) is true, where AT is the
+    /// > type annotation of the element node, and the nilled property of the
+    /// > node is false.
     ///
-    /// * `element(N, xs:untyped)` matches only an element whose type annotation
-    ///   *is* `xs:untyped` — i.e. one that has not been schema-validated.
-    ///   `untyped_only` is `true` and the annotation is tested.
-    /// * `element(N, xs:anyType)` matches any element whatever, because every
-    ///   type — `xs:untyped` included — derives from `xs:anyType`.
-    ///   `untyped_only` is `false` and only the name is tested.
-    ///
-    /// §4.3 is why the first is usually indistinguishable from `element(N)`:
-    /// with no schema the source is read "as if no schema processing had been
-    /// performed, that is, effectively to strip all type annotations from
-    /// elements and attributes on input, marking them instead as having type
-    /// `xs:untyped` and `xs:untypedAtomic` respectively". But a *prebuilt*
-    /// document handed to [`DocumentStore::insert`](crate::store::DocumentStore::insert)
-    /// can carry real annotations, and then the two spellings part company.
-    ///
-    /// §6.4 gives the two-argument form a higher default priority than the
-    /// one-argument form in both spellings; `untyped_only` does not affect it.
-    TypedElement {
-        name: Option<QName>,
-        untyped_only: bool,
+    /// and with `TypeName ?` "The nilled property of the node may be either
+    /// true or false". `name` is the expanded ElementName (`None` for `*`),
+    /// kept for the dispatch index and §6.4's priority; `test` is the same
+    /// test as `xsd-schema` resolves it — names interned in the stylesheet's
+    /// name table, the type a [`TypeTest`](xsd_schema::types::TypeTest) of
+    /// the in-scope schema types — and is what decides a match
+    /// (`ItemType::matches_item`), so a pattern and an `instance of` agree on
+    /// every node, typed or untyped (M4 plan D-13).
+    TypedElement { name: Option<QName>, test: ItemType },
+    /// `attribute(*, T)` and `attribute(N, T)` — an `AttributeTest` with a
+    /// TypeName (XPath 2.0 §2.5.4.5): "matches an attribute node whose name is
+    /// AttributeName if derives-from(AT, TypeName ) is true". As
+    /// [`NodeTest::TypedElement`]; an attribute has no nilled property.
+    TypedAttribute { name: Option<QName>, test: ItemType },
+    /// `schema-element(N)` (XPath 2.0 §2.5.4.4): the candidate's name is `N` or
+    /// "the name of an element in a substitution group headed by an element
+    /// named ElementName", its annotation derives from the type `N` is
+    /// declared with, and it is not nilled unless that declaration is
+    /// nillable. `members` are the expanded names of the other global element
+    /// declarations in `N`'s substitution group, transitively — the names the
+    /// dispatch index files the rule under besides `N` (DESIGN §8.5), so that
+    /// a name-keyed bucket cannot miss a member; `test` decides the match.
+    SchemaElement {
+        name: QName,
+        members: Vec<QName>,
+        test: ItemType,
     },
-    /// `attribute(*, T)` / `attribute(a, T)` for `T` in `xs:untypedAtomic`,
-    /// `xs:anySimpleType`, `xs:anyAtomicType` — see [`NodeTest::TypedElement`].
-    ///
-    /// `untyped_only` is `true` only for `xs:untypedAtomic`; the other two are
-    /// supertypes of every attribute type there is.
-    TypedAttribute {
-        name: Option<QName>,
-        untyped_only: bool,
-    },
+    /// `schema-attribute(N)` (XPath 2.0 §2.5.4.6): the candidate's name is `N`
+    /// and its annotation derives from the type `N` is declared with.
+    SchemaAttribute { name: QName, test: ItemType },
     /// `document-node()` / `document-node(element(a))`
     DocumentNode(Option<Box<NodeTest>>),
-}
-
-/// Whether an `ElementTest`'s type name is one a processor with no schema can
-/// decide, and if so whether deciding it means testing the annotation.
-///
-/// `Some(true)` — `xs:untyped`, the annotation an unvalidated element carries,
-/// so the test holds only for an element that has none.
-/// `Some(false)` — `xs:anyType`, which every element type derives from
-/// (`xs:untyped` included), so the test holds for every element.
-/// `None` — any other type name, which needs a schema (typed patterns, M4c).
-fn universal_element_type(uri: &str, local: &str) -> Option<bool> {
-    if uri != XSD_NS {
-        return None;
-    }
-    match local {
-        "untyped" => Some(true),
-        "anyType" => Some(false),
-        _ => None,
-    }
-}
-
-/// The attribute counterpart: `xs:untypedAtomic` is the annotation an
-/// unvalidated attribute carries, and `xs:anySimpleType` and `xs:anyAtomicType`
-/// are supertypes of every attribute type, `xs:untypedAtomic` included.
-fn universal_attribute_type(uri: &str, local: &str) -> Option<bool> {
-    if uri != XSD_NS {
-        return None;
-    }
-    match local {
-        "untypedAtomic" => Some(true),
-        "anySimpleType" | "anyAtomicType" => Some(false),
-        _ => None,
-    }
 }
 
 impl NodeTest {
@@ -217,7 +185,9 @@ impl NodeTest {
     /// > | `attribute(A)` | 0 | (equivalent to `@A`) |
     /// > | `attribute(*, T)` | 0 | (matches by type only) |
     /// > | `element(E, T)` | 0.25 | (matches by name and type) |
+    /// > | `schema-element(E)` | 0.25 | (matches by substitution group and type) |
     /// > | `attribute(A, T)` | 0.25 | (matches by name and type) |
+    /// > | `schema-attribute(A)` | 0.25 | (matches by name and type) |
     ///
     /// > The presence or absence of the symbol `?` following a type name does
     /// > not affect the priority.
@@ -231,12 +201,18 @@ impl NodeTest {
             // "element(*, T)", "attribute(*, T)" — "matches by type only".
             NodeTest::TypedElement { name: None, .. }
             | NodeTest::TypedAttribute { name: None, .. } => 0.0,
-            // "element(E, T)", "attribute(A, T)" — "matches by name and type".
+            // "element(E, T)", "attribute(A, T)" — "matches by name and type";
+            // "schema-element(E)" — "matches by substitution group and type";
+            // "schema-attribute(A)" — "matches by name and type".
             NodeTest::TypedElement { name: Some(_), .. }
-            | NodeTest::TypedAttribute { name: Some(_), .. } => 0.25,
+            | NodeTest::TypedAttribute { name: Some(_), .. }
+            | NodeTest::SchemaElement { .. }
+            | NodeTest::SchemaAttribute { .. } => 0.25,
             // "NCName:*" and "*:NCName".
             NodeTest::NsWildcard(_) | NodeTest::LocalWildcard(_) => -0.25,
-            // "document-node(ElementTest)" takes the priority of the test.
+            // "If it does include an ElementTest or SchemaElementTest, then the
+            // priority is the same as the priority of that ElementTest or
+            // SchemaElementTest".
             NodeTest::DocumentNode(Some(inner)) => inner.priority(),
             // Everything else: "*", "node()", "text()", "comment()",
             // "processing-instruction()", "element()", "attribute()",
@@ -275,6 +251,12 @@ impl PathPattern {
 
     /// The bucket of the dispatch index (§8.5) this rule belongs in, taken
     /// from its last step.
+    ///
+    /// A test that matches by type only — `element(*, T)`, `attribute(*, T)` —
+    /// has no name to be filed under and goes with the other name-less tests
+    /// (`IndexKey::Other`, consulted for every node). `schema-element(N)` is
+    /// filed under `N` and under every member of `N`'s substitution group
+    /// (XPath 2.0 §2.5.4.4), the only names an element it matches can have.
     pub fn index_key(&self) -> IndexKey {
         let Some(last) = self.steps.first() else {
             return IndexKey::Other;
@@ -285,9 +267,18 @@ impl PathPattern {
             (NodeTest::Element(Some(q)) | NodeTest::TypedElement { name: Some(q), .. }, _) => {
                 IndexKey::Element(q.clone())
             }
-            (NodeTest::Attribute(Some(q)) | NodeTest::TypedAttribute { name: Some(q), .. }, _) => {
-                IndexKey::Attribute(q.clone())
+            (NodeTest::SchemaElement { name, members, .. }, _) => {
+                let mut names = Vec::with_capacity(members.len() + 1);
+                names.push(name.clone());
+                names.extend(members.iter().cloned());
+                IndexKey::Elements(names)
             }
+            (
+                NodeTest::Attribute(Some(q))
+                | NodeTest::TypedAttribute { name: Some(q), .. }
+                | NodeTest::SchemaAttribute { name: q, .. },
+                _,
+            ) => IndexKey::Attribute(q.clone()),
             (NodeTest::NsWildcard(uri), PatternAxis::Child) => IndexKey::Namespace(uri.clone()),
             (NodeTest::LocalWildcard(local), PatternAxis::Child) => IndexKey::Local(local.clone()),
             _ => IndexKey::Other,
@@ -298,6 +289,9 @@ impl PathPattern {
 /// Which bucket of a [`ModeIndex`](crate::model::ModeIndex) a rule goes into.
 pub enum IndexKey {
     Element(QName),
+    /// Every one of these element names (`schema-element(N)`: `N` and the
+    /// members of its substitution group).
+    Elements(Vec<QName>),
     Attribute(QName),
     Namespace(String),
     Local(String),
@@ -307,14 +301,51 @@ pub enum IndexKey {
 // ── Parsing ──────────────────────────────────────────────────────────────
 
 /// What the compiler must supply while a pattern is being read: prefix
-/// resolution, the default element namespace, and a way to compile a
-/// predicate's text into an expression.
+/// resolution, the default element namespace, a way to compile a predicate's
+/// text into an expression, and the in-scope schema components a typed node
+/// test names.
 pub trait PatternSink {
     /// Resolves a namespace prefix; `""` asks for the default namespace for
     /// element names (`[xsl:]xpath-default-namespace`).
     fn resolve_prefix(&self, prefix: &str) -> Option<String>;
     /// Compiles a predicate's source text.
     fn compile_predicate(&mut self, source: &str) -> Result<ExprId, XsltError>;
+    /// The test `element(name, type_name)` (`nillable`: `type_name?`) or
+    /// `attribute(name, type_name)` — `name` `None` for `*` — against the
+    /// in-scope schema types (§3.13). A type name that is not one of them is
+    /// XPST0008 (XPath 2.0 §2.5.4.3, §2.5.4.5: "TypeName must be present in
+    /// the in-scope schema types").
+    fn type_test(
+        &self,
+        kind: TestKind,
+        name: Option<&QName>,
+        type_name: &QName,
+        nillable: bool,
+    ) -> Result<ItemType, XsltError>;
+    /// The test `schema-element(name)` / `schema-attribute(name)` against the
+    /// in-scope element / attribute declarations, with the names of the other
+    /// members of an element's substitution group. A name that is not
+    /// declared is XPST0008 (XPath 2.0 §2.5.4.4, §2.5.4.6).
+    fn schema_test(&self, kind: TestKind, name: &QName) -> Result<SchemaTest, XsltError>;
+}
+
+/// Whether a typed node test is about elements or attributes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TestKind {
+    Element,
+    Attribute,
+}
+
+/// What [`PatternSink::schema_test`] resolves `schema-element(N)` /
+/// `schema-attribute(N)` to.
+#[derive(Clone, Debug)]
+pub struct SchemaTest {
+    /// The test that decides a match.
+    pub test: ItemType,
+    /// For `schema-element(N)`: the expanded names of the global element
+    /// declarations in `N`'s substitution group other than `N`, at any depth;
+    /// empty for `schema-attribute(N)`.
+    pub members: Vec<QName>,
 }
 
 /// Parses `source` into a [`Pattern`].
@@ -932,51 +963,16 @@ fn parse_kind_test(
             }
         }
         "element" | "attribute" => {
-            let is_element = kind == "element";
-            let axis = if is_element {
-                PatternAxis::Child
+            let (test_kind, axis) = if kind == "element" {
+                (TestKind::Element, PatternAxis::Child)
             } else {
-                PatternAxis::Attribute
+                (TestKind::Attribute, PatternAxis::Attribute)
             };
-            // `element(N, T)` / `attribute(N, T)`: a processor with no schema
-            // can decide the type part only for the handful of type names
-            // whose answer does not depend on one — `xs:untyped` and
-            // `xs:untypedAtomic`, which say the node was never validated, and
-            // their supertypes, which every node satisfies.
             let (arg, type_name) = match arg.split_once(',') {
                 Some((name, type_name)) => {
                     (whitespace::trim(name), Some(whitespace::trim(type_name)))
                 }
                 None => (arg, None),
-            };
-            let untyped_only = match type_name {
-                None => None,
-                Some(type_name) => {
-                    // §6.4: "The presence or absence of the symbol `?`
-                    // following a type name does not affect the priority"; nor,
-                    // with no schema, does nillability affect what matches.
-                    let type_name = whitespace::trim(type_name.trim_end_matches('?'));
-                    let (prefix, local) = split_qname(type_name);
-                    let uri = sink.resolve_prefix(prefix).unwrap_or_default();
-                    let decided = if is_element {
-                        universal_element_type(&uri, local)
-                    } else {
-                        universal_attribute_type(&uri, local)
-                    };
-                    match decided {
-                        Some(untyped_only) => Some(untyped_only),
-                        // Every other type name needs a schema: typed patterns
-                        // are M4c's (M4_PLAN §4).
-                        None => {
-                            return Err(XsltError::not_implemented(
-                                format!(
-                                    "the typed node test {kind}({arg}, {type_name}) in a pattern"
-                                ),
-                                "M4c",
-                            ))
-                        }
-                    }
-                }
             };
             let name = match arg {
                 "" | "*" => None,
@@ -985,11 +981,30 @@ fn parse_kind_test(
                     Some(expand(prefix, local, axis, source, sink)?)
                 }
             };
-            Ok(match (is_element, untyped_only) {
-                (true, None) => NodeTest::Element(name),
-                (true, Some(untyped_only)) => NodeTest::TypedElement { name, untyped_only },
-                (false, None) => NodeTest::Attribute(name),
-                (false, Some(untyped_only)) => NodeTest::TypedAttribute { name, untyped_only },
+            let Some(type_name) = type_name else {
+                return Ok(match test_kind {
+                    TestKind::Element => NodeTest::Element(name),
+                    TestKind::Attribute => NodeTest::Attribute(name),
+                });
+            };
+            // XPath 2.0 §2.5.4.3: `element(ElementName, TypeName ?)` — the `?`
+            // is a terminal of its own, so whitespace may precede it (A.2.4.1).
+            // An AttributeTest has no `?` (§2.5.4.5), and the XPath parser has
+            // already rejected one there.
+            let (type_name, nillable) = match type_name.strip_suffix('?') {
+                Some(type_name) => (whitespace::trim(type_name), true),
+                None => (type_name, false),
+            };
+            // §2.5.4: "QNames appearing in a sequence type have their prefixes
+            // expanded … by means of the statically known namespaces and
+            // (where applicable) the default element/type namespace" — a
+            // TypeName is an element/type name, so `expand` on the child axis.
+            let (prefix, local) = split_qname(type_name);
+            let type_name = expand(prefix, local, PatternAxis::Child, source, sink)?;
+            let test = sink.type_test(test_kind, name.as_ref(), &type_name, nillable)?;
+            Ok(match test_kind {
+                TestKind::Element => NodeTest::TypedElement { name, test },
+                TestKind::Attribute => NodeTest::TypedAttribute { name, test },
             })
         }
         "document-node" => {
@@ -1001,19 +1016,42 @@ fn parse_kind_test(
                 // §6.4: "if it does include an ElementTest … the priority is
                 // the same as the priority of that ElementTest", which
                 // `NodeTest::priority` reads off the boxed test.
-                NodeTest::Element(_) | NodeTest::TypedElement { .. } => {
+                NodeTest::Element(_)
+                | NodeTest::TypedElement { .. }
+                | NodeTest::SchemaElement { .. } => {
                     Ok(NodeTest::DocumentNode(Some(Box::new(inner))))
                 }
                 _ => Err(bad_pattern(
                     source,
-                    "document-node() takes an ElementTest or nothing",
+                    "document-node() takes an ElementTest, a SchemaElementTest or nothing",
                 )),
             }
         }
-        "schema-element" | "schema-attribute" => Err(XsltError::not_implemented(
-            format!("the schema-aware node test {kind}({arg}) in a pattern"),
-            "M4c",
-        )),
+        // XPath 2.0 §2.5.4.4 / §2.5.4.6: `schema-element(ElementName)`,
+        // `schema-attribute(AttributeName)`. The name is expanded as a name test
+        // on the axis of its kind: an unprefixed ElementName takes the default
+        // element namespace, an unprefixed AttributeName none.
+        "schema-element" | "schema-attribute" => {
+            let (test_kind, axis) = if kind == "schema-element" {
+                (TestKind::Element, PatternAxis::Child)
+            } else {
+                (TestKind::Attribute, PatternAxis::Attribute)
+            };
+            let (prefix, local) = split_qname(arg);
+            if !is_ncname(local) || (!prefix.is_empty() && !is_ncname(prefix)) {
+                return Err(bad_pattern(source, format!("{kind}() takes a QName")));
+            }
+            let name = expand(prefix, local, axis, source, sink)?;
+            let SchemaTest { test, members } = sink.schema_test(test_kind, &name)?;
+            Ok(match test_kind {
+                TestKind::Element => NodeTest::SchemaElement {
+                    name,
+                    members,
+                    test,
+                },
+                TestKind::Attribute => NodeTest::SchemaAttribute { name, test },
+            })
+        }
         other => Err(bad_pattern(source, format!("{other}() is not a node test"))),
     }
 }
@@ -1077,12 +1115,32 @@ mod tests {
             match prefix {
                 "" => Some(String::new()),
                 "p" => Some("urn:p".to_string()),
+                "xs" => Some("http://www.w3.org/2001/XMLSchema".to_string()),
                 _ => None,
             }
         }
         fn compile_predicate(&mut self, source: &str) -> Result<ExprId, XsltError> {
             self.0.push(source.to_string());
             Ok(ExprId(self.0.len() as u32 - 1))
+        }
+        // The grammar and the priorities do not look at the resolved test.
+        fn type_test(
+            &self,
+            _kind: TestKind,
+            _name: Option<&QName>,
+            _type_name: &QName,
+            _nillable: bool,
+        ) -> Result<ItemType, XsltError> {
+            Ok(ItemType::AnyNode)
+        }
+        fn schema_test(&self, kind: TestKind, name: &QName) -> Result<SchemaTest, XsltError> {
+            Ok(SchemaTest {
+                test: ItemType::AnyNode,
+                members: match kind {
+                    TestKind::Element => vec![QName::new(name.uri.clone(), "member")],
+                    TestKind::Attribute => Vec::new(),
+                },
+            })
         }
     }
 
@@ -1168,6 +1226,111 @@ mod tests {
         }
     }
 
+    /// §6.4's table for the typed forms: `element(*,T)` / `attribute(*,T)` 0,
+    /// `element(E,T)`, `schema-element(E)`, `attribute(A,T)`,
+    /// `schema-attribute(A)` 0.25; "The presence or absence of the symbol ?
+    /// following a type name does not affect the priority"; a DocumentTest
+    /// takes the priority of its ElementTest or SchemaElementTest; with a
+    /// PatternAxis the same; with a predicate or a second step 0.5.
+    #[test]
+    fn the_default_priorities_of_typed_tests() {
+        let cases: &[(&str, f64)] = &[
+            ("element(*, xs:integer)", 0.0),
+            ("element(*, p:t)", 0.0),
+            ("element(*, p:t?)", 0.0),
+            ("element(a, p:t)", 0.25),
+            ("element(p:a, p:t ?)", 0.25),
+            ("child::element(a, p:t)", 0.25),
+            ("attribute(*, p:t)", 0.0),
+            ("@attribute(*, p:t)", 0.0),
+            ("attribute(a, p:t)", 0.25),
+            ("attribute::attribute(a, xs:string)", 0.25),
+            ("schema-element(p:a)", 0.25),
+            ("child::schema-element(a)", 0.25),
+            ("schema-attribute(p:a)", 0.25),
+            ("@schema-attribute(a)", 0.25),
+            ("document-node(element(*, p:t))", 0.0),
+            ("document-node(element(a, p:t?))", 0.25),
+            ("document-node(schema-element(p:a))", 0.25),
+            ("schema-element(p:a)[1]", 0.5),
+            ("a/element(*, p:t)", 0.5),
+            ("//schema-attribute(a)", 0.5),
+        ];
+        for (source, expected) in cases {
+            let (p, _) = parse_ok(source);
+            assert_eq!(
+                p.alternatives[0].priority, *expected,
+                "default priority of {source:?}"
+            );
+        }
+    }
+
+    /// XPath 2.0 §3.2.4: "the default axis is child unless the axis step
+    /// contains an AttributeTest or SchemaAttributeTest"; §2.5.4: an
+    /// unprefixed ElementName takes the default element namespace, an
+    /// unprefixed AttributeName none; the dispatch index files
+    /// `schema-element(N)` under N and its substitution-group members,
+    /// `element(*, T)` with the name-less tests.
+    #[test]
+    fn typed_tests_have_their_axis_names_and_index_keys() {
+        let (p, _) = parse_ok("schema-attribute(p:a)");
+        let step = &p.alternatives[0].steps[0];
+        assert_eq!(step.axis, PatternAxis::Attribute);
+        assert!(
+            matches!(&step.test, NodeTest::SchemaAttribute { name, .. } if *name == QName::new("urn:p", "a"))
+        );
+        assert!(
+            matches!(p.alternatives[0].index_key(), IndexKey::Attribute(q) if q == QName::new("urn:p", "a"))
+        );
+
+        let (p, _) = parse_ok("schema-element(p:a)");
+        assert_eq!(p.alternatives[0].steps[0].axis, PatternAxis::Child);
+        match p.alternatives[0].index_key() {
+            IndexKey::Elements(names) => assert_eq!(
+                names,
+                vec![QName::new("urn:p", "a"), QName::new("urn:p", "member")]
+            ),
+            _ => panic!("schema-element is filed under its names"),
+        }
+
+        let (p, _) = parse_ok("element(*, p:t?)");
+        assert!(matches!(
+            &p.alternatives[0].steps[0].test,
+            NodeTest::TypedElement { name: None, .. }
+        ));
+        assert!(matches!(p.alternatives[0].index_key(), IndexKey::Other));
+
+        let (p, _) = parse_ok("attribute(b, p:t) | element(b, p:t)");
+        assert_eq!(p.alternatives[0].steps[0].axis, PatternAxis::Attribute);
+        assert!(
+            matches!(p.alternatives[0].index_key(), IndexKey::Attribute(q) if q == QName::local("b"))
+        );
+        assert!(
+            matches!(p.alternatives[1].index_key(), IndexKey::Element(q) if q == QName::local("b"))
+        );
+
+        let (p, _) = parse_ok("document-node(schema-element(p:a))");
+        assert_eq!(p.alternatives[0].steps[0].axis, PatternAxis::SelfAxis);
+        assert!(matches!(p.alternatives[0].index_key(), IndexKey::Other));
+
+        let mut sink = Sink(Vec::new());
+        for bad in [
+            "schema-element(*)",
+            "schema-element()",
+            "schema-attribute(a b)",
+            "document-node(schema-attribute(a))",
+            "document-node(attribute(a, p:t))",
+        ] {
+            let e = parse(bad, &mut sink).unwrap_err();
+            assert_eq!(e.code, codes::XTSE0340, "{bad:?} should be XTSE0340: {e}");
+        }
+        // An unbound prefix in a TypeName or a schema test.
+        for bad in ["element(*, q:t)", "schema-element(q:a)"] {
+            let e = parse(bad, &mut sink).unwrap_err();
+            assert_eq!(e.code, codes::XTSE0280, "{bad:?}: {e}");
+        }
+    }
+
     #[test]
     fn name_tests_use_the_default_element_namespace_but_attributes_do_not() {
         struct Defaulting;
@@ -1180,6 +1343,21 @@ mod tests {
             }
             fn compile_predicate(&mut self, _source: &str) -> Result<ExprId, XsltError> {
                 Ok(ExprId(0))
+            }
+            fn type_test(
+                &self,
+                _kind: TestKind,
+                _name: Option<&QName>,
+                _type_name: &QName,
+                _nillable: bool,
+            ) -> Result<ItemType, XsltError> {
+                Ok(ItemType::AnyNode)
+            }
+            fn schema_test(&self, _kind: TestKind, _name: &QName) -> Result<SchemaTest, XsltError> {
+                Ok(SchemaTest {
+                    test: ItemType::AnyNode,
+                    members: Vec::new(),
+                })
             }
         }
         let p = parse("a | @a", &mut Defaulting).unwrap();

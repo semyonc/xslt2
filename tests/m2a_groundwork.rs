@@ -407,22 +407,22 @@ fn a_type_test_that_needs_a_schema_is_still_not_implemented() {
     assert!(!error.is_not_implemented(), "{error}");
     assert_eq!(error.code, "XPST0008", "{error}");
 
-    // A built-in type in a typed node test is fine statically; matching it
-    // needs typed nodes, which arrive with the schema-aware milestone.
+    // A built-in type in a typed node test is fine statically (§3.13: a basic
+    // processor's in-scope schema types include the built-in types), and since
+    // M4c it is matched (it was NOT-IMPL (M4c) before): an untyped node's
+    // annotation is `xs:untyped` / `xs:untypedAtomic` (XPath 2.0 §2.5.1), which
+    // derives from neither `xs:integer` nor `xs:string`, so neither rule fires.
     for pattern in [
         "element(*, xs:integer)",
         "attribute::attribute(*, xs:string)",
     ] {
         let body = format!(
-            r#"<xsl:template match="/"><out/></xsl:template>
+            r#"<xsl:template match="/"><out><xsl:apply-templates select="//(*|@*)"/></out></xsl:template>
                <xsl:template match="{pattern}">HIT</xsl:template>"#
         );
-        let error =
-            transform(&body, "<r><a/></r>").expect_err(&format!("{pattern} unexpectedly compiled"));
-        assert!(
-            error.is_not_implemented() && error.to_string().contains("(M4c)"),
-            "pattern {pattern}: {error}"
-        );
+        let result = transform(&body, r#"<r b="1"><a/></r>"#)
+            .unwrap_or_else(|e| panic!("pattern {pattern}: {e}"));
+        assert!(!result.contains("HIT"), "pattern {pattern}: {result}");
     }
 }
 
@@ -435,6 +435,9 @@ fn a_type_test_that_needs_a_schema_is_still_not_implemented() {
 /// the function evaluator, the pattern parser and `[xsl:]default-collation`.
 #[test]
 fn every_notimpl_names_its_sub_milestone() {
+    // Since M4c the only rows left are M2k's, which a build with the
+    // `icu-collation` feature implements: that build checks no row.
+    #[cfg(not(feature = "icu-collation"))]
     let template =
         |content: &str| format!(r#"<xsl:template match="/"><out>{content}</out></xsl:template>"#);
     let cases: Vec<(String, &str, &str)> = vec![
@@ -454,15 +457,8 @@ fn every_notimpl_names_its_sub_milestone() {
         // (xsl:import-schema was NOT-IMPL until M4a, which made it XTSE1650
         // for a basic processor and loads it for a schema-aware one —
         // `tests/m4a_schema_loading.rs`.)
-        // pattern.rs: a typed node test in a pattern, M4c's.
-        (
-            format!(
-                r#"{}<xsl:template match="element(*, xs:integer)"/>"#,
-                template("")
-            ),
-            "the typed node test",
-            "M4c",
-        ),
+        // (pattern.rs: a typed node test in a pattern was M4c's until M4c —
+        // `tests/m4c_typed_patterns.rs`.)
         // (xsl:character-map, the html/xhtml methods, doctype-* and the output
         // encodings were NOT-IMPL until M3a — `tests/m3a_serialization.rs`.)
         // runtime/functions.rs: the §16 evaluator.

@@ -368,10 +368,15 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 (CompatMode::Xslt20, false)
             }
         };
+        let mut match_context = XPathContext::new(self.names);
+        if let Some(set) = self.schema {
+            match_context = match_context.with_schema_set(set);
+        }
         Ok(CompiledStylesheet {
             names: self.names,
             functions: self.functions,
             contexts: std::mem::take(&mut self.contexts),
+            match_context,
             static_contexts: std::mem::take(&mut self.static_contexts),
             exprs: std::mem::take(&mut self.exprs),
             patterns: std::mem::take(&mut self.patterns),

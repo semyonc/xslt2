@@ -1144,6 +1144,12 @@ pub struct CompiledStylesheet<'a> {
     pub(crate) functions: &'a XsltFunctions,
     /// One [`XPathContext`] per interned [`StaticContextId`] (§7.2).
     pub(crate) contexts: Vec<XPathContext<'a>>,
+    /// What a typed node test of a pattern (§5.5.3: `element(*, T)`,
+    /// `schema-element(N)`, …) is matched in: the name table its names are
+    /// interned in and, in schema-aware mode, the schema set its types and
+    /// declarations come from. A resolved test needs nothing else of a static
+    /// context.
+    pub(crate) match_context: XPathContext<'a>,
     pub(crate) static_contexts: StaticContexts,
     pub(crate) exprs: Vec<CompiledExpr>,
     pub(crate) patterns: Vec<Pattern>,

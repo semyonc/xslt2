@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use xsd_schema::navigator::{DomNavigator, DomNodeType};
 use xsd_schema::xpath::functions::{effective_boolean_value, XPathValue};
-use xsd_schema::xpath::{XPathError, XmlItem};
+use xsd_schema::xpath::{XPathContext, XPathError, XmlItem};
 
 use super::context::XsltContext;
 use super::{Frame, Transformation};
@@ -385,7 +385,7 @@ impl<'a, 't> Transformation<'a, 't> {
         env: MatchEnv<'_, 't>,
     ) -> Result<bool, XsltError> {
         let frame = env.frame;
-        if !node_test_matches(&step.test, step.axis, node) {
+        if !node_test_matches(&step.test, step.axis, node, &self.sheet.match_context) {
             return Ok(false);
         }
         // The sibling sequence built for this candidate, if one had to be.
@@ -781,7 +781,12 @@ impl<'a, 't> Transformation<'a, 't> {
                 let mut attr = parent.clone();
                 if attr.move_to_first_attribute() {
                     loop {
-                        if node_test_matches(&step.test, step.axis, &attr) {
+                        if node_test_matches(
+                            &step.test,
+                            step.axis,
+                            &attr,
+                            &self.sheet.match_context,
+                        ) {
                             out.push(attr.clone());
                         }
                         if !attr.move_to_next_attribute() {
@@ -797,7 +802,12 @@ impl<'a, 't> Transformation<'a, 't> {
                 let mut child = parent.clone();
                 if child.move_to_first_child() {
                     loop {
-                        if node_test_matches(&step.test, step.axis, &child) {
+                        if node_test_matches(
+                            &step.test,
+                            step.axis,
+                            &child,
+                            &self.sheet.match_context,
+                        ) {
                             out.push(child.clone());
                         }
                         if !child.move_to_next_sibling() {
@@ -832,7 +842,20 @@ impl<'a, 't> Transformation<'a, 't> {
 /// is the first of a RelativePathPattern ([`PatternAxis::SelfAxis`]). On any
 /// other axis a document node is never selected: it is never a child and
 /// never an attribute.
-fn node_test_matches(test: &NodeTest, axis: PatternAxis, nav: &Nav<'_>) -> bool {
+///
+/// A typed test — `element(*, T)`, `element(N, T?)`, `attribute(N, T)`,
+/// `schema-element(N)`, `schema-attribute(N)` — is decided by `xsd-schema`'s
+/// matcher of XPath 2.0 §2.5.4.3 – §2.5.4.6 (`ItemType::matches_item`), the
+/// one `instance of` and a path step run too, in `cx` (the stylesheet's name
+/// table and schema set): derives-from over the node's type annotation — none
+/// is `xs:untyped` / `xs:untypedAtomic` —, the nilled property, a
+/// substitution group. This crate decides only the axis and the node kind.
+fn node_test_matches(
+    test: &NodeTest,
+    axis: PatternAxis,
+    nav: &Nav<'_>,
+    cx: &XPathContext<'_>,
+) -> bool {
     let kind = nav.node_type();
     // `document-node()` is the one test that looks at the node itself.
     if let NodeTest::DocumentNode(inner) = test {
@@ -848,7 +871,7 @@ fn node_test_matches(test: &NodeTest, axis: PatternAxis, nav: &Nav<'_>) -> bool 
                 }
                 loop {
                     if child.node_type() == DomNodeType::Element {
-                        return node_test_matches(inner, PatternAxis::Child, &child);
+                        return node_test_matches(inner, PatternAxis::Child, &child, cx);
                     }
                     if !child.move_to_next_sibling() {
                         return false;
@@ -892,26 +915,12 @@ fn node_test_matches(test: &NodeTest, axis: PatternAxis, nav: &Nav<'_>) -> bool 
         }
         NodeTest::Element(name) => kind == DomNodeType::Element && name_matches(name, nav),
         NodeTest::Attribute(name) => kind == DomNodeType::Attribute && name_matches(name, nav),
-        // The two-argument forms. XPath 2.0 §2.5.4.3: an `ElementTest` with a
-        // TypeName matches an element node whose "type annotation is the same
-        // as, or derives from, the TypeName". `xs:anyType` and the two
-        // attribute supertypes are satisfied by every annotation there is, so
-        // for them the test is the name test; `xs:untyped` and
-        // `xs:untypedAtomic` are satisfied only by a node that was never
-        // validated, which is a node with no type annotation at all.
-        //
-        // §4.3 makes the distinction invisible for a tree this processor
-        // parsed — it reads the source "as if no schema processing had been
-        // performed" — but not for a tree that was handed to it already typed.
-        NodeTest::TypedElement { name, untyped_only } => {
-            kind == DomNodeType::Element
-                && name_matches(name, nav)
-                && (!untyped_only || nav.type_annotation().is_none())
+        // The typed forms (XPath 2.0 §2.5.4.3 – §2.5.4.6): `xsd-schema` decides.
+        NodeTest::TypedElement { test, .. } | NodeTest::SchemaElement { test, .. } => {
+            kind == DomNodeType::Element && test.matches_item(&XmlItem::Node(nav.clone()), cx)
         }
-        NodeTest::TypedAttribute { name, untyped_only } => {
-            kind == DomNodeType::Attribute
-                && name_matches(name, nav)
-                && (!untyped_only || nav.type_annotation().is_none())
+        NodeTest::TypedAttribute { test, .. } | NodeTest::SchemaAttribute { test, .. } => {
+            kind == DomNodeType::Attribute && test.matches_item(&XmlItem::Node(nav.clone()), cx)
         }
         NodeTest::DocumentNode(_) => unreachable!("handled above"),
     }
@@ -1160,8 +1169,10 @@ enum Lookup {
 mod tests {
     use bumpalo::Bump;
     use xsd_schema::document::{build_typed_document, BufferDocumentOptions};
+    use xsd_schema::namespace::{NameTable, QualifiedName};
     use xsd_schema::pipeline::load_and_process_schema;
-    use xsd_schema::SchemaSet;
+    use xsd_schema::types::{ItemType, NameTest, TypeTest};
+    use xsd_schema::{SchemaSet, XmlTypeCode};
 
     use super::*;
     use crate::compile::Compiler;
@@ -1283,17 +1294,47 @@ mod tests {
         schema_set
     }
 
-    fn element_test(local: &str, untyped_only: bool) -> NodeTest {
+    /// `element(local, xs:untyped)` (`untyped_only`) or `element(local,
+    /// xs:anyType)`, resolved as the compiler resolves them (names interned in
+    /// `names`).
+    fn element_test(names: &NameTable, local: &str, untyped_only: bool) -> NodeTest {
+        let type_test = if untyped_only {
+            TypeTest::Untyped
+        } else {
+            TypeTest::BuiltIn(XmlTypeCode::AnyType)
+        };
         NodeTest::TypedElement {
             name: Some(QName::new("", local)),
-            untyped_only,
+            test: ItemType::element(
+                Some(NameTest::QName(QualifiedName::new(
+                    None,
+                    names.add(local),
+                    None,
+                ))),
+                Some(type_test),
+                false,
+            ),
         }
     }
 
-    fn attribute_test(local: &str, untyped_only: bool) -> NodeTest {
+    /// `attribute(local, xs:untypedAtomic)` (`untyped_only`) or
+    /// `attribute(local, xs:anySimpleType)`.
+    fn attribute_test(names: &NameTable, local: &str, untyped_only: bool) -> NodeTest {
+        let code = if untyped_only {
+            XmlTypeCode::UntypedAtomic
+        } else {
+            XmlTypeCode::AnySimpleType
+        };
         NodeTest::TypedAttribute {
             name: Some(QName::new("", local)),
-            untyped_only,
+            test: ItemType::attribute(
+                Some(NameTest::QName(QualifiedName::new(
+                    None,
+                    names.add(local),
+                    None,
+                ))),
+                Some(TypeTest::BuiltIn(code)),
+            ),
         }
     }
 
@@ -1314,19 +1355,32 @@ mod tests {
             "the fixture must really be typed"
         );
 
+        let names = &schema_set.name_table;
+        let cx = XPathContext::new(names).with_schema_set(&schema_set);
         assert!(
-            !node_test_matches(&element_test("item", true), PatternAxis::Child, &nav),
+            !node_test_matches(
+                &element_test(names, "item", true),
+                PatternAxis::Child,
+                &nav,
+                &cx
+            ),
             "element(item, xs:untyped) must not match a schema-typed element"
         );
         assert!(
-            node_test_matches(&element_test("item", false), PatternAxis::Child, &nav),
+            node_test_matches(
+                &element_test(names, "item", false),
+                PatternAxis::Child,
+                &nav,
+                &cx
+            ),
             "element(item, xs:anyType) matches every element"
         );
         // The one-argument form has never looked at the type.
         assert!(node_test_matches(
             &NodeTest::Element(Some(QName::new("", "item"))),
             PatternAxis::Child,
-            &nav
+            &nav,
+            &cx
         ));
     }
 
@@ -1345,12 +1399,24 @@ mod tests {
             "the fixture must really be typed"
         );
 
+        let names = &schema_set.name_table;
+        let cx = XPathContext::new(names).with_schema_set(&schema_set);
         assert!(
-            !node_test_matches(&attribute_test("n", true), PatternAxis::Attribute, &nav),
+            !node_test_matches(
+                &attribute_test(names, "n", true),
+                PatternAxis::Attribute,
+                &nav,
+                &cx
+            ),
             "attribute(n, xs:untypedAtomic) must not match a schema-typed attribute"
         );
         assert!(
-            node_test_matches(&attribute_test("n", false), PatternAxis::Attribute, &nav),
+            node_test_matches(
+                &attribute_test(names, "n", false),
+                PatternAxis::Attribute,
+                &nav,
+                &cx
+            ),
             "attribute(n, xs:anySimpleType) matches every attribute"
         );
     }
@@ -1368,6 +1434,8 @@ mod tests {
         )
         .expect("a plain parse");
         let root: Nav<'_> = arena.alloc(doc).create_navigator();
+        // A basic processor's context: no schema set.
+        let cx = XPathContext::new(&names);
 
         let mut element = root.clone();
         assert!(element.move_to_first_child());
@@ -1377,9 +1445,10 @@ mod tests {
         for untyped_only in [true, false] {
             assert!(
                 node_test_matches(
-                    &element_test("item", untyped_only),
+                    &element_test(&names, "item", untyped_only),
                     PatternAxis::Child,
-                    &element
+                    &element,
+                    &cx
                 ),
                 "untyped_only={untyped_only}"
             );
@@ -1392,9 +1461,10 @@ mod tests {
         for untyped_only in [true, false] {
             assert!(
                 node_test_matches(
-                    &attribute_test("n", untyped_only),
+                    &attribute_test(&names, "n", untyped_only),
                     PatternAxis::Attribute,
-                    &attribute
+                    &attribute,
+                    &cx
                 ),
                 "untyped_only={untyped_only}"
             );
