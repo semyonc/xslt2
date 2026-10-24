@@ -44,11 +44,11 @@
 //! declaration (by the name of the element) … or a type definition (by xsi:type), then ·strict·
 //! validation is performed. If they do not identify any declaration or definition, then ·lax
 //! assessment· is performed" — a root with no declaration and no `xsi:type` is no error, its
-//! declared descendants are validated. The typed build binds no type to an element it assessed
-//! laxly without one (it is `xs:untyped` in the tree): XDM 1.0 §3.3.1.1's answer for "[validity]
-//! … "notKnown", and the [validation attempted] property … "none"", not for "partial" (a validated
-//! descendant), where it gives `xs:anyType` — the same as for every element a lax wildcard matches
-//! in a typed source (decision D-f6 of the M4f report; upstream proposal C85).
+//! declared descendants are validated. The typed build types an element it assessed laxly without
+//! a declaration or type `xs:anyType` when something below it was assessed, and leaves it
+//! `xs:untyped` otherwise: XDM 1.0 §3.3.1.1's answers for [validation attempted] "partial" and
+//! "none" — the same as for every element a lax wildcard matches in a typed source (decision D-f6
+//! of the M4f report; upstream C85, `wave-b` `7608d3a`).
 //!
 //! **Admission** of a typed tree (`Transformation::admit_typed`, used by every loader and for a
 //! tree the host built) applies §4.3 and §4.4 in their order — "Stripping of type annotations

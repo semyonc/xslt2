@@ -297,9 +297,9 @@ whose typed value is a single `xs:ID` is in the id index (C62) and elements and 
 loader's code for an unparsable one (FODC0002 for `doc()` / `document()`, F&O 1.0 §15.5.4; XTDE1170 for the principal
 source), the message naming the first errors and their nodes (B8 instance paths); `Lax` with an undeclared root is
 XML Schema 1.1 §5.2's lax wildcard validation (upstream C36 `ValidationRoot::Lax`, M4f: no error for the root, its
-declared descendants validated; the typed build leaves it unbound, `xs:untyped` — XDM 1.0 §3.3.1.1's answer when no
-descendant was validated, not when one was, `xs:anyType`, as for every lax-wildcard element of a typed source:
-upstream proposal C85); a basic processor asked to validate is XTDE1665. A typed document atomizes to typed
+declared descendants validated; the typed build types it `xs:anyType` when a descendant or attribute was assessed and
+leaves it `xs:untyped` otherwise — XDM 1.0 §3.3.1.1's "partial" and "none", as for every lax-wildcard element of a
+typed source: upstream C85, `wave-b` `7608d3a`); a basic processor asked to validate is XTDE1665. A typed document atomizes to typed
 values and an untyped one exactly as before (one flow, `has_type_annotations`): keys, sort keys and grouping keys see
 typed values. `input-type-annotations="strip"` in any module (§4.3) strips every source tree at admission — untyped,
 nilled false, is-id and is-idrefs unchanged ("The values of the is-id and is-idrefs properties are not changed": the

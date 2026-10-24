@@ -749,11 +749,10 @@ fn a_type_or_lax_copy_in_simple_content_is_validated() {
 /// as M4f's; upstream C36's `ValidationRoot::Lax` is XML Schema 1.1 §5.2's "lax wildcard
 /// validation": "If they do not identify any declaration or definition, then ·lax assessment· is
 /// performed"): the declared descendants are validated and typed, an invalid one makes the
-/// document an error (XTDE1170 for the principal source), and the undeclared root is no error. It
-/// is unbound in the typed tree (`xs:untyped`) — XDM 1.0 §3.3.1.1's answer when no descendant was
-/// validated ("[validation attempted] … "none""), not when one was ("partial": `xs:anyType`), the
-/// same as every element a lax wildcard matches in a typed source (decision D-f6, upstream
-/// proposal C85).
+/// document an error (XTDE1170 for the principal source), and the undeclared root is no error.
+/// Its descendant `f:n` was validated, so it is `xs:anyType` in the typed tree, not `xs:untyped` —
+/// XDM 1.0 §3.3.1.1's answer for "[validation attempted] … "partial"" — the same as every element
+/// a lax wildcard matches in a typed source (decision D-f6; upstream C85, `wave-b` `7608d3a`).
 #[test]
 fn lax_source_validation_of_an_undeclared_root() {
     let main = sheet(
@@ -767,7 +766,7 @@ fn lax_source_validation_of_an_undeclared_root() {
         )
         .map(|text| inner(&text))
         .unwrap(),
-        "true 5 true"
+        "true 5 false"
     );
     let e = run_over(
         &main,
