@@ -4,8 +4,8 @@ Schema-aware XSLT 2.0 processor in Rust, built on the
 [`xsd-schema`](../xsd-schema) validator and its XPath 2.0 engine.
 
 Status: **M4 — schema-aware**, in progress (M1–M3 done; M4a, schema loading and the schema-aware mode, M4b,
-typed source documents, M4c, typed patterns, and M4d, validation of constructed elements and attributes, done — see
-"Schema-aware mode" below). Stylesheets are loaded,
+typed source documents, M4c, typed patterns, M4d, validation of constructed elements and attributes, and M4e, copies
+and document-level validation, done — see "Schema-aware mode" below). Stylesheets are loaded,
 compiled and run: the module graph with import precedence, the lexical static contexts of §5.4.1,
 template rules with the §6.4 priorities and conflict resolution, the built-in rules,
 `xsl:apply-imports` and `xsl:next-match`, variables and parameters (tunnel included), attribute
@@ -136,10 +136,27 @@ it contains keeps its annotations, under `strict` the validation's annotations s
 applies per module and, for the principal module, to the implicit final result tree. Upstream items it needed —
 the current `xml.xsd` (C71) and the defaults of local attribute declarations (C74) — are fixed on `wave-b` `cfe061e`.
 
+**Copies and documents** (M4e). `xsl:copy-of` applies its `validation` to each element, attribute and document node
+it selects (§11.9.2): `preserve` keeps every annotation, nilled and is-id of what it copies; `strip` makes the copy
+untyped but keeps is-id (an `xs:ID` attribute still identifies its element for `id()`); `strict` validates the copy
+of an element against the top-level declaration of its name — its descendants re-annotated by that validation —, of
+an attribute as `xsl:attribute validation="strict"` does, and of a document node as a document. `xsl:copy` of an
+element with `preserve` makes it `xs:anyType` (what its content constructs keeps its annotations), of an attribute
+keeps its annotation, and `strict` validates the new node. A `preserve` copy of a node whose typed value contains an
+`xs:QName` or `xs:NOTATION` is XTTE0950 with `copy-namespaces="no"`, and for an attribute copied without its parent
+always (§11.9.1). **Document-level validation** (§19.2.2) — `validation="strict"` on `xsl:document`,
+`xsl:result-document`, or a copy of a document node, in element content too: the document node must have exactly one
+element child, no text child, and any comments and processing instructions (XTTE1550); the element is validated
+against its top-level declaration (XTTE1512 / XTTE1510) and, unlike element-level validation, ID uniqueness and
+IDREF targets are checked (XTTE1555). The documents of variables and of `xsl:message` are not validated (an element
+validated in a message still is), and the implicit final result tree never is (`default-validation` is `preserve` or
+`strip`). Known limits met by the catalog: a union-typed node atomizes to the member type's primitive rather than the
+member type (upstream proposal C79), an element typed `xs:ID` is not in the id index (C62), `fn:idref` (C54).
+
 Not implemented yet, each raising `XSLT2-NOTIMPL` naming the sub-milestone (`../../xslt_doc/M4_PLAN.md` §4) when the
-construct is **evaluated** — a stylesheet that never reaches one runs: `preserve` / `strict` on copies and document
-nodes (M4e), and `type` on elements and `lax` on elements — and lax validation of a source whose root has no
-declaration — (M4f). XML Schema 1.0 only (1.1 is M4g).
+construct is **evaluated** — a stylesheet that never reaches one runs: `type` on elements, copies and documents and
+`lax` on everything but `xsl:attribute` — and lax validation of a source whose root has no declaration — (M4f). XML
+Schema 1.0 only (1.1 is M4g).
 
 **Deep recursion.** Recursive templates and stylesheet functions use the native stack. A run checks
 how much stack it has used and stops with a depth error instead of overflowing. On a thread
@@ -207,10 +224,10 @@ With `--features icu-collation` the two M2k cases pass too: 5,761.
 
 **Schema-aware run** (`--schema-aware`: the 584 cases that need a schema-aware processor become runnable and the 16
 that need a basic one are not run; every case is compiled schema-aware, against the stylesheet's imports and the
-environment's schemas, and every source is validated as the catalog says): 6,115 of 6,355 runnable pass, the
-schema-aware profile 372 of 579 (M4d on `xsd-schema` `wave-b` `66e3e3f`, 2026-10-23; 274 after M4c, 217 after M4b,
-120 after M4a, 51 before), and every basic case keeps its status; of the 175 not implemented, 173 are M4e's (62) and
-M4f's (111) and 2 M2k's. An `assert` over a primary result tree that carries type annotations is evaluated on the tree
+environment's schemas, and every source is validated as the catalog says): 6,163 of 6,355 runnable pass, the
+schema-aware profile 420 of 579 (M4e on `xsd-schema` `wave-b` `87f9b49`, 2026-10-23; 377 after M4d on `87f9b49`, 372
+on `66e3e3f`, 274 after M4c, 217 after M4b, 120 after M4a, 51 before), and every basic case keeps its status; of the
+127 not implemented, 125 are M4f's and 2 M2k's. An `assert` over a primary result tree that carries type annotations is evaluated on the tree
 itself (the catalog: "with the document node of the result document as the context item"; a re-parse of the
 serialization would be untyped), every other one over the re-parse.
 

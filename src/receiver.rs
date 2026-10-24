@@ -23,8 +23,12 @@ use xsd_schema::document::{
     serialize, BufferDocNavigator, BufferDocument, BufferDocumentBuilder, BufferDocumentError,
     BufferDocumentOptions, CopySource, DocumentKind, NamespaceFixup, NodeSchemaBinding,
 };
+use xsd_schema::ids::TypeKey;
 use xsd_schema::navigator::{DomNavigator, DomNodeType, NamespaceAxisScope, TypedValue};
-use xsd_schema::validation::SchemaValidator;
+use xsd_schema::parser::frames::SimpleTypeVariety;
+use xsd_schema::types::value::{XmlAtomicValue, XmlValue, XmlValueKind};
+use xsd_schema::types::XmlTypeCode;
+use xsd_schema::validation::{validate_simple_type, SchemaValidator};
 use xsd_schema::xpath::XmlItem;
 use xsd_schema::SchemaSet;
 
@@ -199,6 +203,68 @@ pub enum Annotations {
     Preserve,
 }
 
+/// What a copy carries of the PSVI of the nodes it copies — the private
+/// counterpart of [`Annotations`] for [`ComplexContentNormalizer::copy_subtree`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Carry {
+    /// No binding at all: a basic processor's copies, and a copy whose root a
+    /// `strict` validation re-annotates (§19.2.1.1: the validation, not the
+    /// source, decides).
+    Nothing,
+    /// No binding at all, but the id of each attribute that is an `xs:ID` in
+    /// its source, passed on with [`Receiver::element_id`]: a `strip` copy
+    /// loses its annotations, but "The values of the is-id and is-idrefs
+    /// properties are unchanged" (§19.2.1.1). An element's nilled property
+    /// is not read (it is set to false, and asking a typed element costs a
+    /// typed-value computation).
+    Ids,
+    /// Every binding and the nilled property.
+    All,
+}
+
+impl From<Annotations> for Carry {
+    fn from(annotations: Annotations) -> Self {
+        match annotations {
+            Annotations::Strip => Carry::Nothing,
+            Annotations::Preserve => Carry::All,
+        }
+    }
+}
+
+/// The `[xsl:]validation` of `xsl:copy-of` and `xsl:copy` as the pipeline
+/// applies it to the copy of each node the instruction copies (§11.9.1,
+/// §11.9.2, §19.2.1.1, §19.2.2): "These attributes are applied individually
+/// to each element, attribute, and document node that is selected by the
+/// expression in the select attribute … they do not apply to nodes that are
+/// implicitly copied because they have selected nodes as an ancestor" — and
+/// "These attributes are ignored when copying an item that is not an
+/// element, attribute or document node."
+///
+/// `lax` and `type` are M4f's and never get this far.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CopyValidation {
+    /// `strip`: the copy and the nodes it contains are untyped, is-id kept —
+    /// made so by the [`ComplexContentNormalizer`] itself, whichever receivers
+    /// build the tree (the ids pass with [`Receiver::element_id`]); the copy
+    /// is no boundary.
+    #[default]
+    Strip,
+    /// `preserve`: "In the case of xsl:copy-of, all the nodes that are copied
+    /// will retain their type annotations unchanged" — the copy is no
+    /// boundary, so an enclosing `strip` or `strict` still decides.
+    Preserve,
+    /// `strict`: the copy of an element is validated as a constructed element
+    /// ([`Boundary::Strict`] on it), the copy of a document node as a
+    /// document (§19.2.2, [`Boundary::Strict`] on a document node). An
+    /// attribute is validated by the instruction before it is passed on
+    /// (`Receiver::attribute` with its new binding), never through
+    /// [`Receiver::append_copy`]. The validation is the validating receiver's
+    /// (the transformation's pipelines): a chain without it — a normalizer
+    /// over a bare [`ResultBuilder`] — ignores the boundary, as it ignores
+    /// every boundary, and builds the copy untyped.
+    Strict,
+}
+
 impl Annotations {
     /// What the pipelines of a transformation read off the nodes they copy into
     /// a tree through [`Receiver::append_item`]: everything a typed node carries
@@ -250,7 +316,11 @@ pub enum Boundary {
     Preserve,
     /// `validation="strict"` on an element constructor (§19.2.1.1): the
     /// element is assessed against the top-level declaration of its name, and
-    /// the assessment annotates it and everything it contains.
+    /// the assessment annotates it and everything it contains. On a document
+    /// node (`xsl:document`, `xsl:result-document`, a copy of a document
+    /// node — §19.2.2) it requests document-level validation: exactly one
+    /// element child and no text children (XTTE1550), that element validated
+    /// as a validation root with the ID/IDREF rule applied (XTTE1555).
     Strict,
 }
 
@@ -348,7 +418,20 @@ pub trait Receiver<'t> {
     /// receiver that builds no typed tree: only the validating receiver
     /// (`runtime::validate::Validating`) applies the rule; the receivers in
     /// front of it pass the announcement on, in order.
+    ///
     fn validation_boundary(&mut self, _boundary: Boundary) -> Result<(), XsltError> {
+        Ok(())
+    }
+
+    /// The element whose start tag is open answers to `id` in the id index
+    /// (`fn:id`) although no attribute of it is bound as an `xs:ID` saying so:
+    /// an `xs:ID` attribute a copy with `validation="strip"` made untyped keeps
+    /// its is-id property (§19.2.1.1: "The values of the is-id and is-idrefs
+    /// properties are unchanged"). Sent by a [`ComplexContentNormalizer`] just
+    /// after that attribute. A [`ResultBuilder`] files the element under the
+    /// id; the default implementation ignores it, which is right for every
+    /// receiver that builds no tree.
+    fn element_id(&mut self, _id: &str) -> Result<(), XsltError> {
         Ok(())
     }
 
@@ -365,14 +448,96 @@ pub trait Receiver<'t> {
     /// > If the item is an element node, a **new** element is constructed and
     /// > appended to the result sequence.
     ///
+    /// `validation` is the copying instruction's ([`CopyValidation`]), which
+    /// decides what the copy of a selected element, attribute or document node
+    /// carries (§11.9.2: "These attributes are applied individually to each
+    /// element, attribute, and document node that is selected").
+    ///
     /// The default implementation forwards to `append_item`, which is right
-    /// for a receiver that decomposes every item into events regardless.
+    /// for a receiver that decomposes every item into events regardless and
+    /// builds no typed tree.
     fn append_copy(
         &mut self,
         item: &XmlItem<Nav<'t>>,
         _namespaces: CopyNamespaces,
+        _validation: CopyValidation,
     ) -> Result<(), XsltError> {
         self.append_item(item)
+    }
+}
+
+/// XTTE1550 (§19.2.2) for a document node whose validation is requested and that has `what`
+/// among its children: "A type error occurs unless the children of the document node comprise
+/// exactly one element node, no text nodes, and zero or more comment and processing instruction
+/// nodes, in any order."
+pub(crate) fn xtte1550(what: &str) -> XsltError {
+    XsltError::new(
+        codes::XTTE1550,
+        format!(
+            "a document node validated with validation=\"strict\" must have exactly one element \
+             child, no text child, and only comments and processing instructions besides: it has \
+             {what}"
+        ),
+    )
+}
+
+/// The `xs:ID` value an attribute of type `type_key` with `value` has in `set` — its is-id
+/// property —, as the upstream builder decides it for a bound attribute: the typed value is exactly
+/// one atomic value of type `xs:ID` or a type derived from it. Only a type that can hold one is
+/// validated again (`may_hold_id`): most typed attributes are no ID.
+pub(crate) fn id_value_of(value: &str, type_key: TypeKey, set: &SchemaSet) -> Option<String> {
+    if !may_hold_id(set, type_key, 0) {
+        return None;
+    }
+    let typed = validate_simple_type(value, type_key, set).ok()?.typed_value;
+    single_id(&typed).map(str::to_string)
+}
+
+/// Whether a value of `type_key` can be an `xs:ID` value: an atomic type derived from `xs:ID`, a
+/// list whose item type, a union one of whose member types, can be (the walk of
+/// `runtime::validate::namespace_sensitive`, for `xs:ID`). A complex type cannot: an attribute's type is simple.
+fn may_hold_id(set: &SchemaSet, type_key: TypeKey, depth: u32) -> bool {
+    let TypeKey::Simple(key) = type_key else {
+        return false;
+    };
+    if depth > 64 {
+        return true;
+    }
+    if let Some(code) = set.get_type_code(key) {
+        return code == XmlTypeCode::Id;
+    }
+    let Some(def) = set.arenas.simple_types.get(key) else {
+        return true;
+    };
+    match def.variety {
+        SimpleTypeVariety::Atomic => def
+            .resolved_base_type
+            .is_none_or(|base| may_hold_id(set, base, depth + 1)),
+        SimpleTypeVariety::List => def
+            .resolved_item_type
+            .is_none_or(|item| may_hold_id(set, item, depth + 1)),
+        SimpleTypeVariety::Union => def
+            .resolved_member_types
+            .iter()
+            .any(|&member| may_hold_id(set, member, depth + 1)),
+    }
+}
+
+/// The `xs:ID` value a typed value consists of, when it is exactly one atomic value of type
+/// `xs:ID` or a type derived from it (every type derived from `xs:ID` validates to the `xs:ID`
+/// type code); a union value counts by its member's value, a list value when it has exactly one
+/// item.
+fn single_id(value: &XmlValue) -> Option<&str> {
+    match &value.value {
+        XmlValueKind::Atomic(XmlAtomicValue::String(id)) if value.type_code == XmlTypeCode::Id => {
+            Some(id)
+        }
+        XmlValueKind::Union(member) => single_id(member),
+        XmlValueKind::List { items, .. } => match items.as_slice() {
+            [member] => single_id(member),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -474,12 +639,17 @@ impl<'t> Receiver<'t> for TemporaryOutputState<'_, 't> {
         self.out.validation_boundary(boundary)
     }
 
+    fn element_id(&mut self, id: &str) -> Result<(), XsltError> {
+        self.out.element_id(id)
+    }
+
     fn append_copy(
         &mut self,
         item: &XmlItem<Nav<'t>>,
         namespaces: CopyNamespaces,
+        validation: CopyValidation,
     ) -> Result<(), XsltError> {
-        self.out.append_copy(item, namespaces)
+        self.out.append_copy(item, namespaces, validation)
     }
 }
 
@@ -498,8 +668,10 @@ struct Open {
     boundary: Option<Boundary>,
     /// Namespace nodes seen for this element, not yet flushed.
     namespaces: Vec<(String, String)>,
-    /// Attributes seen for this element, not yet flushed.
-    attributes: Vec<(Name, String, Option<NodeSchemaBinding>)>,
+    /// Attributes seen for this element, not yet flushed, each with the id it
+    /// keeps without a binding (an `xs:ID` attribute a `strip` copy made
+    /// untyped; [`Receiver::element_id`]).
+    attributes: Vec<(Name, String, Option<NodeSchemaBinding>, Option<String>)>,
     /// The start tag has been written downstream.
     flushed: bool,
     /// A child (anything that is not an attribute or namespace) has been added.
@@ -882,7 +1054,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         if (open.no_default || default_withheld) && !name_has_a_default {
             keep.push((String::new(), String::new()));
         }
-        let attrs: Vec<(Name, String, Option<NodeSchemaBinding>)> =
+        let attrs: Vec<(Name, String, Option<NodeSchemaBinding>, Option<String>)> =
             std::mem::take(&mut open.attributes);
 
         // §11.7: "If a namespace prefix is mapped to a particular namespace URI
@@ -903,7 +1075,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
 
         let attr_names: Vec<(&str, &str)> = attrs
             .iter()
-            .map(|(n, _, _)| (n.prefix.as_str(), n.uri.as_str()))
+            .map(|(n, _, _, _)| (n.prefix.as_str(), n.uri.as_str()))
             .collect();
         let keep_refs: Vec<(&str, &str)> =
             keep.iter().map(|(p, u)| (p.as_str(), u.as_str())).collect();
@@ -983,13 +1155,16 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
             }
             open.fixup_nodes = fixup_nodes;
         }
-        for ((name, value, binding), (prefix, _)) in attrs.iter().zip(fixed.iter()) {
+        for ((name, value, binding, id), (prefix, _)) in attrs.iter().zip(fixed.iter()) {
             let fixed_name = Name {
                 local: name.local.clone(),
                 uri: name.uri.clone(),
                 prefix: prefix.clone(),
             };
             self.out.attribute(&fixed_name, value, *binding)?;
+            if let Some(id) = id {
+                self.out.element_id(id)?;
+            }
         }
         self.out.end_start_tag()
     }
@@ -1136,12 +1311,14 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         scope
     }
 
-    /// Records one attribute, last-wins on a duplicate expanded name.
+    /// Records one attribute, last-wins on a duplicate expanded name; `id` is the
+    /// id it keeps without a binding (see `Open::attributes`).
     fn push_attribute(
         &mut self,
         name: &Name,
         value: &str,
         binding: Option<NodeSchemaBinding>,
+        id: Option<String>,
     ) -> Result<(), XsltError> {
         if self.in_document_content() {
             return Err(XsltError::new(
@@ -1165,13 +1342,14 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         if let Some(slot) = open
             .attributes
             .iter_mut()
-            .find(|(n, _, _)| n.local == name.local && n.uri == name.uri)
+            .find(|(n, _, _, _)| n.local == name.local && n.uri == name.uri)
         {
             slot.1 = value.to_string();
             slot.2 = binding;
+            slot.3 = id;
         } else {
             open.attributes
-                .push((name.clone(), value.to_string(), binding));
+                .push((name.clone(), value.to_string(), binding, id));
         }
         open.last_atomic = false;
         Ok(())
@@ -1268,7 +1446,66 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         nav: &Nav<'t>,
         namespaces: CopyNamespaces,
     ) -> Result<(), XsltError> {
-        self.copy_subtree(nav, namespaces, self.annotations)
+        self.copy_subtree(nav, namespaces, self.annotations.into())
+    }
+
+    /// The copy `xsl:copy-of` (or `xsl:copy` of a node it does not construct
+    /// anew) makes of one node it selected, under its `validation` (§11.9.2:
+    /// "These attributes are applied individually to each element, attribute,
+    /// and document node that is selected by the expression in the select
+    /// attribute"; §19.2.1.1, §19.2.2):
+    ///
+    /// - `strip`: "the new node and each of the contained nodes will have the
+    ///   type annotation xs:untyped … The values of the is-id and is-idrefs
+    ///   properties are unchanged" — the copy is made untyped **here**, so
+    ///   that it is untyped whichever receivers build it (the public pipeline
+    ///   of a normalizer over a [`ResultBuilder`] too), and every copied
+    ///   attribute that is an `xs:ID` in its source passes its id on with
+    ///   [`Receiver::element_id`] (`Carry::Ids`); no boundary;
+    /// - `preserve`: "all the nodes that are copied will retain their type
+    ///   annotations unchanged" — every binding and the nilled property, and
+    ///   no boundary (an enclosing `strip` or `strict` still decides);
+    /// - `strict`: an element is a [`Boundary::Strict`] (validated against the
+    ///   top-level declaration of its name, its descendants re-annotated by
+    ///   that validation: "these attributes do indirectly affect the type
+    ///   annotation carried by such implicitly copied nodes, as a consequence
+    ///   of the validation process"), a document node a document-level
+    ///   validation (a document node opened with [`Boundary::Strict`], in
+    ///   element content too: §5.7.1 replaces it by its children afterwards);
+    ///   the source's bindings are not read.
+    ///
+    /// "These attributes are ignored when copying an item that is not an
+    /// element, attribute or document node." An attribute with `strict` is
+    /// validated by the instruction, not here.
+    pub(crate) fn copy_selected(
+        &mut self,
+        nav: &Nav<'t>,
+        namespaces: CopyNamespaces,
+        validation: CopyValidation,
+    ) -> Result<(), XsltError> {
+        match (nav.node_type(), validation) {
+            (
+                DomNodeType::Root | DomNodeType::Element | DomNodeType::Attribute,
+                CopyValidation::Strip,
+            ) => self.copy_subtree(nav, namespaces, Carry::Ids),
+            (DomNodeType::Root, CopyValidation::Strict) => {
+                self.validation_boundary(Boundary::Strict)?;
+                self.start_document()?;
+                self.copy_subtree(nav, namespaces, Carry::Nothing)?;
+                self.end_document()
+            }
+            (DomNodeType::Element, CopyValidation::Strict) => {
+                self.validation_boundary(Boundary::Strict)?;
+                self.copy_subtree(nav, namespaces, Carry::Nothing)
+            }
+            (DomNodeType::Attribute, CopyValidation::Strict) => Err(XsltError::internal(
+                "a strict copy of an attribute is validated before it is passed on",
+            )),
+            (DomNodeType::Root | DomNodeType::Element | DomNodeType::Attribute, _) => {
+                self.copy_subtree(nav, namespaces, Carry::All)
+            }
+            _ => self.copy_subtree(nav, namespaces, Carry::Nothing),
+        }
     }
 
     /// The recursive half of [`copy_node`](Self::copy_node).
@@ -1306,14 +1543,14 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         &mut self,
         nav: &Nav<'t>,
         namespaces: CopyNamespaces,
-        annotations: Annotations,
+        carry: Carry,
     ) -> Result<(), XsltError> {
         match nav.node_type() {
             DomNodeType::Root => {
                 let mut child = nav.clone();
                 if child.move_to_first_child() {
                     loop {
-                        self.copy_subtree(&child, namespaces, annotations)?;
+                        self.copy_subtree(&child, namespaces, carry)?;
                         if !child.move_to_next_sibling() {
                             break;
                         }
@@ -1322,7 +1559,10 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                 Ok(())
             }
             DomNodeType::Element => {
-                let binding = binding_of(nav, annotations);
+                let binding = match carry {
+                    Carry::All => CopySource::schema_binding(nav),
+                    Carry::Ids | Carry::Nothing => None,
+                };
                 // Only a typed node can be nilled; asking an untyped one would
                 // still cost a typed-value computation.
                 let nilled = binding.is_some() && matches!(nav.typed_value(), TypedValue::Nilled);
@@ -1340,7 +1580,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                 let mut attr = nav.clone();
                 if attr.move_to_first_attribute() {
                     loop {
-                        self.copy_attribute(&attr, annotations)?;
+                        self.copy_attribute(&attr, carry)?;
                         if !attr.move_to_next_attribute() {
                             break;
                         }
@@ -1350,7 +1590,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                 let mut child = nav.clone();
                 if child.move_to_first_child() {
                     loop {
-                        self.copy_subtree(&child, namespaces, annotations)?;
+                        self.copy_subtree(&child, namespaces, carry)?;
                         if !child.move_to_next_sibling() {
                             break;
                         }
@@ -1358,7 +1598,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                 }
                 self.end_element()
             }
-            DomNodeType::Attribute => self.copy_attribute(nav, annotations),
+            DomNodeType::Attribute => self.copy_attribute(nav, carry),
             DomNodeType::Namespace => {
                 let (prefix, uri) = (nav.local_name().to_string(), nav.value());
                 self.namespace(&prefix, &uri)
@@ -1372,23 +1612,34 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         }
     }
 
-    fn copy_attribute(&mut self, nav: &Nav<'t>, annotations: Annotations) -> Result<(), XsltError> {
-        let binding = binding_of(nav, annotations);
+    fn copy_attribute(&mut self, nav: &Nav<'t>, carry: Carry) -> Result<(), XsltError> {
         let value = nav.value();
-        self.attribute(&Name::of(nav), &value, binding)
-    }
-}
-
-/// The PSVI a copy of the node at `nav` carries.
-fn binding_of(nav: &Nav<'_>, annotations: Annotations) -> Option<NodeSchemaBinding> {
-    match annotations {
-        Annotations::Strip => None,
-        Annotations::Preserve => CopySource::schema_binding(nav),
+        let (binding, id) = match carry {
+            Carry::Nothing => (None, None),
+            // The id the source's own set gives the attribute's binding — the copy has none.
+            Carry::Ids => {
+                let id = CopySource::schema_binding(nav).and_then(|binding| {
+                    let set = nav.document().schema_set()?;
+                    id_value_of(&value, binding.type_key, set)
+                });
+                (None, id)
+            }
+            Carry::All => (CopySource::schema_binding(nav), None),
+        };
+        self.flush_text()?;
+        self.push_attribute(&Name::of(nav), &value, binding, id)
     }
 }
 
 impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
     fn start_document(&mut self) -> Result<(), XsltError> {
+        // The text before the document node is a sibling of it, not its child:
+        // it goes out now, in the content it belongs to, before the document
+        // node is passed on (§5.7.1 merges it with the document's first text
+        // child only once the document node has been replaced by its
+        // children — after the document node was constructed, and validated,
+        // §19.2.2). Text never goes out on its own when nothing is pending.
+        self.flush_text()?;
         let boundary = self.pending_boundary.take();
         // See `DocumentMark::forwarded`.
         let forwarded = !self.in_element();
@@ -1409,7 +1660,13 @@ impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
     fn end_document(&mut self) -> Result<(), XsltError> {
         self.flush_text()?;
         match self.document_marks.pop() {
-            Some(mark) if !mark.forwarded => Ok(()),
+            // A document node in element content that stayed empty is never passed on (see
+            // `DocumentMark::forwarded`), so the destination cannot see that it has no element
+            // child — which is XTTE1550 when its validation was requested (§19.2.2).
+            Some(mark) if !mark.forwarded => match mark.boundary {
+                Some(Boundary::Strict) => Err(xtte1550("no child")),
+                _ => Ok(()),
+            },
             _ => self.out.end_document(),
         }
     }
@@ -1469,7 +1726,7 @@ impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
         binding: Option<NodeSchemaBinding>,
     ) -> Result<(), XsltError> {
         self.flush_text()?;
-        self.push_attribute(name, value, binding)
+        self.push_attribute(name, value, binding, None)
     }
 
     /// A no-op: the normalizer decides where the start tag ends, because an
@@ -1556,14 +1813,12 @@ impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
         &mut self,
         item: &XmlItem<Nav<'t>>,
         namespaces: CopyNamespaces,
+        validation: CopyValidation,
     ) -> Result<(), XsltError> {
         match item {
             XmlItem::Atomic(_) => self.append_item(item),
             XmlItem::Node(nav) => {
-                // `xsl:copy-of` and `xsl:copy` copy untyped: the only validation
-                // of theirs that is evaluated is `strip` (§11.9; `preserve`,
-                // `strict`, `lax` and `type` on them are M4e's and M4f's).
-                self.copy_subtree(nav, namespaces, Annotations::Strip)?;
+                self.copy_selected(nav, namespaces, validation)?;
                 self.top().last_atomic = false;
                 Ok(())
             }
@@ -1763,6 +2018,12 @@ impl<'t> Receiver<'t> for ResultBuilder<'t> {
 
     fn end_start_tag(&mut self) -> Result<(), XsltError> {
         self.flush()
+    }
+
+    /// Files the pending element under `id` in the id index of the tree (`file_id`).
+    fn element_id(&mut self, id: &str) -> Result<(), XsltError> {
+        self.file_id(id.to_string());
+        Ok(())
     }
 
     /// Character data; with `disable_escaping`, the characters carry the
@@ -2249,17 +2510,24 @@ impl<'s, 't> SequenceCollector<'s, 't> {
     /// in element content is parentless. An attribute, comment, processing
     /// instruction or text node has no way to exist in a `BufferDocument`
     /// without a parent, so one is built around it and the navigator hides it.
+    ///
+    /// The holder is no validation boundary, so the node keeps the binding it
+    /// is built with — and a copy built inside it is validated as its copying
+    /// instruction asks ([`CopyValidation`]; the validating receiver is in the
+    /// pipeline).
     fn push_parentless(
         &mut self,
         build: impl FnOnce(
-            &mut ComplexContentNormalizer<'t, ResultBuilder<'t>>,
+            &mut ComplexContentNormalizer<'t, Validating<'s, 't>>,
         ) -> Result<(), XsltError>,
         locate: Locate,
     ) -> Result<(), XsltError> {
         let builder = self.new_builder(GroupKind::Element)?;
-        let mut pipeline = ComplexContentNormalizer::new(builder);
+        let schema_set = self.store.borrow().schema_set();
+        let mut pipeline =
+            ComplexContentNormalizer::new(Validating::new(builder, schema_set, self.validator));
         build(&mut pipeline)?;
-        self.push_holder(pipeline.into_inner().finish()?, locate)
+        self.push_holder(pipeline.into_inner().into_inner().finish()?, locate)
     }
 
     /// A parentless namespace node (§11.7, §6.3).
@@ -2319,24 +2587,37 @@ impl<'s, 't> SequenceCollector<'s, 't> {
         Ok(())
     }
 
-    /// Appends a **new** node that is a deep copy of `nav` (§11.9.1, §11.9.2).
+    /// Appends a **new** node that is a deep copy of `nav` (§11.9.1, §11.9.2),
+    /// made as `validation` says ([`CopyValidation`]).
     ///
     /// The copy is built in its own hidden document, so it is parentless and
     /// is not the node it was copied from — which is the whole difference
     /// between `xsl:copy-of` and `xsl:sequence` when the result lands in a
     /// sequence rather than in element content.
-    fn push_copy(&mut self, nav: &Nav<'t>, namespaces: CopyNamespaces) -> Result<(), XsltError> {
+    fn push_copy(
+        &mut self,
+        nav: &Nav<'t>,
+        namespaces: CopyNamespaces,
+        validation: CopyValidation,
+    ) -> Result<(), XsltError> {
         match nav.node_type() {
             // A document node copies to a new document node, with its own
             // identity: "the instruction adds a new document node to the
-            // result sequence".
+            // result sequence". A `strict` copy is a document node validated
+            // as a document (§19.2.2), opened inside the new one — the same
+            // tree, through the validating receiver.
             DomNodeType::Root => {
                 let builder = self.new_builder(GroupKind::Document)?;
-                let mut pipeline = ComplexContentNormalizer::new(builder);
+                let schema_set = self.store.borrow().schema_set();
+                let mut pipeline = ComplexContentNormalizer::new(Validating::new(
+                    builder,
+                    schema_set,
+                    self.validator,
+                ));
                 pipeline.start_document()?;
-                pipeline.copy_node(nav, namespaces)?;
+                pipeline.copy_selected(nav, namespaces, validation)?;
                 pipeline.end_document()?;
-                let doc = pipeline.into_inner().finish()?;
+                let doc = pipeline.into_inner().into_inner().finish()?;
                 let id = self.store.borrow_mut().insert(doc, None);
                 let root = self.store.borrow().navigator(id);
                 self.items.push(XmlItem::Node(root));
@@ -2349,20 +2630,40 @@ impl<'s, 't> SequenceCollector<'s, 't> {
                 let (prefix, uri) = (nav.local_name().to_string(), nav.value());
                 self.push_namespace_node(&prefix, &uri)
             }
-            kind => {
-                let locate = match kind {
-                    DomNodeType::Attribute => Locate::Attribute,
-                    _ => Locate::Child,
+            // A parentless attribute: untyped with `strip` (its is-id property
+            // is not observable — `fn:id` needs a document node at the root of
+            // the tree), its own annotation with `preserve`.
+            DomNodeType::Attribute => {
+                let binding = match validation {
+                    CopyValidation::Strip => None,
+                    CopyValidation::Preserve => CopySource::schema_binding(nav),
+                    CopyValidation::Strict => {
+                        return Err(XsltError::internal(
+                            "a strict copy of an attribute is validated before it is passed on",
+                        ))
+                    }
                 };
+                let (name, value) = (Name::of(nav), nav.value());
+                self.push_parentless(
+                    move |out| {
+                        out.start_element(&Name::local(HOLDER), None, false)?;
+                        out.attribute(&name, &value, binding)?;
+                        out.end_start_tag()?;
+                        out.end_element()
+                    },
+                    Locate::Attribute,
+                )
+            }
+            _ => {
                 let source = nav.clone();
                 self.push_parentless(
                     move |out| {
                         out.start_element(&Name::local(HOLDER), None, false)?;
-                        out.copy_node(&source, namespaces)?;
+                        out.copy_selected(&source, namespaces, validation)?;
                         out.end_start_tag()?;
                         out.end_element()
                     },
-                    locate,
+                    Locate::Child,
                 )
             }
         }
@@ -2600,18 +2901,19 @@ impl<'t> Receiver<'t> for SequenceCollector<'_, 't> {
         &mut self,
         item: &XmlItem<Nav<'t>>,
         namespaces: CopyNamespaces,
+        validation: CopyValidation,
     ) -> Result<(), XsltError> {
         match (self.nested.as_mut(), item) {
             // Inside a construction group the copy is content, so it is
             // decomposed into events like anything else.
-            (Some(nested), _) => nested.append_copy(item, namespaces),
+            (Some(nested), _) => nested.append_copy(item, namespaces, validation),
             // "If the item is an atomic value, the value is appended to the
             // result sequence, as with xsl:sequence."
             (None, XmlItem::Atomic(_)) => {
                 self.items.push(item.clone());
                 Ok(())
             }
-            (None, XmlItem::Node(nav)) => self.push_copy(nav, namespaces),
+            (None, XmlItem::Node(nav)) => self.push_copy(nav, namespaces, validation),
         }
     }
 }

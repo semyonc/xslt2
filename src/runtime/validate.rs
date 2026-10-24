@@ -41,8 +41,28 @@
 //!
 //! Whether an annotation survives is decided by the tree the node lands in: the outermost
 //! enclosing constructor whose validation is not `preserve` decides ([`Boundary`], applied by
-//! [`Validating`]). `lax` and `type` on elements (M4f), and copies and document nodes with a
-//! validation other than `strip` (M4e) stay fenced.
+//! [`Validating`]).
+//!
+//! **Copies and documents** (M4e). `xsl:copy` and `xsl:copy-of` announce, for the copy of each
+//! element or document node they copy, the boundary their validation asks for
+//! ([`copy_validation`], `ComplexContentNormalizer::copy_selected`): `strip` none — the normalizer
+//! copies untyped itself, passing on the ids of `xs:ID` attributes (`Receiver::element_id`), so a
+//! `strip` copy is untyped whichever receivers build it —, `preserve` none (every binding travels;
+//! an enclosing boundary still decides), `strict` a [`Boundary::Strict`] — on an
+//! element the validation of a constructed element, on a document node document-level validation
+//! (§19.2.2). An attribute copied with `strict` is validated here, as `xsl:attribute`'s
+//! validation is ([`Transformation::validate_attribute`]); XTTE0950 is decided before a
+//! `preserve` copy is made ([`Transformation::check_namespace_sensitive_copy`]). `xsl:document`
+//! and `xsl:result-document` announce [`document_boundary`]. **Document-level validation**
+//! ([`Validating`]): the document node's children are exactly one element, no text, any comments
+//! and processing instructions (XTTE1550, checked as the children arrive and at the end); the
+//! element is the root of a validation run that, unlike element-level validation, applies
+//! "Validation Root Valid (ID/IDREF)" — its `cvc-id.1` / `cvc-id.2` are XTTE1555, any other error
+//! XTTE1510; that run's verdict is given when the document node ends, after the structure rule.
+//! The documents of variables (§9.4) and of `xsl:message` (§17) are never validated: "This is
+//! equivalent to using validation="preserve" on xsl:document … Similarly, validation is not
+//! applied to document nodes created using xsl:message" (§19.2.2). `lax` and `type` on every
+//! constructor but `xsl:attribute` stay fenced (M4f).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -50,6 +70,7 @@ use std::rc::Rc;
 use xsd_schema::document::NodeSchemaBinding;
 use xsd_schema::ids::TypeKey;
 use xsd_schema::namespace::context::NamespaceContextSnapshot;
+use xsd_schema::navigator::{DomNavigator, DomNodeType, TypedValue};
 use xsd_schema::parser::frames::SimpleTypeVariety;
 use xsd_schema::types::value::{XmlAtomicValue, XmlValue, XmlValueKind};
 use xsd_schema::types::XmlTypeCode;
@@ -65,8 +86,11 @@ use super::eval::validation_fence;
 use super::{typed_sources, Transformation};
 use crate::error::{codes, XsltError};
 use crate::model::{Constructor, Validation};
-use crate::names::{QName, XSD_NS};
-use crate::receiver::{Boundary, Name, Nav, Receiver, ResultBuilder};
+use crate::names::{QName, XML_NS, XSD_NS};
+use crate::receiver::{
+    id_value_of, xtte1550, Boundary, CopyNamespaces, CopyValidation, Name, Nav, Receiver,
+    ResultBuilder,
+};
 use crate::whitespace;
 
 /// The XML Schema instance namespace (`xsi:type`, `xsi:nil`).
@@ -231,9 +255,11 @@ impl<'a, 't> Transformation<'a, 't> {
 }
 
 /// The boundary an element constructor (a literal result element, `xsl:element`, `xsl:copy` of an
-/// element) announces for `validation`: `strip`, `preserve` and `strict` (§19.2.1.1); every other
-/// value raises the fence of its owner — `lax` and `type` M4f, `xsl:copy` with anything but
-/// `strip` M4e.
+/// element) announces for `validation`: `strip`, `preserve` and `strict` (§19.2.1.1 — for
+/// `xsl:copy` of an element with `preserve`, "the copied element will have a type annotation of
+/// xs:anyType … but any contained nodes will have their type annotations retained in the same way
+/// as with xsl:element", which is [`Boundary::Preserve`]); every other value raises the fence of
+/// its owner — `lax` and `type` M4f.
 pub(super) fn element_boundary(
     validation: &Validation,
     constructor: Constructor,
@@ -241,13 +267,195 @@ pub(super) fn element_boundary(
 ) -> Result<Boundary, XsltError> {
     match validation {
         Validation::Strip => Ok(Boundary::Strip),
-        Validation::Preserve if constructor == Constructor::Element => Ok(Boundary::Preserve),
-        Validation::Strict if constructor == Constructor::Element => Ok(Boundary::Strict),
+        Validation::Preserve => Ok(Boundary::Preserve),
+        Validation::Strict => Ok(Boundary::Strict),
         _ => {
             validation_fence(validation, constructor, what)?;
-            unreachable!("only strip and preserve on an element constructor pass the fence")
+            unreachable!("lax and type on an element constructor are fenced")
         }
     }
+}
+
+/// The boundary of a document node an instruction constructs (`xsl:document`,
+/// `xsl:result-document`, `xsl:copy` of a document node) for `validation` (§19.2.2): `strip` and
+/// `preserve` "do not request validation" ([`Boundary::Strip`], [`Boundary::Preserve`]), `strict`
+/// requests document-level validation ([`Boundary::Strict`] on a document node); `lax` and `type`
+/// are M4f's fence.
+pub(super) fn document_boundary(
+    validation: &Validation,
+    constructor: Constructor,
+    what: &str,
+) -> Result<Boundary, XsltError> {
+    element_boundary(validation, constructor, what)
+}
+
+/// What `xsl:copy-of` (and `xsl:copy` of a node it does not construct anew) asks of the copy of
+/// each node ([`CopyValidation`]): `strip`, `preserve`, `strict`; `lax` and `type` are M4f's fence.
+pub(super) fn copy_validation(
+    validation: &Validation,
+    what: &str,
+) -> Result<CopyValidation, XsltError> {
+    match validation {
+        Validation::Strip => Ok(CopyValidation::Strip),
+        Validation::Preserve => Ok(CopyValidation::Preserve),
+        Validation::Strict => Ok(CopyValidation::Strict),
+        _ => {
+            validation_fence(validation, Constructor::Copy, what)?;
+            unreachable!("lax and type on a copy are fenced")
+        }
+    }
+}
+
+impl<'a, 't> Transformation<'a, 't> {
+    /// The copy `xsl:copy-of` or `xsl:copy` makes of an attribute node it copies, as `validation`
+    /// asks: `strict` validates it against the top-level declaration of its name as
+    /// `xsl:attribute`'s `strict` does (§19.2.1.1; XTTE1512, XTTE1510, and XTTE1545 — §19.2.1.3:
+    /// "it is an error to validate a parentless attribute against such a type. This affects the
+    /// instructions xsl:attribute, xsl:copy, and xsl:copy-of") and passes it on as an attribute
+    /// with its new annotation; `preserve` is XTTE0950 when the attribute has namespace-sensitive
+    /// content (it is copied without its parent element); otherwise the copy is the pipeline's
+    /// (`Receiver::append_copy`).
+    pub(super) fn copy_attribute_node(
+        &self,
+        nav: &Nav<'t>,
+        namespaces: CopyNamespaces,
+        validation: CopyValidation,
+        out: &mut dyn Receiver<'t>,
+    ) -> Result<(), XsltError> {
+        match validation {
+            CopyValidation::Strict => {
+                let name = Name::of(nav);
+                let (value, binding) =
+                    self.validate_attribute(&Validation::Strict, &name, nav.value())?;
+                out.attribute(&name, &value, binding)
+            }
+            CopyValidation::Preserve => {
+                self.check_same_schema_set(nav)?;
+                self.check_namespace_sensitive_copy(nav, false)?;
+                out.append_copy(&XmlItem::Node(nav.clone()), namespaces, validation)
+            }
+            CopyValidation::Strip => {
+                out.append_copy(&XmlItem::Node(nav.clone()), namespaces, validation)
+            }
+        }
+    }
+
+    /// A `preserve` copy carries the bindings of the node it copies, which name components of the
+    /// set its document is bound to — they mean nothing in another set (M4 plan D-2; upstream's
+    /// own `document::copy` refuses that case with `CopyError::SchemaMismatch`). Through the public
+    /// API no node of a run is typed against another set: admission strips such a tree, with a
+    /// warning (M4b), and a typed parameter of another set is refused; so this is an internal
+    /// error, checked rather than assumed.
+    pub(super) fn check_same_schema_set(&self, nav: &Nav<'t>) -> Result<(), XsltError> {
+        match (nav.document().schema_set(), self.schema_set) {
+            (None, _) => Ok(()),
+            (Some(source), Some(own)) if std::ptr::eq(source, own) => Ok(()),
+            _ => Err(XsltError::internal(
+                "validation=\"preserve\": a copy of a node typed against another schema set",
+            )),
+        }
+    }
+
+    /// XTTE0950 (§11.9.1): "It is a type error to use the xsl:copy or xsl:copy-of instruction to
+    /// copy a node that has namespace-sensitive content if the copy-namespaces attribute has the
+    /// value no and its explicit or implicit validation attribute has the value preserve. It is
+    /// also a type error if either of these instructions (with validation="preserve") is used to
+    /// copy an attribute having namespace-sensitive content, unless the parent element is also
+    /// copied. A node has namespace-sensitive content if its typed value contains an item of type
+    /// xs:QName or xs:NOTATION or a type derived therefrom."
+    ///
+    /// For a `preserve` copy of `nav`: an attribute copied on its own is checked whatever
+    /// `copy-namespaces` says (its parent is not copied); with `copy-namespaces="no"` (`subtree`
+    /// false: `xsl:copy`, which copies the node alone; true: `xsl:copy-of`, which copies the
+    /// elements and attributes below it too) every copied element and attribute is.
+    pub(super) fn check_namespace_sensitive_copy(
+        &self,
+        nav: &Nav<'t>,
+        subtree: bool,
+    ) -> Result<(), XsltError> {
+        let found = match nav.node_type() {
+            DomNodeType::Attribute => namespace_sensitive_content(nav).then(|| nav.clone()),
+            _ if subtree => first_namespace_sensitive(nav),
+            _ => namespace_sensitive_content(nav).then(|| nav.clone()),
+        };
+        match found {
+            None => Ok(()),
+            Some(node) => Err(XsltError::new(
+                codes::XTTE0950,
+                format!(
+                    "validation=\"preserve\" would copy the {} {} without the namespaces its \
+                     typed value, which contains an xs:QName or xs:NOTATION, depends on",
+                    if node.node_type() == DomNodeType::Attribute {
+                        "attribute"
+                    } else {
+                        "element"
+                    },
+                    display(&Name::of(&node))
+                ),
+            )),
+        }
+    }
+}
+
+/// Whether the node at `nav` has namespace-sensitive content (§11.9.1): "its typed value contains
+/// an item of type xs:QName or xs:NOTATION or a type derived therefrom" — the items of its typed
+/// value, so a union-typed node holding an integer has none, nor does an empty list. An untyped
+/// node's typed value is its string value as `xs:untypedAtomic`.
+fn namespace_sensitive_content(nav: &Nav<'_>) -> bool {
+    if nav.schema_binding().is_none() {
+        return false;
+    }
+    match nav.typed_value() {
+        TypedValue::Value(value) => contains_qname(&value),
+        _ => false,
+    }
+}
+
+fn contains_qname(value: &XmlValue) -> bool {
+    match &value.value {
+        XmlValueKind::List { items, .. } => items.iter().any(contains_qname),
+        XmlValueKind::Union(member) => contains_qname(member),
+        XmlValueKind::Atomic(XmlAtomicValue::QName(_) | XmlAtomicValue::Notation(_)) => true,
+        _ => matches!(value.type_code, XmlTypeCode::QName | XmlTypeCode::Notation),
+    }
+}
+
+/// The first element or attribute in the subtree of `nav` (itself included) with
+/// namespace-sensitive content, in document order.
+fn first_namespace_sensitive<'t>(nav: &Nav<'t>) -> Option<Nav<'t>> {
+    let mut stack = vec![nav.clone()];
+    while let Some(node) = stack.pop() {
+        if matches!(node.node_type(), DomNodeType::Element | DomNodeType::Root) {
+            if namespace_sensitive_content(&node) {
+                return Some(node);
+            }
+            let mut attr = node.clone();
+            if attr.move_to_first_attribute() {
+                loop {
+                    if namespace_sensitive_content(&attr) {
+                        return Some(attr);
+                    }
+                    if !attr.move_to_next_attribute() {
+                        break;
+                    }
+                }
+            }
+            let mut children = Vec::new();
+            let mut child = node.clone();
+            if child.move_to_first_child() {
+                loop {
+                    if child.node_type() == DomNodeType::Element {
+                        children.push(child.clone());
+                    }
+                    if !child.move_to_next_sibling() {
+                        break;
+                    }
+                }
+            }
+            stack.extend(children.into_iter().rev());
+        }
+    }
+    None
 }
 
 /// The type `name` denotes in the in-scope schema types: a built-in type of the XML Schema
@@ -398,6 +606,30 @@ fn display(name: &Name) -> String {
 /// replaced by a sequence containing each of its children"): their frame decides the annotations
 /// of what they contain, but their content is the enclosing element's ([`Frame::transparent`]).
 ///
+/// **Document-level validation** (§19.2.2; a document node opened with [`Boundary::Strict`] —
+/// `xsl:document`, `xsl:result-document`, a copy of a document node — wherever it is, in element
+/// content too: the document node is validated before §5.7.1 replaces it by its children).
+/// Its children are checked as they arrive ([`DocumentCheck`]): a text node or a second element
+/// child is XTTE1550 at once, no element child XTTE1550 at its end ("unless the children of the
+/// document node comprise exactly one element node, no text nodes, and zero or more comment and
+/// processing instruction nodes"). "The single element node child is validated, using the
+/// supplied values of the validation and type attributes, as described in 19.2.1": a run of its
+/// own rooted at it (XTTE1512 without a top-level declaration), outside the element's own `strict`
+/// run if it has one, and the outermost enclosing boundary that is not `preserve` — at least this
+/// document's — decides the annotations. Unlike element-level validation, "The validation rule
+/// "Validation Root Valid (ID/IDREF)" is applied", so its `cvc-id.1` / `cvc-id.2` are XTTE1555;
+/// the run's verdict waits for the end of the document node, where the structure rule has had its
+/// say ([`Validating::end_run`]). Nested document nodes of document content count as one (their
+/// children are the outer one's, [`Validating::document_parents`]); a document node in element
+/// content that stays empty never reaches this receiver, so the normalizer raises XTTE1550 for it.
+///
+/// **The document's decider** ([`Decider::Document`]): a document node validated as a document,
+/// where nothing outside it decides, decides what opens inside it — another document node or a
+/// copy between it and its element child included — and hands over to its run at that element.
+///
+/// **Ids a `strip` copy keeps** arrive as `Receiver::element_id` after their (untyped) attribute:
+/// filed for the element, unless runs are open — then the runs' assessment decides is-id.
+///
 /// A start tag is passed on to the builder as it arrives when no run is open (the common case);
 /// under a run it is held until its last attribute, when the validation has seen it, and the text
 /// of the element's content until the next event that ends a text node.
@@ -424,6 +656,12 @@ enum Decider {
     Strip,
     /// The validation run with this index in `Validating::runs`.
     Run(usize),
+    /// The document-level validation of the document node whose frame has this index (§19.2.2):
+    /// the decider of that document node and of what opens inside it until its element child, the
+    /// root of the run that then decides ([`Decider::Run`]) — so that a `strip` or `preserve`
+    /// container inside the validated document (another `xsl:document`, a copy) does not take its
+    /// place.
+    Document(usize),
 }
 
 /// One open container (element or document node).
@@ -431,8 +669,14 @@ struct Frame {
     decider: Decider,
     /// The boundary the container's instruction announced.
     boundary: Option<Boundary>,
-    /// The container is an element that roots the innermost run.
-    roots_run: bool,
+    /// How many runs the container (an element) roots — the innermost ones: its own `strict`
+    /// boundary's, and that of the document-level validation of the document node it is the
+    /// element child of.
+    roots_runs: usize,
+    /// The container is a document node.
+    document_node: bool,
+    /// A document node whose validation is requested (§19.2.2): what its children were so far.
+    document: Option<DocumentCheck>,
     /// The namespace declarations of the element, as the normalizer wrote them.
     namespaces: Vec<(String, String)>,
     /// A document node inside another container: its children are the container's (§5.7.1), so
@@ -467,6 +711,18 @@ enum Held {
     Pi(String, String),
 }
 
+/// The children of a document node validated as a document so far (§19.2.2).
+#[derive(Default)]
+struct DocumentCheck {
+    /// Element children.
+    elements: u32,
+    /// The error the validation of the element child ended with — given when the document node
+    /// ends, after XTTE1550 ("unless the children of the document node comprise exactly one
+    /// element node, no text nodes …" comes before "The single element node child is
+    /// validated").
+    deferred: Option<XsltError>,
+}
+
 struct StartTag {
     name: Name,
     binding: Option<NodeSchemaBinding>,
@@ -474,11 +730,13 @@ struct StartTag {
     attributes: Vec<(Name, String, Option<NodeSchemaBinding>)>,
 }
 
-/// One validation run: a `strict` boundary's.
+/// One validation run: a `strict` element boundary's, or the document-level validation of the
+/// element child of a document node (`document`: the index of that document node's frame).
 struct Run<'v> {
     runtime: ValidationRuntime<'v, RunSink>,
     errors: Rc<RefCell<Vec<ValidationError>>>,
     root: Name,
+    document: Option<usize>,
 }
 
 /// Collects a run's errors.
@@ -558,20 +816,24 @@ impl<'v, 't> Validating<'v, 't> {
     /// as the upstream builder decides it for a bound attribute: the typed value is exactly one
     /// atomic value of type `xs:ID` or a type derived from it.
     fn id_value(&self, value: &str, type_key: TypeKey) -> Option<String> {
-        let set = self.set?;
-        let typed = validate_simple_type(value, type_key, set).ok()?.typed_value;
-        single_id(&typed).map(str::to_string)
+        id_value_of(value, type_key, self.set?)
     }
 
     /// The decider of a container opened inside the current one with `boundary`.
     fn decider_of(&self, boundary: Option<Boundary>, run: Option<usize>) -> Decider {
         match self.decider() {
-            Decider::Nothing => match (boundary, run) {
-                (Some(Boundary::Strip), _) => Decider::Strip,
-                (Some(Boundary::Strict), Some(run)) => Decider::Run(run),
-                _ => Decider::Nothing,
-            },
+            Decider::Nothing => self.own_decider(boundary, run),
             outer => outer,
+        }
+    }
+
+    /// The decider a container's own `boundary` (and the run it started) makes, when nothing
+    /// encloses it that decides.
+    fn own_decider(&self, boundary: Option<Boundary>, run: Option<usize>) -> Decider {
+        match (boundary, run) {
+            (Some(Boundary::Strip), _) => Decider::Strip,
+            (Some(Boundary::Strict), Some(run)) => Decider::Run(run),
+            _ => Decider::Nothing,
         }
     }
 
@@ -853,6 +1115,11 @@ impl<'v, 't> Validating<'v, 't> {
                 }
                 let prefix = if uri.is_empty() {
                     String::new()
+                } else if uri == XML_NS {
+                    // Namespaces in XML 1.0 §3: "The prefix xml is by definition bound to the
+                    // namespace name http://www.w3.org/XML/1998/namespace … Other prefixes MUST
+                    // NOT be bound to this namespace name."
+                    "xml".to_string()
                 } else {
                     self.prefix_for(&uri)
                 };
@@ -931,7 +1198,8 @@ impl<'v, 't> Validating<'v, 't> {
                 };
                 (binding, info.is_nil)
             }
-            Decider::Nothing => {
+            // An element's own decider is never `Document` (its start converts it).
+            Decider::Nothing | Decider::Document(_) => {
                 let own = self.frames.last().and_then(|frame| frame.boundary);
                 if own == Some(Boundary::Preserve) {
                     (self.any_type(), false)
@@ -967,15 +1235,24 @@ impl<'v, 't> Validating<'v, 't> {
                     None
                 }
                 Decider::Run(run) => slot.infos[run].as_ref().and_then(attribute_binding),
-                Decider::Nothing => slot.incoming,
+                // An element's own decider is never `Document` (its start converts it).
+                Decider::Nothing | Decider::Document(_) => slot.incoming,
             };
             self.out.attribute(&slot.name, &slot.value, binding)?;
         }
         self.out.end_start_tag()
     }
 
-    /// Ends the innermost run, rooted at the element that just ended: XTTE1510 for any error it
-    /// reported but the two ID/IDREF ones §19.2.1.3 excludes.
+    /// Ends the innermost run, rooted at the element that just ended.
+    ///
+    /// An element-level run: XTTE1510 for any error it reported but the two ID/IDREF ones
+    /// §19.2.1.3 excludes. A document-level one (§19.2.2): "The validation rule "Validation Root
+    /// Valid (ID/IDREF)" is applied to the single element node child of the document node" — its
+    /// `cvc-id.1` (a dangling IDREF) and `cvc-id.2` (a duplicate ID) are XTTE1555 ("It is a type
+    /// error if, when validating a document node, document-level constraints are not satisfied"),
+    /// any other error is the element's own invalidity, XTTE1510, which comes first (decision
+    /// D-e5: an identity constraint is part of the element's validation, §19.2.1.3); the verdict is
+    /// kept on the document node's frame until it ends.
     fn end_run(&mut self) -> Result<(), XsltError> {
         let Some(mut run) = self.runs.pop() else {
             return Ok(());
@@ -983,23 +1260,125 @@ impl<'v, 't> Validating<'v, 't> {
         let failure = run.runtime.end_validation().err();
         let mut errors: Vec<ValidationError> = std::mem::take(&mut *run.errors.borrow_mut());
         errors.extend(failure);
-        // §19.2.1.3: "The validation rule "Validation Root Valid (ID/IDREF)" is not applied."
-        errors.retain(|error| !matches!(error.constraint, "cvc-id.1" | "cvc-id.2"));
-        let Some(first) = errors.first() else {
-            return Ok(());
-        };
-        let more = match errors.len() {
+        let is_id = |error: &ValidationError| matches!(error.constraint, "cvc-id.1" | "cvc-id.2");
+        let (id_errors, errors): (Vec<ValidationError>, Vec<ValidationError>) =
+            errors.into_iter().partition(is_id);
+        let count = |n: usize| match n {
             1 => String::new(),
             n => format!(" (and {} more)", n - 1),
         };
-        Err(XsltError::new(
-            codes::XTTE1510,
-            format!(
-                "validation=\"strict\": the element {} is not valid against its top-level \
-                 declaration: {first}{more}",
-                display(&run.root)
-            ),
-        ))
+        let error = if let Some(first) = errors.first() {
+            // §19.2.1.3: "The validation rule "Validation Root Valid (ID/IDREF)" is not applied" to
+            // element-level validation — and its errors are not the element's invalidity.
+            XsltError::new(
+                codes::XTTE1510,
+                format!(
+                    "validation=\"strict\": the element {} is not valid against its top-level \
+                     declaration: {first}{}",
+                    display(&run.root),
+                    count(errors.len())
+                ),
+            )
+        } else {
+            match (run.document, id_errors.first()) {
+                (Some(_), Some(first)) => XsltError::new(
+                    codes::XTTE1555,
+                    format!(
+                        "the validated document whose element is {} breaks the ID/IDREF rules: \
+                         {first}{}",
+                        display(&run.root),
+                        count(id_errors.len())
+                    ),
+                ),
+                _ => return Ok(()),
+            }
+        };
+        match run.document.and_then(|frame| self.frames.get_mut(frame)) {
+            Some(Frame {
+                document: Some(check),
+                ..
+            }) => {
+                check.deferred.get_or_insert(error);
+                Ok(())
+            }
+            _ => Err(error),
+        }
+    }
+
+    /// Whether the element `name` has a top-level declaration: `Err` inside is XTTE1512, "If the
+    /// validation attribute … has the effective value strict, and there is no matching top-level
+    /// declaration in the schema, then a type error occurs" (§19.2.1.1) — for an element
+    /// constructor and for the element child of a validated document node alike (§19.2.2: "The
+    /// single element node child is validated … as described in 19.2.1").
+    fn declared(&self, name: &Name) -> Result<Result<(), XsltError>, XsltError> {
+        let set = self.set.ok_or_else(|| {
+            XsltError::internal("validation of a constructed element without a schema set")
+        })?;
+        let names = &set.name_table;
+        let declared = names.get(&name.local).is_some_and(|local| {
+            let ns = if name.uri.is_empty() {
+                Some(None)
+            } else {
+                names.get(&name.uri).map(Some)
+            };
+            ns.is_some_and(|ns| set.lookup_element(ns, local).is_some())
+        });
+        Ok(if declared {
+            Ok(())
+        } else {
+            Err(XsltError::new(
+                codes::XTTE1512,
+                format!(
+                    "validation=\"strict\": there is no top-level declaration of the element {}",
+                    display(name)
+                ),
+            ))
+        })
+    }
+
+    /// Starts a validation run rooted at the element `name` about to open — the document-level
+    /// validation of the document node whose frame is `document`, if given — and returns its
+    /// index.
+    fn start_run(&mut self, name: &Name, document: Option<usize>) -> Result<usize, XsltError> {
+        let Some(validator) = self.validator else {
+            return Err(XsltError::internal(
+                "a strict boundary in a tree built without a validator",
+            ));
+        };
+        let errors = Rc::new(RefCell::new(Vec::new()));
+        self.runs.push(Run {
+            runtime: validator.start_run(RunSink(Rc::clone(&errors))),
+            errors,
+            root: name.clone(),
+            document,
+        });
+        Ok(self.runs.len() - 1)
+    }
+
+    /// The frames of the document nodes whose children the next node is — the innermost run of
+    /// consecutive document-node frames (§5.7.1: a document node in document content is replaced
+    /// by its children too) —, as a range of frame indices.
+    fn document_parents(&self) -> std::ops::Range<usize> {
+        let end = self.frames.len();
+        let start = self
+            .frames
+            .iter()
+            .rposition(|frame| !frame.document_node)
+            .map_or(0, |element| element + 1);
+        start..end
+    }
+
+    /// §19.2.2, XTTE1550, for a text node about to be a child of the document nodes being built: "A
+    /// type error occurs unless the children of the document node comprise exactly one element
+    /// node, no text nodes, and zero or more comment and processing instruction nodes".
+    fn check_document_text(&self) -> Result<(), XsltError> {
+        if self
+            .document_parents()
+            .any(|frame| self.frames[frame].document.is_some())
+        {
+            return Err(xtte1550("a text node"));
+        }
+        Ok(())
     }
 
     /// Passes on content that a simple-content element held.
@@ -1070,24 +1449,6 @@ fn schema_normalized(
     }
 }
 
-/// The `xs:ID` value a typed value consists of, when it is exactly one atomic value of type
-/// `xs:ID` or a type derived from it (every type derived from `xs:ID` validates to the `xs:ID`
-/// type code); a union value counts by its member's value, a list value when it has exactly one
-/// item.
-fn single_id(value: &XmlValue) -> Option<&str> {
-    match &value.value {
-        XmlValueKind::Atomic(XmlAtomicValue::String(id)) if value.type_code == XmlTypeCode::Id => {
-            Some(id)
-        }
-        XmlValueKind::Union(member) => single_id(member),
-        XmlValueKind::List { items, .. } => match items.as_slice() {
-            [member] => single_id(member),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 impl<'t> Receiver<'t> for Validating<'_, 't> {
     // A basic processor's trees (no schema set) are never typed (§21.1): every event goes straight
     // to the builder.
@@ -1097,12 +1458,21 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
             return self.out.start_document();
         }
         let boundary = self.next_boundary.take();
-        let decider = self.decider_of(boundary, None);
+        // A document node validated as a document decides what it contains when nothing outside
+        // it does (its run starts at its element child).
+        let decider = match (self.decider(), boundary) {
+            (Decider::Nothing, Some(Boundary::Strict)) => Decider::Document(self.frames.len()),
+            _ => self.decider_of(boundary, None),
+        };
         let transparent = !self.frames.is_empty();
         self.frames.push(Frame {
             decider,
             boundary,
-            roots_run: false,
+            roots_runs: 0,
+            document_node: true,
+            // §19.2.2: "When validation is requested for a document node (that is, when
+            // validation is set to strict or lax, or when a type attribute is present)".
+            document: (boundary == Some(Boundary::Strict)).then(DocumentCheck::default),
             namespaces: Vec::new(),
             transparent,
             views: Vec::new(),
@@ -1113,13 +1483,26 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
 
     fn end_document(&mut self) -> Result<(), XsltError> {
         if self.set.is_some() {
-            self.frames.pop();
+            // (A document node in element content does not end the text node being built: its
+            // children are the element's content, §5.7.1.)
+            let frame = self.frames.pop().expect("a document node is open");
+            if let Some(check) = frame.document {
+                if check.elements == 0 {
+                    return Err(xtte1550("no element child"));
+                }
+                if let Some(error) = check.deferred {
+                    return Err(error);
+                }
+            }
         }
         self.out.end_document()
     }
 
     fn validation_boundary(&mut self, boundary: Boundary) -> Result<(), XsltError> {
-        self.next_boundary = Some(boundary);
+        // A basic processor's trees are never typed (§21.1).
+        if self.set.is_some() {
+            self.next_boundary = Some(boundary);
+        }
         Ok(())
     }
 
@@ -1141,46 +1524,59 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
             }
         }
         let boundary = self.next_boundary.take();
+        let mut roots_runs = 0;
+        // §19.2.2: the element child of a document node validation is requested for — "The
+        // single element node child is validated, using the supplied values of the validation and
+        // type attributes, as described in 19.2.1" — is the root of a run of its own, outside the
+        // element's own (a parent's validation is applied after a child's, §19.2.1.1); a second
+        // element child is XTTE1550.
+        let mut document_runs: Vec<(usize, usize)> = Vec::new();
+        for frame in self.document_parents() {
+            let Some(check) = self.frames[frame].document.as_mut() else {
+                continue;
+            };
+            check.elements += 1;
+            if check.elements > 1 {
+                return Err(xtte1550("more than one element child"));
+            }
+            match self.declared(name)? {
+                Ok(()) => {
+                    let run = self.start_run(name, Some(frame))?;
+                    document_runs.push((frame, run));
+                    roots_runs += 1;
+                }
+                // Given when the document node ends, after its structure rule.
+                Err(error) => {
+                    let check = self.frames[frame].document.as_mut().expect("checked");
+                    check.deferred.get_or_insert(error);
+                }
+            }
+        }
         let mut run = None;
         if boundary == Some(Boundary::Strict) {
-            let (Some(set), Some(validator)) = (self.set, self.validator) else {
-                return Err(XsltError::internal(
-                    "a strict element boundary in a tree built without a validator",
-                ));
-            };
             // XTTE1512: "there is no matching top-level declaration in the schema" — decided
             // before validating.
-            let names = &set.name_table;
-            let declared = names.get(&name.local).is_some_and(|local| {
-                let ns = if name.uri.is_empty() {
-                    Some(None)
-                } else {
-                    names.get(&name.uri).map(Some)
-                };
-                ns.is_some_and(|ns| set.lookup_element(ns, local).is_some())
-            });
-            if !declared {
-                return Err(XsltError::new(
-                    codes::XTTE1512,
-                    format!(
-                        "validation=\"strict\": there is no top-level declaration of the element {}",
-                        display(name)
-                    ),
-                ));
-            }
-            let errors = Rc::new(RefCell::new(Vec::new()));
-            self.runs.push(Run {
-                runtime: validator.start_run(RunSink(Rc::clone(&errors))),
-                errors,
-                root: name.clone(),
-            });
-            run = Some(self.runs.len() - 1);
+            self.declared(name)??;
+            run = Some(self.start_run(name, None)?);
+            roots_runs += 1;
         }
-        let decider = self.decider_of(boundary, run);
+        // The outermost enclosing boundary that is not `preserve` decides: a validated document's
+        // run (outside the element's own, and outside any container between the document node and
+        // its element child), else what decides around the element.
+        let decider = match self.decider() {
+            Decider::Document(frame) => match document_runs.iter().find(|(f, _)| *f == frame) {
+                Some(&(_, run)) => Decider::Run(run),
+                // The element has no declaration: XTTE1512 when the document node ends.
+                None => self.own_decider(boundary, run),
+            },
+            _ => self.decider_of(boundary, run),
+        };
         self.frames.push(Frame {
             decider,
             boundary,
-            roots_run: run.is_some(),
+            roots_runs,
+            document_node: false,
+            document: None,
             namespaces: Vec::new(),
             transparent: false,
             views: Vec::new(),
@@ -1241,6 +1637,16 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
         self.out.attribute(name, value, binding)
     }
 
+    /// The id an untyped copied attribute keeps (`Receiver::element_id`): filed for the element —
+    /// unless validation runs are open, whose assessment of the attribute decides its is-id (a
+    /// copy's attributes are re-assessed like any other; §19.2.1.3's serialize–parse–validate).
+    fn element_id(&mut self, id: &str) -> Result<(), XsltError> {
+        if self.start.is_none() {
+            self.out.file_id(id.to_string());
+        }
+        Ok(())
+    }
+
     fn end_start_tag(&mut self) -> Result<(), XsltError> {
         match self.start.take() {
             Some(start) => self.finish_start_tag(start),
@@ -1251,6 +1657,9 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
     fn text(&mut self, s: &str, disable_escaping: bool) -> Result<(), XsltError> {
         if s.is_empty() {
             return Ok(());
+        }
+        if self.set.is_some() {
+            self.check_document_text()?;
         }
         if self.runs.is_empty() {
             return self.out.text(s, disable_escaping);
@@ -1305,7 +1714,7 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
             Some(held) => self.settle(held, &frame.views, true)?,
             None => self.pass_pending(&frame.views, true)?,
         }
-        if frame.roots_run {
+        for _ in 0..frame.roots_runs {
             self.end_run()?;
         }
         self.out.end_element()

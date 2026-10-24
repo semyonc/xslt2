@@ -2,7 +2,7 @@
 //! document an `xsl:message` builds (§17).
 
 use xsd_schema::document::BufferDocumentOptions;
-use xsd_schema::navigator::DomNavigator;
+use xsd_schema::navigator::{DomNavigator, DomNodeType};
 use xsd_schema::types::value::XmlValue;
 use xsd_schema::validation::validate_simple_type;
 use xsd_schema::xpath::functions::{atomize_sequence, XPathValue};
@@ -13,7 +13,9 @@ use super::validate::Validating;
 use super::{Frame, Transformation};
 use crate::error::XsltError;
 use crate::model::*;
-use crate::receiver::{Boundary, ComplexContentNormalizer, Name, Nav, Receiver, ResultBuilder};
+use crate::receiver::{
+    Boundary, ComplexContentNormalizer, CopyValidation, Name, Nav, Receiver, ResultBuilder,
+};
 
 impl<'a, 't> Transformation<'a, 't> {
     /// §5.6: the effective value of an attribute value template.
@@ -497,18 +499,36 @@ impl<'t> Receiver<'t> for SimpleContentCollector<'_, '_, 't> {
         &mut self,
         item: &XmlItem<Nav<'t>>,
         namespaces: crate::receiver::CopyNamespaces,
+        validation: CopyValidation,
     ) -> Result<(), XsltError> {
         if self.depth > 0 {
-            return self.nested()?.append_copy(item, namespaces);
+            return self.nested()?.append_copy(item, namespaces, validation);
         }
-        // A copy is untyped (`validation="strip"`; any other value is M4e's fence) and has the
-        // same string value as its original, which is its typed value.
-        match item {
-            XmlItem::Node(nav) if !nav.node_type().is_text_like() => {
+        let XmlItem::Node(nav) = item else {
+            return self.append_item(item);
+        };
+        if nav.node_type().is_text_like() {
+            return self.append_item(item);
+        }
+        match (validation, nav.node_type()) {
+            // `preserve`: the copy keeps the original's annotation, so it atomizes to the
+            // original's typed value — as the original does (`append_item`).
+            (CopyValidation::Preserve, _) => self.append_item(item),
+            // `strict`: the copy of an element or document node is validated (§19.2.1.1,
+            // §19.2.2), so it is built — through the transformation's pipeline, like a node the
+            // content constructs — and contributes its typed value. (An attribute is validated
+            // by the instruction and arrives through `attribute`.)
+            (CopyValidation::Strict, kind @ (DomNodeType::Element | DomNodeType::Root)) => {
+                self.open(kind == DomNodeType::Root)?;
+                self.nested()?.copy_selected(nav, namespaces, validation)?;
+                self.close()
+            }
+            // `strip` (and what validation does not apply to): untyped, so the typed value is the
+            // string value of the original.
+            _ => {
                 self.push_atomic(nav.value());
                 Ok(())
             }
-            _ => self.append_item(item),
         }
     }
 }

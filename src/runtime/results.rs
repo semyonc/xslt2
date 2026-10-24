@@ -131,7 +131,11 @@ impl<'a, 't> Transformation<'a, 't> {
                  xsl:value-of, xsl:message, sort key, key, stylesheet function or xsl:document",
             ));
         }
-        super::eval::validation_fence(
+        // §19.2.2: "The optional attributes type and validation may be used on the
+        // xsl:result-document instruction to validate the contents of the new document" —
+        // `strict` validates the document, `preserve` keeps what it contains, `strip` untypes it
+        // (`lax` and `type` are M4f's).
+        let boundary = super::validate::document_boundary(
             &rd.validation,
             crate::model::Constructor::Document,
             "xsl:result-document",
@@ -252,8 +256,7 @@ impl<'a, 't> Transformation<'a, 't> {
             crate::receiver::Annotations::of_copies(self.schema_set),
         )
         .honouring_disabled_escaping();
-        // Only `strip` gets past the fence above (M4e owns the others).
-        out.validation_boundary(crate::receiver::Boundary::Strip)?;
+        out.validation_boundary(boundary)?;
         out.start_document()?;
         self.eval_body(&rd.body, frame, cx, &mut out)?;
         out.end_document()?;
@@ -431,11 +434,16 @@ impl<'t> Receiver<'t> for InitialResult<'_, 't> {
         self.out.validation_boundary(boundary)
     }
 
+    fn element_id(&mut self, id: &str) -> Result<(), XsltError> {
+        self.out.element_id(id)
+    }
+
     fn append_copy(
         &mut self,
         item: &XmlItem<Nav<'t>>,
         namespaces: CopyNamespaces,
+        validation: crate::receiver::CopyValidation,
     ) -> Result<(), XsltError> {
-        self.mark().append_copy(item, namespaces)
+        self.mark().append_copy(item, namespaces, validation)
     }
 }

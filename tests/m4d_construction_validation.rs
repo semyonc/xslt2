@@ -748,19 +748,15 @@ fn xml_namespace_attributes_validate_strictly() {
 
 // ── What part 1 leaves fenced ───────────────────────────────────────────────────────────────
 
-/// `lax` and `type` on elements are M4f's, copies and document nodes M4e's (M4_PLAN §4): each
-/// still raises `XSLT2-NOTIMPL` naming its owner when evaluated. (Element validation, part 2, and
-/// `lax` on `xsl:attribute`, decision D-d1, were in this list until part 2.)
+/// `lax` and `type` on elements are M4f's (M4_PLAN §4): each still raises `XSLT2-NOTIMPL` naming its
+/// owner when evaluated. (Element validation, part 2, and `lax` on `xsl:attribute`, decision D-d1,
+/// were in this list until part 2; copies and document nodes, M4e's, until M4e —
+/// `tests/m4e_copies_documents.rs`.)
 #[test]
 fn what_part_1_does_not_implement_stays_fenced() {
     let cases = [
         (r#"<e xsl:validation="lax"/>"#, "M4f"),
         (r#"<e xsl:type="d:size"/>"#, "M4f"),
-        (r#"<xsl:copy-of select="/" validation="preserve"/>"#, "M4e"),
-        (
-            r#"<xsl:document validation="preserve"><e/></xsl:document>"#,
-            "M4e",
-        ),
         // An XPath 2.0 type an XML Schema 1.0 set has no definition of (§3.13 puts it in scope):
         // M4g's XSD 1.1 mode has one (upstream proposal C72 for 1.0).
         (
@@ -771,15 +767,16 @@ fn what_part_1_does_not_implement_stays_fenced() {
     for (body, owner) in cases {
         assert_eq!(fenced("", body), owner, "{body}");
     }
-    // `default-validation="preserve"` gives `xsl:copy-of` the value `preserve` (§3.6): M4e's.
+    // `default-validation="preserve"` gives `xsl:copy-of` the value `preserve` (§3.6), which runs
+    // since M4e: the copy keeps its annotation, here in the implicit final result tree, which the
+    // principal module's `preserve` does not strip (decision D-d3).
     let main = sheet_with(
         r#"default-validation="preserve""#,
-        r#"<xsl:template match="/"><out><xsl:copy-of select="/d:doc"/></out></xsl:template>"#,
+        r#"<xsl:template match="/"><out><xsl:copy-of select="/d:doc/d:item[1]"/></out></xsl:template>"#,
     );
-    let e = run(&main).unwrap_err();
-    assert!(
-        e.is_not_implemented() && e.message.ends_with("(M4e)"),
-        "{e}"
+    assert_eq!(
+        run(&main).unwrap(),
+        r#"<out><d:item xmlns:d="urn:m4d" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" key="k1" d:color="red">5</d:item></out>"#
     );
 }
 

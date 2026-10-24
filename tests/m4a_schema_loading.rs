@@ -837,9 +837,10 @@ fn a_validation_value_that_is_not_permitted_is_xtse0020() {
 
 /// A non-`strip` `[xsl:]validation`, and `[xsl:]type`, are accepted when the stylesheet is compiled and
 /// raise `XSLT2-NOTIMPL` naming the owning sub-milestone when the instruction is evaluated (M4_PLAN §4):
-/// M4e copies and documents, M4f `type` on elements and copies and `lax` but on `xsl:attribute`. What
-/// M4d implements — `preserve` and `strict` on an element constructor, `strict`, `lax` and `type` on
-/// `xsl:attribute` — runs (`tests/m4d_construction_validation.rs` checks what it does).
+/// M4f `type` on elements, copies and documents and `lax` but on `xsl:attribute`. What M4d implements —
+/// `preserve` and `strict` on an element constructor, `strict`, `lax` and `type` on `xsl:attribute` —
+/// and M4e — `preserve` and `strict` on copies and document nodes — runs
+/// (`tests/m4d_construction_validation.rs` and `tests/m4e_copies_documents.rs` check what they do).
 #[test]
 fn a_non_strip_validation_is_fenced_with_its_owner_when_evaluated() {
     for (body, expected) in [
@@ -863,6 +864,26 @@ fn a_non_strip_validation_is_fenced_with_its_owner_when_evaluated() {
             r#"<e><xsl:attribute name="a" validation="lax">1</xsl:attribute></e>"#,
             Ok(r#"<e a="1"/>"#),
         ),
+        // M4e: a `preserve` copy; document-level validation of a copy of the source's document node
+        // (its element `doc` has no top-level declaration: XTTE1512), of an empty copy of it
+        // (XTTE1550: no element child), of `xsl:document` and `xsl:result-document`.
+        (
+            r#"<xsl:copy-of select="." validation="preserve"/>"#,
+            Ok("<doc/>"),
+        ),
+        (
+            r#"<xsl:copy-of select="." validation="strict"/>"#,
+            Err(codes::XTTE1512),
+        ),
+        (r#"<xsl:copy validation="strict"/>"#, Err(codes::XTTE1550)),
+        (
+            r#"<xsl:document validation="strict"><e/></xsl:document>"#,
+            Err(codes::XTTE1512),
+        ),
+        (
+            r#"<xsl:result-document validation="strict"><e/></xsl:result-document>"#,
+            Err(codes::XTTE1512),
+        ),
     ] {
         let main = sheet(&format!("{IMPORT_HATS}{}", root_template(body)));
         let result = run_sa(&main, &hat_files());
@@ -872,17 +893,6 @@ fn a_non_strip_validation_is_fenced_with_its_owner_when_evaluated() {
         }
     }
     let cases = [
-        (r#"<xsl:copy-of select="." validation="strict"/>"#, "M4e"),
-        (r#"<xsl:copy-of select="." validation="preserve"/>"#, "M4e"),
-        (r#"<xsl:copy validation="strict"/>"#, "M4e"),
-        (
-            r#"<xsl:document validation="strict"><e/></xsl:document>"#,
-            "M4e",
-        ),
-        (
-            r#"<xsl:result-document validation="strict"><e/></xsl:result-document>"#,
-            "M4e",
-        ),
         (r#"<e xsl:type="h:hatType"/>"#, "M4f"),
         (r#"<xsl:element name="e" type="h:hatType"/>"#, "M4f"),
         (r#"<xsl:copy-of select="." type="h:hatType"/>"#, "M4f"),
@@ -930,7 +940,7 @@ fn an_unevaluated_or_strip_validation_runs() {
 fn default_validation_is_the_default_of_its_own_module_only() {
     // The imported module says `preserve`; its template is called and constructs an element: M4d
     // implements `preserve` (part 1), so it runs; an `xsl:copy-of` there, whose validation the
-    // default makes `preserve`, is M4e's.
+    // default makes `preserve`, runs too since M4e.
     let imported = sheet_with(
         r#"default-validation="preserve""#,
         r#"<xsl:template name="make"><made/></xsl:template>
@@ -946,10 +956,7 @@ fn default_validation_is_the_default_of_its_own_module_only() {
         r#"<xsl:import href="imported.xsl"/>{}"#,
         root_template(r#"<out><xsl:call-template name="copy"/></out>"#)
     ));
-    assert_eq!(
-        fenced(run_sa(&main, &files)),
-        (Stage::Run, "M4e".to_string())
-    );
+    assert_eq!(run_sa(&main, &files).unwrap(), "<out><doc/></out>");
 
     // The principal module's own `strip` default is not changed by the imported module.
     let main = sheet(&format!(

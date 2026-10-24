@@ -13,8 +13,8 @@ use crate::error::{codes, XsltError};
 use crate::model::*;
 use crate::names::{is_ncname, lexical_qname, QName, XML_NS};
 use crate::receiver::{
-    namespace_nodes_of, Boundary, CopyNamespaces, Name, Nav, Receiver, SequenceCollector,
-    TemporaryOutputState,
+    namespace_nodes_of, Boundary, CopyNamespaces, CopyValidation, Name, Nav, Receiver,
+    SequenceCollector, TemporaryOutputState,
 };
 use crate::stylesheet::attr_ns;
 use crate::whitespace;
@@ -420,19 +420,24 @@ impl<'a, 't> Transformation<'a, 't> {
             }
 
             InstructionKind::Document { validation, body } => {
-                validation_fence(validation, Constructor::Document, "xsl:document")?;
                 // §11.5: a new document node whose content is the sequence
                 // constructor; in element content it contributes its children.
                 // "The temporary tree rooted at this document node forms the
                 // result tree", so the content is written in temporary output
                 // state (§19.1) and `disable-output-escaping` is ignored in it
                 // (§20.2), wherever the children end up — and an
-                // xsl:result-document in it is XTDE1480. Only `strip` gets past
-                // the fence (M4e owns the others), and §19.2.2 makes it untype
-                // the tree: "elements within the tree have their type annotation
-                // set to xs:untyped, while attributes have their type annotation
-                // set to xs:untypedAtomic".
-                out.validation_boundary(Boundary::Strip)?;
+                // xsl:result-document in it is XTDE1480. "The optional
+                // attributes type and validation may be used on the
+                // xsl:document instruction to validate the contents of the new
+                // document" (§19.2.2): `strip` untypes the tree, `preserve`
+                // keeps what it contains, `strict` validates the document
+                // (`lax` and `type` are M4f's).
+                let boundary = super::validate::document_boundary(
+                    validation,
+                    Constructor::Document,
+                    "xsl:document",
+                )?;
+                out.validation_boundary(boundary)?;
                 out.start_document()?;
                 out.document_base_uri(&self.sheet.static_contexts.get(instruction.ctx).base_uri)?;
                 self.eval_body(
@@ -451,12 +456,14 @@ impl<'a, 't> Transformation<'a, 't> {
                 validation,
                 body,
             } => {
-                validation_fence(validation, Constructor::Copy, "xsl:copy")?;
+                // `lax` and `type` are M4f's, whatever the context item is.
+                super::validate::copy_validation(validation, "xsl:copy")?;
                 self.copy_shallow(
                     ShallowCopyNamespaces {
                         copy: copy_scope(*copy_namespaces),
                         inherit: *inherit_namespaces,
                     },
+                    validation,
                     attr_sets,
                     body,
                     &self.sheet.static_contexts.get(instruction.ctx).base_uri,
@@ -471,7 +478,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 copy_namespaces,
                 validation,
             } => {
-                validation_fence(validation, Constructor::Copy, "xsl:copy-of")?;
+                let validation = super::validate::copy_validation(validation, "xsl:copy-of")?;
                 let value = self.eval_expr(*select, frame, cx)?;
                 let scope = copy_scope(*copy_namespaces);
                 for item in value.into_vec() {
@@ -479,7 +486,23 @@ impl<'a, 't> Transformation<'a, 't> {
                     // *constructed anew*, so this is `append_copy`, never
                     // `append_item` — the difference only shows in a sequence
                     // collector, where `append_item` would keep the original.
-                    out.append_copy(&item, scope)?;
+                    // "These attributes are applied individually to each
+                    // element, attribute, and document node that is selected".
+                    match &item {
+                        XmlItem::Node(nav) if nav.node_type() == DomNodeType::Attribute => {
+                            self.copy_attribute_node(nav, scope, validation, out)?;
+                        }
+                        XmlItem::Node(nav) => {
+                            if validation == CopyValidation::Preserve {
+                                self.check_same_schema_set(nav)?;
+                                if scope == CopyNamespaces::FixupOnly {
+                                    self.check_namespace_sensitive_copy(nav, true)?;
+                                }
+                            }
+                            out.append_copy(&item, scope, validation)?;
+                        }
+                        XmlItem::Atomic(_) => out.append_copy(&item, scope, validation)?,
+                    }
                 }
                 Ok(())
             }
@@ -550,11 +573,13 @@ impl<'a, 't> Transformation<'a, 't> {
         }
     }
 
-    /// §11.9.1 `xsl:copy`.
+    /// §11.9.1 `xsl:copy`, with its `validation` (§19.2.1.1, §19.2.2; `lax` and `type` were
+    /// fenced by the caller).
     #[allow(clippy::too_many_arguments)]
     fn copy_shallow(
         &self,
         namespaces: ShallowCopyNamespaces,
+        validation: &Validation,
         attr_sets: &[QName],
         body: &Body,
         instruction_base: &str,
@@ -575,17 +600,30 @@ impl<'a, 't> Transformation<'a, 't> {
             XmlItem::Node(nav) => nav,
         };
         match nav.node_type() {
-            // `xsl:copy` gets here only with `validation="strip"` (M4e owns
-            // the others): the copy and what its content constructs are
-            // untyped (§11.9.1, §19.2.1.1).
+            // A new document node (§19.2.2): `strict` validates it as a
+            // document, `preserve` keeps what its content gives it, `strip`
+            // untypes it.
             DomNodeType::Root => {
-                out.validation_boundary(Boundary::Strip)?;
+                out.validation_boundary(super::validate::document_boundary(
+                    validation,
+                    Constructor::Copy,
+                    "xsl:copy",
+                )?)?;
                 out.start_document()?;
                 self.eval_body(body, frame, cx, out)?;
                 out.end_document()
             }
+            // A new element (§19.2.1.1): with `preserve` "the copied element
+            // will have a type annotation of xs:anyType … but any contained
+            // nodes will have their type annotations retained in the same way
+            // as with xsl:element"; `strict` validates it; `strip` untypes it.
             DomNodeType::Element => {
-                out.validation_boundary(Boundary::Strip)?;
+                let boundary =
+                    super::validate::element_boundary(validation, Constructor::Copy, "xsl:copy")?;
+                if boundary == Boundary::Preserve && namespaces.copy == CopyNamespaces::FixupOnly {
+                    self.check_namespace_sensitive_copy(&nav, false)?;
+                }
+                out.validation_boundary(boundary)?;
                 out.start_element(&Name::of(&nav), None, false)?;
                 // §11.9.1: "The base URI of a node is copied, except in the
                 // case of an element node having an xml:base attribute, in
@@ -622,8 +660,15 @@ impl<'a, 't> Transformation<'a, 't> {
             // "the xsl:copy instruction returns a new node that is a copy of
             // the context node … The sequence constructor, if present, is not
             // evaluated." A *new* node: `append_copy`, so that a copy landing
-            // in a sequence is parentless rather than the original node.
-            _ => out.append_copy(&XmlItem::Node(nav), namespaces.copy),
+            // in a sequence is parentless rather than the original node. An
+            // attribute is validated as its validation says (§19.2.1.1:
+            // "Where the node being copied is an attribute, the copied
+            // attribute will retain its type annotation" under `preserve`).
+            DomNodeType::Attribute => {
+                let validation = super::validate::copy_validation(validation, "xsl:copy")?;
+                self.copy_attribute_node(&nav, namespaces.copy, validation, out)
+            }
+            _ => out.append_copy(&XmlItem::Node(nav), namespaces.copy, CopyValidation::Strip),
         }
     }
 
