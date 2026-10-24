@@ -514,11 +514,15 @@ impl<'t> Receiver<'t> for SimpleContentCollector<'_, '_, 't> {
             // `preserve`: the copy keeps the original's annotation, so it atomizes to the
             // original's typed value — as the original does (`append_item`).
             (CopyValidation::Preserve, _) => self.append_item(item),
-            // `strict`: the copy of an element or document node is validated (§19.2.1.1,
-            // §19.2.2), so it is built — through the transformation's pipeline, like a node the
-            // content constructs — and contributes its typed value. (An attribute is validated
-            // by the instruction and arrives through `attribute`.)
-            (CopyValidation::Strict, kind @ (DomNodeType::Element | DomNodeType::Root)) => {
+            // `strict`, `lax`, `type`: the copy of an element or document node is validated
+            // (§19.2.1.1, §19.2.1.2, §19.2.2), so it is built — through the transformation's
+            // pipeline, like a node the content constructs — and contributes its typed value; so is
+            // one with `type="xs:untyped"` (a document node's structure is still checked, and the
+            // untyped copy contributes its string value). (An attribute is validated by the
+            // instruction and arrives through `attribute`.)
+            (validation, kind @ (DomNodeType::Element | DomNodeType::Root))
+                if validation.boundary().is_some() =>
+            {
                 self.open(kind == DomNodeType::Root)?;
                 self.nested()?.copy_selected(nav, namespaces, validation)?;
                 self.close()

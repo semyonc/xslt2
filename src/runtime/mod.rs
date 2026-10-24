@@ -207,8 +207,9 @@ pub enum SourceValidation {
     /// `xsi:type`), and the document must be valid.
     Strict,
     /// Lax validation: as strict for a document element that has a declaration (or an
-    /// `xsi:type`); for one that has none, not implemented yet (M4f: lax assessment of the
-    /// validation root, upstream C36).
+    /// `xsi:type`); one that has neither is assessed laxly — no error for it, its declared
+    /// descendants validated, and it is unbound (`xs:untyped`) in the typed tree (XML Schema 1.1
+    /// §5.2's lax wildcard validation, upstream C36 `ValidationRoot::Lax`).
     Lax,
 }
 

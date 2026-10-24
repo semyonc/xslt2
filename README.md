@@ -4,8 +4,8 @@ Schema-aware XSLT 2.0 processor in Rust, built on the
 [`xsd-schema`](../xsd-schema) validator and its XPath 2.0 engine.
 
 Status: **M4 — schema-aware**, in progress (M1–M3 done; M4a, schema loading and the schema-aware mode, M4b,
-typed source documents, M4c, typed patterns, M4d, validation of constructed elements and attributes, and M4e, copies
-and document-level validation, done — see "Schema-aware mode" below). Stylesheets are loaded,
+typed source documents, M4c, typed patterns, M4d, validation of constructed elements and attributes, M4e, copies
+and document-level validation, and M4f, type-driven and lax validation, done — see "Schema-aware mode" below). Stylesheets are loaded,
 compiled and run: the module graph with import precedence, the lexical static contexts of §5.4.1,
 template rules with the §6.4 priorities and conflict resolution, the built-in rules,
 `xsl:apply-imports` and `xsl:next-match`, variables and parameters (tunnel included), attribute
@@ -153,10 +153,26 @@ validated in a message still is), and the implicit final result tree never is (`
 `strip`). Known limits met by the catalog: a union-typed node atomizes to the member type's primitive rather than the
 member type (upstream proposal C79), an element typed `xs:ID` is not in the id index (C62), `fn:idref` (C54).
 
-Not implemented yet, each raising `XSLT2-NOTIMPL` naming the sub-milestone (`../../xslt_doc/M4_PLAN.md` §4) when the
-construct is **evaluated** — a stylesheet that never reaches one runs: `type` on elements, copies and documents and
-`lax` on everything but `xsl:attribute` — and lax validation of a source whose root has no declaration — (M4f). XML
-Schema 1.0 only (1.1 is M4g).
+**Type-driven and lax validation** (M4f). `[xsl:]type` on a literal result element, `xsl:element`, `xsl:copy`,
+`xsl:copy-of`, `xsl:document` and `xsl:result-document` validates the element against the named type, whatever its
+name and whether or not a declaration of the name exists (§19.2.1.2: the type is the "processor-stipulated type
+definition"); for a document node, its single element child (§19.2.2). An `xsi:type` on the element overrides the
+type only when it is validly derived from it (and not blocked); an abstract type needs a concrete `xsi:type`; the
+element is never nilled. Not valid is XTTE1540. A copied attribute is validated against the type with String Valid
+(a complex type is XTTE1540). `type="xs:untyped"` makes the element and its content untyped. `validation="lax"` on
+the same instructions validates an element against its top-level declaration when there is one; otherwise the element
+is not validated (`xs:anyType`; an `xsi:type` on it does not change that) but its attributes and children are, again
+laxly — an undeclared child is not validated either, whatever its `xsi:type` says, and a declared one is validated
+against its declaration; anything invalid is XTTE1515. On a document node `lax` and `type` are document-level validation (XTTE1550,
+XTTE1555 as for `strict`). Both use `xsd-schema`'s validation-root modes (C36, `ValidationRoot::{Type, Lax}`).
+`SourceValidation::Lax` for a source whose root has no declaration now runs too (lax wildcard validation; the root is
+unbound in the typed tree). Known limits met by the catalog: `fn:idref` (C54), elements typed `xs:ID` and the id
+index (C62), a union's member type (C79), the XPath 2.0 types an XML Schema 1.0 set lacks (C72).
+
+Not implemented yet, raising `XSLT2-NOTIMPL` naming M4g (`../../xslt_doc/M4_PLAN.md` §4) when the construct is
+**evaluated** — a stylesheet that never reaches one runs: a `type` naming an XPath 2.0 type an XML Schema 1.0 set has
+no definition of (`xs:untypedAtomic` on an element, `xs:anyAtomicType`, `xs:dayTimeDuration`, `xs:yearMonthDuration`).
+XML Schema 1.0 only (1.1 is M4g).
 
 **Deep recursion.** Recursive templates and stylesheet functions use the native stack. A run checks
 how much stack it has used and stops with a depth error instead of overflowing. On a thread
@@ -224,10 +240,11 @@ With `--features icu-collation` the two M2k cases pass too: 5,761.
 
 **Schema-aware run** (`--schema-aware`: the 584 cases that need a schema-aware processor become runnable and the 16
 that need a basic one are not run; every case is compiled schema-aware, against the stylesheet's imports and the
-environment's schemas, and every source is validated as the catalog says): 6,163 of 6,355 runnable pass, the
-schema-aware profile 420 of 579 (M4e on `xsd-schema` `wave-b` `87f9b49`, 2026-10-23; 377 after M4d on `87f9b49`, 372
-on `66e3e3f`, 274 after M4c, 217 after M4b, 120 after M4a, 51 before), and every basic case keeps its status; of the
-127 not implemented, 125 are M4f's and 2 M2k's. An `assert` over a primary result tree that carries type annotations is evaluated on the tree
+environment's schemas, and every source is validated as the catalog says): 6,280 of 6,355 runnable pass, the
+schema-aware profile 537 of 579 (M4f on `xsd-schema` `wave-b` `bde3377`, 2026-10-24; 420 after M4e on `87f9b49`, 377
+after M4d on `87f9b49`, 372 on `66e3e3f`, 274 after M4c, 217 after M4b, 120 after M4a, 51 before), and every basic
+case keeps its status; of the 4 not implemented, 2 are M4g's (`validation-0108`, `-0109`: `xs:untypedAtomic` on an
+element, upstream C72) and 2 M2k's. An `assert` over a primary result tree that carries type annotations is evaluated on the tree
 itself (the catalog: "with the document node of the result document as the context item"; a re-parse of the
 serialization would be untyped), every other one over the re-parse.
 

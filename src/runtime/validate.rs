@@ -1,10 +1,10 @@
-//! Validation of constructed nodes (§19.2; M4 plan §4 M4d, decisions D-5, D-10, D-12).
+//! Validation of constructed nodes (§19.2; M4 plan §4 M4d–M4f, decisions D-5, D-10, D-12).
 //!
 //! Two halves: what `xsl:attribute` validates when it is evaluated
 //! ([`Transformation::validate_attribute`]), and the validating receiver every tree pipeline of a
 //! transformation has in front of its builder ([`Validating`]), which applies the annotation rule
 //! over the boundary each element and document constructor announces and validates every
-//! `strict` element boundary through `xsd-schema`'s push API.
+//! `strict`, `lax` and `type` element boundary through `xsd-schema`'s push API.
 //!
 //! **Attributes.**
 //!
@@ -45,7 +45,7 @@
 //!
 //! **Copies and documents** (M4e). `xsl:copy` and `xsl:copy-of` announce, for the copy of each
 //! element or document node they copy, the boundary their validation asks for
-//! ([`copy_validation`], `ComplexContentNormalizer::copy_selected`): `strip` none — the normalizer
+//! (`Transformation::copy_validation`, `ComplexContentNormalizer::copy_selected`): `strip` none — the normalizer
 //! copies untyped itself, passing on the ids of `xs:ID` attributes (`Receiver::element_id`), so a
 //! `strip` copy is untyped whichever receivers build it —, `preserve` none (every binding travels;
 //! an enclosing boundary still decides), `strict` a [`Boundary::Strict`] — on an
@@ -53,7 +53,7 @@
 //! (§19.2.2). An attribute copied with `strict` is validated here, as `xsl:attribute`'s
 //! validation is ([`Transformation::validate_attribute`]); XTTE0950 is decided before a
 //! `preserve` copy is made ([`Transformation::check_namespace_sensitive_copy`]). `xsl:document`
-//! and `xsl:result-document` announce [`document_boundary`]. **Document-level validation**
+//! and `xsl:result-document` announce `Transformation::document_boundary`. **Document-level validation**
 //! ([`Validating`]): the document node's children are exactly one element, no text, any comments
 //! and processing instructions (XTTE1550, checked as the children arrive and at the end); the
 //! element is the root of a validation run that, unlike element-level validation, applies
@@ -61,8 +61,27 @@
 //! XTTE1510; that run's verdict is given when the document node ends, after the structure rule.
 //! The documents of variables (§9.4) and of `xsl:message` (§17) are never validated: "This is
 //! equivalent to using validation="preserve" on xsl:document … Similarly, validation is not
-//! applied to document nodes created using xsl:message" (§19.2.2). `lax` and `type` on every
-//! constructor but `xsl:attribute` stay fenced (M4f).
+//! applied to document nodes created using xsl:message" (§19.2.2).
+//!
+//! **Type-driven and lax roots** (M4f; upstream C36, `xsd_schema::validation::ValidationRoot`).
+//! `[xsl:]type` on an element constructor, a copy or a document node is a [`Boundary::Type`]: a
+//! run whose root is assessed "using this type definition as the "processor-stipulated type
+//! definition"" (§19.2.1.2; `ValidationRoot::Type`), whatever its name — an `xsi:type` overrides
+//! the type only when validly derived from it (the stipulated type's `block` applies), an abstract
+//! one needs a concrete `xsi:type`, the element is never nilled; any error is XTTE1540.
+//! `validation="lax"` is a [`Boundary::Lax`]: a run whose root is validated against its top-level
+//! declaration when there is one and laxly otherwise (§19.2.1.1; `ValidationRoot::Lax`). The
+//! undeclared root, and recursively every undeclared child of an element that is not validated
+//! ("its attributes and children are validated, again with lax validation"), is the run's lax
+//! region (`Run::lax_region`): its `xsi:type` and `xsi:nil` are not passed to the run — "the
+//! presence of an xsi:type attribute will not of itself cause an element to be validated"; the
+//! region ends at a declared element, below which XML Schema decides. Any error is XTTE1515, and
+//! what the run assessed
+//! nothing of is `xs:anyType` (elements) / `xs:untypedAtomic` (attributes). On a document node both
+//! request document-level validation, the element child validated so. `type="xs:untyped"` is
+//! [`Boundary::Untyped`] — `strip` on an element, plus the structure rule on a document node. An
+//! attribute copied with `lax` or `type` is validated here, as `xsl:attribute`'s `lax` and `type`
+//! are; with a complex type it is XTTE1540 (String Valid needs a simple type).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -77,15 +96,14 @@ use xsd_schema::types::XmlTypeCode;
 use xsd_schema::validation::simple::fixed_values_equal;
 use xsd_schema::validation::{
     validate_simple_type, ContentType, SchemaInfo, SchemaValidator, SchemaValidity,
-    ValidationError, ValidationRuntime, ValidationSink, ValidationWarning,
+    ValidationError, ValidationRoot, ValidationRuntime, ValidationSink, ValidationWarning,
 };
 use xsd_schema::xpath::XmlItem;
 use xsd_schema::SchemaSet;
 
-use super::eval::validation_fence;
 use super::{typed_sources, Transformation};
 use crate::error::{codes, XsltError};
-use crate::model::{Constructor, Validation};
+use crate::model::Validation;
 use crate::names::{QName, XML_NS, XSD_NS};
 use crate::receiver::{
     id_value_of, xtte1550, Boundary, CopyNamespaces, CopyValidation, Name, Nav, Receiver,
@@ -111,46 +129,10 @@ impl<'a, 't> Transformation<'a, 't> {
             // `xs:untypedAtomic` is exactly an unvalidated one (XPath 2.0 §2.5.1: "An attribute
             // that has been validated in skip mode is represented in the data model by an
             // attribute node with the type annotation xs:untypedAtomic").
-            Validation::Type(type_name)
-                if type_name.uri == XSD_NS && type_name.local == "untypedAtomic" =>
-            {
-                Ok((value, None))
-            }
+            Validation::Type(type_name) if is_xs(type_name, "untypedAtomic") => Ok((value, None)),
             Validation::Type(type_name) => {
-                let set = self.validating_set()?;
-                let type_key = resolve_type(set, type_name).ok_or_else(|| {
-                    // `xs:anyAtomicType`, `xs:yearMonthDuration` and `xs:dayTimeDuration` are
-                    // XPath 2.0 types (§3.13 lists them as in scope) that an XML Schema 1.0 set has
-                    // no definitions of; a 1.1 set has them (M4g's mode).
-                    XsltError::not_implemented(
-                        format!(
-                            "type=\"{type_name}\" on xsl:attribute with an XML Schema 1.0 schema \
-                             set, which has no definition of the type (upstream proposal C72)"
-                        ),
-                        "M4g",
-                    )
-                })?;
-                check_namespace_sensitive(set, type_key, name, &format!("the type {type_name}"))?;
-                let result = validate_simple_type(&value, type_key, set).map_err(|e| {
-                    XsltError::new(
-                        codes::XTTE1540,
-                        format!(
-                            "the value {value:?} of the attribute {} is not valid for the type \
-                             {type_name}: {e}",
-                            display(name)
-                        ),
-                    )
-                })?;
-                let value = result.normalized_value.unwrap_or(value);
-                Ok((
-                    value,
-                    Some(NodeSchemaBinding {
-                        type_key,
-                        element_decl: None,
-                        attribute_decl: None,
-                        content_type: None,
-                    }),
-                ))
+                let type_key = self.resolve_validation_type(type_name, "xsl:attribute")?;
+                self.attribute_against_type(type_key, &type_name.to_string(), name, value)
             }
             Validation::Strict | Validation::Lax => {
                 let strict = matches!(validation, Validation::Strict);
@@ -227,6 +209,128 @@ impl<'a, 't> Transformation<'a, 't> {
         }
     }
 
+    /// An attribute's value validated against `type_key` as `[xsl:]type` asks (§19.2.1.2): "the
+    /// attribute is considered valid if (in the terminology of XML Schema) the attribute's
+    /// normalized value is locally valid with respect to that type definition according to the
+    /// rules for "String Valid"" — otherwise XTTE1540; XTTE1545 first for a type built from
+    /// `xs:QName` / `xs:NOTATION`. String Valid is defined against a simple type definition, so a
+    /// complex type (which `xsl:attribute` cannot name, XTSE1530, but `xsl:copy` and `xsl:copy-of`
+    /// can, for a copied attribute) leaves no attribute valid: XTTE1540 (decision D-f4; XSLT 3.0
+    /// gave this case its own code, XTTE1535, which XSLT 2.0 does not have).
+    fn attribute_against_type(
+        &self,
+        type_key: TypeKey,
+        type_name: &str,
+        name: &Name,
+        value: String,
+    ) -> Result<(String, Option<NodeSchemaBinding>), XsltError> {
+        let set = self.validating_set()?;
+        if let TypeKey::Complex(_) = type_key {
+            return Err(XsltError::new(
+                codes::XTTE1540,
+                format!(
+                    "the attribute {} cannot be valid for the type {type_name}: it is a complex \
+                     type, and an attribute is validated with String Valid, against a simple type \
+                     definition (§19.2.1.2)",
+                    display(name)
+                ),
+            ));
+        }
+        check_namespace_sensitive(set, type_key, name, &format!("the type {type_name}"))?;
+        let result = validate_simple_type(&value, type_key, set).map_err(|e| {
+            XsltError::new(
+                codes::XTTE1540,
+                format!(
+                    "the value {value:?} of the attribute {} is not valid for the type \
+                     {type_name}: {e}",
+                    display(name)
+                ),
+            )
+        })?;
+        let value = result.normalized_value.unwrap_or(value);
+        Ok((
+            value,
+            Some(NodeSchemaBinding {
+                type_key,
+                element_decl: None,
+                attribute_decl: None,
+                content_type: None,
+            }),
+        ))
+    }
+
+    /// The type `[xsl:]type` names, in the in-scope schema types (M4 plan D-7: the whole set;
+    /// XTSE1520 has checked that it exists). `xs:anyAtomicType`, `xs:untypedAtomic`,
+    /// `xs:yearMonthDuration` and `xs:dayTimeDuration` are XPath 2.0 types (§3.13 lists them as
+    /// in scope) that an XML Schema 1.0 set has no definitions of — a 1.1 set has them (M4g's
+    /// mode): not implemented, naming upstream proposal C72.
+    fn resolve_validation_type(&self, type_name: &QName, what: &str) -> Result<TypeKey, XsltError> {
+        let set = self.validating_set()?;
+        resolve_type(set, type_name).ok_or_else(|| {
+            XsltError::not_implemented(
+                format!(
+                    "type=\"{type_name}\" on {what} with an XML Schema 1.0 schema set, which has \
+                     no definition of the type (upstream proposal C72)"
+                ),
+                "M4g",
+            )
+        })
+    }
+
+    /// The boundary an element constructor (a literal result element, `xsl:element`, `xsl:copy`
+    /// of an element) announces for `validation`: `strip`, `preserve`, `strict`, `lax`
+    /// (§19.2.1.1) and `type` (§19.2.1.2) — for `xsl:copy` of an element with `preserve`, "the
+    /// copied element will have a type annotation of xs:anyType … but any contained nodes will
+    /// have their type annotations retained in the same way as with xsl:element", which is
+    /// [`Boundary::Preserve`]. `type="xs:untyped"` is [`Boundary::Untyped`] (decision D-f3).
+    pub(super) fn element_boundary(
+        &self,
+        validation: &Validation,
+        what: &str,
+    ) -> Result<Boundary, XsltError> {
+        Ok(match validation {
+            Validation::Strip => Boundary::Strip,
+            Validation::Preserve => Boundary::Preserve,
+            Validation::Strict => Boundary::Strict,
+            Validation::Lax => Boundary::Lax,
+            Validation::Type(type_name) if is_xs(type_name, "untyped") => Boundary::Untyped,
+            Validation::Type(type_name) => {
+                Boundary::Type(self.resolve_validation_type(type_name, what)?)
+            }
+        })
+    }
+
+    /// The boundary of a document node an instruction constructs (`xsl:document`,
+    /// `xsl:result-document`, `xsl:copy` of a document node) for `validation` (§19.2.2):
+    /// `strip` and `preserve` "do not request validation" ([`Boundary::Strip`],
+    /// [`Boundary::Preserve`]); `strict`, `lax` and a `type` request document-level validation,
+    /// "The single element node child is validated, using the supplied values of the validation
+    /// and type attributes" — the boundary is the element child's.
+    pub(super) fn document_boundary(
+        &self,
+        validation: &Validation,
+        what: &str,
+    ) -> Result<Boundary, XsltError> {
+        self.element_boundary(validation, what)
+    }
+
+    /// What `xsl:copy-of` (and `xsl:copy` of a node it does not construct anew) asks of the copy
+    /// of each node ([`CopyValidation`]).
+    pub(super) fn copy_validation(
+        &self,
+        validation: &Validation,
+        what: &str,
+    ) -> Result<CopyValidation, XsltError> {
+        Ok(match self.element_boundary(validation, what)? {
+            Boundary::Strip => CopyValidation::Strip,
+            Boundary::Preserve => CopyValidation::Preserve,
+            Boundary::Strict => CopyValidation::Strict,
+            Boundary::Lax => CopyValidation::Lax,
+            Boundary::Type(type_key) => CopyValidation::Type(type_key),
+            Boundary::Untyped => CopyValidation::Untyped,
+        })
+    }
+
     /// The validator the trees of this run validate constructed elements with — the run's one
     /// validator (D-12), made only when the stylesheet validates something (`validates`).
     pub(crate) fn construction_validator(&self) -> Option<&SchemaValidator<'a>> {
@@ -254,64 +358,13 @@ impl<'a, 't> Transformation<'a, 't> {
     }
 }
 
-/// The boundary an element constructor (a literal result element, `xsl:element`, `xsl:copy` of an
-/// element) announces for `validation`: `strip`, `preserve` and `strict` (§19.2.1.1 — for
-/// `xsl:copy` of an element with `preserve`, "the copied element will have a type annotation of
-/// xs:anyType … but any contained nodes will have their type annotations retained in the same way
-/// as with xsl:element", which is [`Boundary::Preserve`]); every other value raises the fence of
-/// its owner — `lax` and `type` M4f.
-pub(super) fn element_boundary(
-    validation: &Validation,
-    constructor: Constructor,
-    what: &str,
-) -> Result<Boundary, XsltError> {
-    match validation {
-        Validation::Strip => Ok(Boundary::Strip),
-        Validation::Preserve => Ok(Boundary::Preserve),
-        Validation::Strict => Ok(Boundary::Strict),
-        _ => {
-            validation_fence(validation, constructor, what)?;
-            unreachable!("lax and type on an element constructor are fenced")
-        }
-    }
-}
-
-/// The boundary of a document node an instruction constructs (`xsl:document`,
-/// `xsl:result-document`, `xsl:copy` of a document node) for `validation` (§19.2.2): `strip` and
-/// `preserve` "do not request validation" ([`Boundary::Strip`], [`Boundary::Preserve`]), `strict`
-/// requests document-level validation ([`Boundary::Strict`] on a document node); `lax` and `type`
-/// are M4f's fence.
-pub(super) fn document_boundary(
-    validation: &Validation,
-    constructor: Constructor,
-    what: &str,
-) -> Result<Boundary, XsltError> {
-    element_boundary(validation, constructor, what)
-}
-
-/// What `xsl:copy-of` (and `xsl:copy` of a node it does not construct anew) asks of the copy of
-/// each node ([`CopyValidation`]): `strip`, `preserve`, `strict`; `lax` and `type` are M4f's fence.
-pub(super) fn copy_validation(
-    validation: &Validation,
-    what: &str,
-) -> Result<CopyValidation, XsltError> {
-    match validation {
-        Validation::Strip => Ok(CopyValidation::Strip),
-        Validation::Preserve => Ok(CopyValidation::Preserve),
-        Validation::Strict => Ok(CopyValidation::Strict),
-        _ => {
-            validation_fence(validation, Constructor::Copy, what)?;
-            unreachable!("lax and type on a copy are fenced")
-        }
-    }
-}
-
 impl<'a, 't> Transformation<'a, 't> {
     /// The copy `xsl:copy-of` or `xsl:copy` makes of an attribute node it copies, as `validation`
-    /// asks: `strict` validates it against the top-level declaration of its name as
-    /// `xsl:attribute`'s `strict` does (§19.2.1.1; XTTE1512, XTTE1510, and XTTE1545 — §19.2.1.3:
-    /// "it is an error to validate a parentless attribute against such a type. This affects the
-    /// instructions xsl:attribute, xsl:copy, and xsl:copy-of") and passes it on as an attribute
+    /// asks: `strict` and `lax` validate it against the top-level declaration of its name as
+    /// `xsl:attribute`'s `strict` / `lax` do (§19.2.1.1; XTTE1512, XTTE1510 / XTTE1515, and
+    /// XTTE1545 — §19.2.1.3: "it is an error to validate a parentless attribute against such a
+    /// type. This affects the instructions xsl:attribute, xsl:copy, and xsl:copy-of"), `type`
+    /// against the type with String Valid (§19.2.1.2, XTTE1540), and pass it on as an attribute
     /// with its new annotation; `preserve` is XTTE0950 when the attribute has namespace-sensitive
     /// content (it is copied without its parent element); otherwise the copy is the pipeline's
     /// (`Receiver::append_copy`).
@@ -323,12 +376,38 @@ impl<'a, 't> Transformation<'a, 't> {
         out: &mut dyn Receiver<'t>,
     ) -> Result<(), XsltError> {
         match validation {
-            CopyValidation::Strict => {
+            CopyValidation::Strict | CopyValidation::Lax => {
                 let name = Name::of(nav);
-                let (value, binding) =
-                    self.validate_attribute(&Validation::Strict, &name, nav.value())?;
+                let as_written = if validation == CopyValidation::Strict {
+                    Validation::Strict
+                } else {
+                    Validation::Lax
+                };
+                let (value, binding) = self.validate_attribute(&as_written, &name, nav.value())?;
                 out.attribute(&name, &value, binding)
             }
+            CopyValidation::Type(type_key) => {
+                let name = Name::of(nav);
+                let set = self.validating_set()?;
+                let (value, binding) = self.attribute_against_type(
+                    type_key,
+                    &type_display(set, type_key),
+                    &name,
+                    nav.value(),
+                )?;
+                out.attribute(&name, &value, binding)
+            }
+            // `xs:untyped` is a complex type (XDM 1.0 §2.6.2): no attribute is String Valid
+            // against it (decision D-f4).
+            CopyValidation::Untyped => Err(XsltError::new(
+                codes::XTTE1540,
+                format!(
+                    "the attribute {} cannot be valid for the type xs:untyped: it is a complex \
+                     type, and an attribute is validated with String Valid, against a simple type \
+                     definition (§19.2.1.2)",
+                    display(&Name::of(nav))
+                ),
+            )),
             CopyValidation::Preserve => {
                 self.check_same_schema_set(nav)?;
                 self.check_namespace_sensitive_copy(nav, false)?;
@@ -474,6 +553,40 @@ fn resolve_type(set: &SchemaSet, name: &QName) -> Option<TypeKey> {
     set.lookup_type(ns, local)
 }
 
+/// Whether `name` is `xs:{local}`.
+fn is_xs(name: &QName, local: &str) -> bool {
+    name.uri == XSD_NS && name.local == local
+}
+
+/// A type for a message: `Q{namespace}name`, or its kind when it is anonymous.
+fn type_display(set: &SchemaSet, type_key: TypeKey) -> String {
+    let (name, namespace) = match type_key {
+        TypeKey::Simple(key) => set
+            .arenas
+            .simple_types
+            .get(key)
+            .map(|def| (def.name, def.target_namespace))
+            .unwrap_or_default(),
+        TypeKey::Complex(key) => set
+            .arenas
+            .complex_types
+            .get(key)
+            .map(|def| (def.name, def.target_namespace))
+            .unwrap_or_default(),
+    };
+    let names = &set.name_table;
+    match name {
+        Some(name) => {
+            let local = names.resolve(name);
+            match namespace {
+                Some(ns) => format!("Q{{{}}}{local}", names.resolve(ns)),
+                None => local.to_string(),
+            }
+        }
+        None => "an anonymous type".to_string(),
+    }
+}
+
 /// XTTE1545 (§19.2.1.3): "A type error occurs if a type or validation attribute is defined
 /// (explicitly or implicitly) for an instruction that constructs a new attribute node, if the
 /// effect of this is to cause the attribute value to be validated against a type that is derived
@@ -548,7 +661,8 @@ fn display(name: &Name) -> String {
 
 /// The receiver between the normalizer and the [`ResultBuilder`] of a transformation's tree
 /// pipelines: it applies §19.2.1.1's annotation rule over the [`Boundary`] events and runs the
-/// validation of every `strict` element boundary through `xsd-schema`'s push API.
+/// validation of every `strict`, `lax` and `type` element boundary through `xsd-schema`'s push
+/// API (one run per boundary, its root assessed as [`RunMode`] says; M4f).
 ///
 /// **The annotation rule.** "Conceptually, the validation requested for a child element or
 /// attribute node is applied before the validation requested for its parent element" — so the
@@ -712,8 +826,10 @@ enum Held {
 }
 
 /// The children of a document node validated as a document so far (§19.2.2).
-#[derive(Default)]
 struct DocumentCheck {
+    /// How the element child is validated ("using the supplied values of the validation and type
+    /// attributes"): `None` for `type="xs:untyped"`, whose element child is untyped (no run).
+    mode: Option<RunMode>,
     /// Element children.
     elements: u32,
     /// The error the validation of the element child ended with — given when the document node
@@ -730,13 +846,70 @@ struct StartTag {
     attributes: Vec<(Name, String, Option<NodeSchemaBinding>)>,
 }
 
-/// One validation run: a `strict` element boundary's, or the document-level validation of the
-/// element child of a document node (`document`: the index of that document node's frame).
+/// One validation run: a `strict`, `lax` or `type` element boundary's, or the document-level
+/// validation of the element child of a document node (`document`: the index of that document
+/// node's frame).
 struct Run<'v> {
     runtime: ValidationRuntime<'v, RunSink>,
     errors: Rc<RefCell<Vec<ValidationError>>>,
     root: Name,
     document: Option<usize>,
+    mode: RunMode,
+    /// For each element open in the run, root first: whether it is in the run's **lax region** —
+    /// the elements §19.2.1.1 does not validate under `lax` ("If no such declaration is available,
+    /// then the element or attribute is not validated, but its attributes and children are
+    /// validated, again with lax validation"): a `lax` run's root with no top-level declaration,
+    /// and, recursively, an undeclared child of an element in the region. Their `xsi:type` and
+    /// `xsi:nil` are not passed to the run ("the presence of an xsi:type attribute will not of
+    /// itself cause an element to be validated"; decision D-f2, fix round 1). Pushed when an
+    /// element's start tag reaches the run, popped when it ends; always `false` in `strict` and
+    /// `type` runs.
+    lax_region: Vec<bool>,
+}
+
+impl Run<'_> {
+    /// Whether the next element to start in the run has its parent in the lax region — the
+    /// run's root counts as such ("the element … being validated" by the `lax` instruction), so it
+    /// is in the region exactly when it has no top-level declaration.
+    fn parent_in_lax_region(&self) -> bool {
+        self.mode == RunMode::Lax && self.lax_region.last().copied().unwrap_or(true)
+    }
+}
+
+/// How a run assesses its root (§19.2.1.1, §19.2.1.2; upstream C36's
+/// `xsd_schema::validation::ValidationRoot`, XML Schema 1.1 §5.2).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunMode {
+    /// `strict`: against the top-level declaration of the root's name, which exists (XTTE1512
+    /// first) — `ValidationRoot::Declaration`; an invalid root is XTTE1510.
+    Strict,
+    /// `lax`: against the top-level declaration when there is one, laxly otherwise —
+    /// `ValidationRoot::Lax` ("lax wildcard validation"); invalid is XTTE1515.
+    Lax,
+    /// `type`: with the type as the processor-stipulated type definition —
+    /// `ValidationRoot::Type`; invalid is XTTE1540.
+    Type(TypeKey),
+}
+
+impl RunMode {
+    /// The run a boundary starts: `strict`, `lax` and a `type` validate; `strip`, `preserve` and
+    /// `type="xs:untyped"` do not.
+    fn of(boundary: Boundary) -> Option<RunMode> {
+        match boundary {
+            Boundary::Strict => Some(RunMode::Strict),
+            Boundary::Lax => Some(RunMode::Lax),
+            Boundary::Type(type_key) => Some(RunMode::Type(type_key)),
+            Boundary::Strip | Boundary::Preserve | Boundary::Untyped => None,
+        }
+    }
+
+    fn root(self) -> ValidationRoot {
+        match self {
+            RunMode::Strict => ValidationRoot::Declaration,
+            RunMode::Lax => ValidationRoot::Lax,
+            RunMode::Type(type_key) => ValidationRoot::Type(type_key),
+        }
+    }
 }
 
 /// Collects a run's errors.
@@ -831,8 +1004,10 @@ impl<'v, 't> Validating<'v, 't> {
     /// encloses it that decides.
     fn own_decider(&self, boundary: Option<Boundary>, run: Option<usize>) -> Decider {
         match (boundary, run) {
-            (Some(Boundary::Strip), _) => Decider::Strip,
-            (Some(Boundary::Strict), Some(run)) => Decider::Run(run),
+            (Some(Boundary::Strip | Boundary::Untyped), _) => Decider::Strip,
+            (Some(Boundary::Strict | Boundary::Lax | Boundary::Type(_)), Some(run)) => {
+                Decider::Run(run)
+            }
             _ => Decider::Nothing,
         }
     }
@@ -1064,12 +1239,30 @@ impl<'v, 't> Validating<'v, 't> {
             })
             .collect();
         let mut element_infos: Vec<Option<SchemaInfo>> = (0..runs).map(|_| None).collect();
+        // §19.2.1.1, `lax`: a child of an element that is not validated is "validated, again with
+        // lax validation" — validated against its top-level declaration if it has one (the lax
+        // region ends there: below a declared element XML Schema's assessment decides), otherwise
+        // not validated and in the region itself.
+        let undeclared =
+            self.runs.iter().any(Run::parent_in_lax_region) && self.declared(&start.name)?.is_err();
         for index in (0..runs).rev() {
-            let mut info = self.runs[index].runtime.validate_element(
+            let run = &mut self.runs[index];
+            let in_region = undeclared && run.parent_in_lax_region();
+            run.lax_region.push(in_region);
+            // An element in the region is not validated: its `xsi:type` does not make it
+            // validated, its `xsi:nil` does not nil it (XML Schema 1.1 §3.3.1 nils only "with
+            // respect to some element declaration D"); both stay attributes of it, assessed as
+            // attributes are.
+            let (xsi_type, xsi_nil) = if in_region {
+                (None, None)
+            } else {
+                (xsi_type.as_deref(), xsi_nil.as_deref())
+            };
+            let mut info = run.runtime.validate_element(
                 &start.name.local,
                 &start.name.uri,
-                xsi_type.as_deref(),
-                xsi_nil.as_deref(),
+                xsi_type,
+                xsi_nil,
                 &snapshot,
             );
             for slot in &mut slots {
@@ -1270,15 +1463,39 @@ impl<'v, 't> Validating<'v, 't> {
         let error = if let Some(first) = errors.first() {
             // §19.2.1.3: "The validation rule "Validation Root Valid (ID/IDREF)" is not applied" to
             // element-level validation — and its errors are not the element's invalidity.
-            XsltError::new(
-                codes::XTTE1510,
-                format!(
-                    "validation=\"strict\": the element {} is not valid against its top-level \
-                     declaration: {first}{}",
-                    display(&run.root),
-                    count(errors.len())
+            let root = display(&run.root);
+            let more = count(errors.len());
+            match run.mode {
+                RunMode::Strict => XsltError::new(
+                    codes::XTTE1510,
+                    format!(
+                        "validation=\"strict\": the element {root} is not valid against its \
+                         top-level declaration: {first}{more}"
+                    ),
                 ),
-            )
+                // XTTE1515: "has the effective value lax, and schema validity assessment
+                // concludes that the element or attribute is invalid".
+                RunMode::Lax => XsltError::new(
+                    codes::XTTE1515,
+                    format!("validation=\"lax\": the element {root} is not valid: {first}{more}"),
+                ),
+                // XTTE1540: "the outcome of schema validity assessment against that type is that
+                // the validity property of that element or attribute information item is other
+                // than valid".
+                RunMode::Type(type_key) => {
+                    let type_name = self
+                        .set
+                        .map(|set| type_display(set, type_key))
+                        .unwrap_or_default();
+                    XsltError::new(
+                        codes::XTTE1540,
+                        format!(
+                            "type=\"{type_name}\": the element {root} is not valid against the \
+                             type: {first}{more}"
+                        ),
+                    )
+                }
+            }
         } else {
             match (run.document, id_errors.first()) {
                 (Some(_), Some(first)) => XsltError::new(
@@ -1337,20 +1554,38 @@ impl<'v, 't> Validating<'v, 't> {
     }
 
     /// Starts a validation run rooted at the element `name` about to open — the document-level
-    /// validation of the document node whose frame is `document`, if given — and returns its
-    /// index.
-    fn start_run(&mut self, name: &Name, document: Option<usize>) -> Result<usize, XsltError> {
+    /// validation of the document node whose frame is `document`, if given — assessing its root
+    /// as `mode` says, and returns its index.
+    ///
+    /// A `lax` root with no top-level declaration, and every undeclared element below it whose
+    /// parent is so ([`Run::lax_region`]), is not validated against its `xsi:type`: §19.2.1.1's
+    /// note, "the presence of an xsi:type attribute will not of itself cause an element to be
+    /// validated: if validation against a named type is required, as distinct from validation
+    /// against a top-level element declaration, then it must be requested using the XSLT
+    /// [xsl:]type attribute" (decision D-f2, revised in fix round 1; XML Schema's lax wildcard
+    /// validation would validate it strictly against the `xsi:type`, so the run is not given it —
+    /// the way `ValidationRoot::Lax`'s rustdoc names for a host).
+    fn start_run(
+        &mut self,
+        name: &Name,
+        document: Option<usize>,
+        mode: RunMode,
+    ) -> Result<usize, XsltError> {
         let Some(validator) = self.validator else {
             return Err(XsltError::internal(
-                "a strict boundary in a tree built without a validator",
+                "a validating boundary in a tree built without a validator",
             ));
         };
         let errors = Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = validator.start_run(RunSink(Rc::clone(&errors)));
+        runtime.set_validation_root(mode.root());
         self.runs.push(Run {
-            runtime: validator.start_run(RunSink(Rc::clone(&errors))),
+            runtime,
             errors,
             root: name.clone(),
             document,
+            mode,
+            lax_region: Vec::new(),
         });
         Ok(self.runs.len() - 1)
     }
@@ -1460,8 +1695,9 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
         let boundary = self.next_boundary.take();
         // A document node validated as a document decides what it contains when nothing outside
         // it does (its run starts at its element child).
-        let decider = match (self.decider(), boundary) {
-            (Decider::Nothing, Some(Boundary::Strict)) => Decider::Document(self.frames.len()),
+        let mode = boundary.and_then(RunMode::of);
+        let decider = match (self.decider(), mode) {
+            (Decider::Nothing, Some(_)) => Decider::Document(self.frames.len()),
             _ => self.decider_of(boundary, None),
         };
         let transparent = !self.frames.is_empty();
@@ -1472,7 +1708,13 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
             document_node: true,
             // §19.2.2: "When validation is requested for a document node (that is, when
             // validation is set to strict or lax, or when a type attribute is present)".
-            document: (boundary == Some(Boundary::Strict)).then(DocumentCheck::default),
+            document: boundary
+                .filter(|boundary| boundary.requests_validation())
+                .map(|_| DocumentCheck {
+                    mode,
+                    elements: 0,
+                    deferred: None,
+                }),
             namespaces: Vec::new(),
             transparent,
             views: Vec::new(),
@@ -1539,9 +1781,17 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
             if check.elements > 1 {
                 return Err(xtte1550("more than one element child"));
             }
-            match self.declared(name)? {
+            // `type="xs:untyped"`: the element child is untyped, nothing to run.
+            let Some(mode) = check.mode else {
+                continue;
+            };
+            let declared = match mode {
+                RunMode::Strict => self.declared(name)?,
+                RunMode::Lax | RunMode::Type(_) => Ok(()),
+            };
+            match declared {
                 Ok(()) => {
-                    let run = self.start_run(name, Some(frame))?;
+                    let run = self.start_run(name, Some(frame), mode)?;
                     document_runs.push((frame, run));
                     roots_runs += 1;
                 }
@@ -1553,11 +1803,13 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
             }
         }
         let mut run = None;
-        if boundary == Some(Boundary::Strict) {
-            // XTTE1512: "there is no matching top-level declaration in the schema" — decided
-            // before validating.
-            self.declared(name)??;
-            run = Some(self.start_run(name, None)?);
+        if let Some(mode) = boundary.and_then(RunMode::of) {
+            if mode == RunMode::Strict {
+                // XTTE1512: "there is no matching top-level declaration in the schema" — decided
+                // before validating. (`lax` validates laxly without one; `type` needs none.)
+                self.declared(name)??;
+            }
+            run = Some(self.start_run(name, None, mode)?);
             roots_runs += 1;
         }
         // The outermost enclosing boundary that is not `preserve` decides: a validated document's
@@ -1713,6 +1965,10 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
         match frame.held {
             Some(held) => self.settle(held, &frame.views, true)?,
             None => self.pass_pending(&frame.views, true)?,
+        }
+        // Every open run saw the element start (`finish_start_tag`) and has now seen it end.
+        for run in &mut self.runs {
+            run.lax_region.pop();
         }
         for _ in 0..frame.roots_runs {
             self.end_run()?;

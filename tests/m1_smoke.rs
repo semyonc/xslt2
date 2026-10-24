@@ -517,14 +517,18 @@ fn a_document_element_that_is_not_a_stylesheet_is_xtse0150() {
 
 #[test]
 fn a_not_implemented_construct_carries_the_internal_code_not_a_panic() {
-    // `xsl:validation="lax"` on a literal result element is M4f's, and only
-    // a schema-aware processor accepts it (§21.1: a basic one raises XTSE1660).
-    // The stand-in was `xsl:validation="strict"` until M4d implemented it, a
+    // `xsl:type` naming an XPath 2.0 type an XML Schema 1.0 set has no
+    // definition of is M4g's, and only a schema-aware processor accepts
+    // `xsl:type` (§21.1: a basic one raises XTSE1660). The stand-in was
+    // `xsl:validation="lax"` until M4f implemented it,
+    // `xsl:validation="strict"` until M4d implemented it, a
     // typed pattern until M4c implemented typed patterns,
     // `xsl:import-schema` until M4a made it XTSE1650 for a basic processor, an
     // extension instruction without `xsl:fallback` until M3e made it XTDE1450,
     // `format-date()` until M3d implemented it, and `xsl:number` until M3c.
-    let s = sheet(r#"<xsl:template match="/"><out xsl:validation="lax"/></xsl:template>"#);
+    let s = sheet(
+        r#"<xsl:template match="/"><out xsl:type="xs:dayTimeDuration">PT1H</out></xsl:template>"#,
+    );
     let functions = XsltFunctions::new();
     let context = xslt2::SchemaContext::builder()
         .stylesheet_str(&s, "urn:test:sheet.xsl", &functions)
@@ -532,7 +536,7 @@ fn a_not_implemented_construct_carries_the_internal_code_not_a_panic() {
         .expect("a stylesheet with no xsl:import-schema has an empty context");
     let compiled = Compiler::schema_aware(&context, &functions)
         .compile_str(&s, "urn:test:sheet.xsl")
-        .expect("a schema-aware processor compiles xsl:validation");
+        .expect("a schema-aware processor compiles xsl:type");
     let arena = Bump::new();
     let e = compiled
         .transformation(&arena, TransformOptions::default())

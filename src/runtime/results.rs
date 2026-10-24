@@ -133,13 +133,9 @@ impl<'a, 't> Transformation<'a, 't> {
         }
         // §19.2.2: "The optional attributes type and validation may be used on the
         // xsl:result-document instruction to validate the contents of the new document" —
-        // `strict` validates the document, `preserve` keeps what it contains, `strip` untypes it
-        // (`lax` and `type` are M4f's).
-        let boundary = super::validate::document_boundary(
-            &rd.validation,
-            crate::model::Constructor::Document,
-            "xsl:result-document",
-        )?;
+        // `strict`, `lax` and `type` validate the document, `preserve` keeps what it contains,
+        // `strip` untypes it.
+        let boundary = self.document_boundary(&rd.validation, "xsl:result-document")?;
         let sc = self.sheet.static_contexts.get(instruction.ctx);
         let resolve = |prefix: &str| sc.resolve_prefix(prefix);
 

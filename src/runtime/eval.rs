@@ -245,11 +245,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 validation,
                 body,
             } => {
-                let boundary = super::validate::element_boundary(
-                    validation,
-                    Constructor::Element,
-                    "a literal result element",
-                )?;
+                let boundary = self.element_boundary(validation, "a literal result element")?;
                 out.validation_boundary(boundary)?;
                 out.start_element(name, None, false)?;
                 if !*inherit_namespaces {
@@ -280,11 +276,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 validation,
                 body,
             } => {
-                let boundary = super::validate::element_boundary(
-                    validation,
-                    Constructor::Element,
-                    "xsl:element",
-                )?;
+                let boundary = self.element_boundary(validation, "xsl:element")?;
                 let lexical = self.avt(name, frame, cx)?;
                 let (prefix, local) =
                     lexical_qname(whitespace::trim(&lexical)).ok_or_else(|| {
@@ -430,13 +422,9 @@ impl<'a, 't> Transformation<'a, 't> {
                 // attributes type and validation may be used on the
                 // xsl:document instruction to validate the contents of the new
                 // document" (§19.2.2): `strip` untypes the tree, `preserve`
-                // keeps what it contains, `strict` validates the document
-                // (`lax` and `type` are M4f's).
-                let boundary = super::validate::document_boundary(
-                    validation,
-                    Constructor::Document,
-                    "xsl:document",
-                )?;
+                // keeps what it contains, `strict`, `lax` and `type` validate
+                // the document.
+                let boundary = self.document_boundary(validation, "xsl:document")?;
                 out.validation_boundary(boundary)?;
                 out.start_document()?;
                 out.document_base_uri(&self.sheet.static_contexts.get(instruction.ctx).base_uri)?;
@@ -455,32 +443,40 @@ impl<'a, 't> Transformation<'a, 't> {
                 attr_sets,
                 validation,
                 body,
-            } => {
-                // `lax` and `type` are M4f's, whatever the context item is.
-                super::validate::copy_validation(validation, "xsl:copy")?;
-                self.copy_shallow(
-                    ShallowCopyNamespaces {
-                        copy: copy_scope(*copy_namespaces),
-                        inherit: *inherit_namespaces,
-                    },
-                    validation,
-                    attr_sets,
-                    body,
-                    &self.sheet.static_contexts.get(instruction.ctx).base_uri,
-                    frame,
-                    cx,
-                    out,
-                )
-            }
+            } => self.copy_shallow(
+                ShallowCopyNamespaces {
+                    copy: copy_scope(*copy_namespaces),
+                    inherit: *inherit_namespaces,
+                },
+                validation,
+                attr_sets,
+                body,
+                &self.sheet.static_contexts.get(instruction.ctx).base_uri,
+                frame,
+                cx,
+                out,
+            ),
 
             InstructionKind::CopyOf {
                 select,
                 copy_namespaces,
                 validation,
             } => {
-                let validation = super::validate::copy_validation(validation, "xsl:copy-of")?;
                 let value = self.eval_expr(*select, frame, cx)?;
                 let scope = copy_scope(*copy_namespaces);
+                // "These attributes are ignored when copying an item that is not an element,
+                // attribute or document node" (§11.9.2): the validation is resolved for the first
+                // node it applies to.
+                let written = validation;
+                let mut resolved = None;
+                let mut validation_of = |this: &Self| -> Result<CopyValidation, XsltError> {
+                    if let Some(validation) = resolved {
+                        return Ok(validation);
+                    }
+                    let validation = this.copy_validation(written, "xsl:copy-of")?;
+                    resolved = Some(validation);
+                    Ok(validation)
+                };
                 for item in value.into_vec() {
                     // §11.9.2: every node of the selected sequence is
                     // *constructed anew*, so this is `append_copy`, never
@@ -490,9 +486,16 @@ impl<'a, 't> Transformation<'a, 't> {
                     // element, attribute, and document node that is selected".
                     match &item {
                         XmlItem::Node(nav) if nav.node_type() == DomNodeType::Attribute => {
+                            let validation = validation_of(self)?;
                             self.copy_attribute_node(nav, scope, validation, out)?;
                         }
-                        XmlItem::Node(nav) => {
+                        XmlItem::Node(nav)
+                            if matches!(
+                                nav.node_type(),
+                                DomNodeType::Element | DomNodeType::Root
+                            ) =>
+                        {
+                            let validation = validation_of(self)?;
                             if validation == CopyValidation::Preserve {
                                 self.check_same_schema_set(nav)?;
                                 if scope == CopyNamespaces::FixupOnly {
@@ -501,7 +504,7 @@ impl<'a, 't> Transformation<'a, 't> {
                             }
                             out.append_copy(&item, scope, validation)?;
                         }
-                        XmlItem::Atomic(_) => out.append_copy(&item, scope, validation)?,
+                        _ => out.append_copy(&item, scope, CopyValidation::Strip)?,
                     }
                 }
                 Ok(())
@@ -604,11 +607,7 @@ impl<'a, 't> Transformation<'a, 't> {
             // document, `preserve` keeps what its content gives it, `strip`
             // untypes it.
             DomNodeType::Root => {
-                out.validation_boundary(super::validate::document_boundary(
-                    validation,
-                    Constructor::Copy,
-                    "xsl:copy",
-                )?)?;
+                out.validation_boundary(self.document_boundary(validation, "xsl:copy")?)?;
                 out.start_document()?;
                 self.eval_body(body, frame, cx, out)?;
                 out.end_document()
@@ -618,8 +617,7 @@ impl<'a, 't> Transformation<'a, 't> {
             // nodes will have their type annotations retained in the same way
             // as with xsl:element"; `strict` validates it; `strip` untypes it.
             DomNodeType::Element => {
-                let boundary =
-                    super::validate::element_boundary(validation, Constructor::Copy, "xsl:copy")?;
+                let boundary = self.element_boundary(validation, "xsl:copy")?;
                 if boundary == Boundary::Preserve && namespaces.copy == CopyNamespaces::FixupOnly {
                     self.check_namespace_sensitive_copy(&nav, false)?;
                 }
@@ -665,7 +663,7 @@ impl<'a, 't> Transformation<'a, 't> {
             // "Where the node being copied is an attribute, the copied
             // attribute will retain its type annotation" under `preserve`).
             DomNodeType::Attribute => {
-                let validation = super::validate::copy_validation(validation, "xsl:copy")?;
+                let validation = self.copy_validation(validation, "xsl:copy")?;
                 self.copy_attribute_node(&nav, namespaces.copy, validation, out)
             }
             _ => out.append_copy(&XmlItem::Node(nav), namespaces.copy, CopyValidation::Strip),
@@ -903,26 +901,5 @@ fn constructed_attribute_value(name: &Name, value: String) -> String {
         whitespace::tokens(&value).collect::<Vec<_>>().join(" ")
     } else {
         value
-    }
-}
-
-/// The M4a fence (ROADMAP §5.1 rule 1): a node constructor whose
-/// `[xsl:]validation` / `[xsl:]type` is anything but `strip` raises
-/// `XSLT2-NOTIMPL` naming the sub-milestone that implements it
-/// ([`Validation::owner`]) — at evaluation, so that a stylesheet whose
-/// non-`strip` instruction is never evaluated runs. Only a schema-aware
-/// stylesheet can get here with one: a basic processor rejected it with
-/// XTSE1660 (§21.1).
-pub(super) fn validation_fence(
-    validation: &Validation,
-    constructor: Constructor,
-    what: &str,
-) -> Result<(), XsltError> {
-    match validation.owner(constructor) {
-        None => Ok(()),
-        Some(owner) => Err(XsltError::not_implemented(
-            format!("{} on {what}", validation.describe()),
-            owner,
-        )),
     }
 }

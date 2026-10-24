@@ -31,7 +31,9 @@ PSVI, `BufferDocument`). Separate git repository.
 | `src/pattern.rs` | Pattern grammar (§5.5.2), the §6.4 default priorities, the dispatch-index key; the typed node tests (M4c) — `element(N\|*, T[?])`, `attribute(N\|*, T)`, `schema-element(N)`, `schema-attribute(N)`, inside `document-node(…)` too — carry `xsd-schema`'s resolved `ItemType`, which the compiler's `PatternSink::type_test` / `schema_test` build (`compile/patterns.rs`) |
 | `src/compile/checks.rs` | The **static-checking table**: one `ElementSpec` row per XSLT 2.0 element (category, required/optional attributes, AVTs, content model) transcribed from the spec's syntax summaries, and the single pass that validates a module against it before compilation. A new element = a new row here |
 | `src/compile/` | `Compiler`: modules → declarations and instructions. `mod.rs` (builder core), `declarations`, `decimal_format` (`xsl:decimal-format`), `output` (`xsl:output`, `xsl:character-map`), `instructions`, `literal`, `expressions`, `avt`, `patterns`, `modes`, `attributes`, `tree`, `functions` (`xsl:function`), `keys` (`xsl:key`), `grouping` (`xsl:for-each-group`), `analyze` (`xsl:analyze-string`), `result_document` (`xsl:result-document`: written attribute values, the static XTDE1460 / XTSE1590), `number` (`xsl:number`: XTSE0975, `level`, the `count` / `from` patterns, the conversion attributes — fixed values checked here, XTSE0020). Walk stylesheet children **only** through `Module::children()` / `Builder::children()` — it applies §3.12 `use-when` exclusion by construction |
-| `src/runtime/` | `Transformation`: `mod.rs` (entry points), `context` (§5.4; the §19.1 output state is `XsltContext::final_output`: only the initial context is final, `empty()` contexts are temporary, and the listed constructs clear it for their content), `dispatch` (§6), `patterns`, `eval` (instructions), `content`, `variables`, `documents` (loading, §4.4 admission, the admission of host-built typed trees and typed parameters), `validate` (M4d: what `xsl:attribute` validates — `type`, `strict`, `lax`, XTTE1540 / 1510 / 1512 / 1515 / 1545 —, the boundary each element constructor announces, and `Validating`, the validating receiver in front of every tree builder: the annotation rule and `strict` element validation through the push API; M4e: the boundaries of copies and document nodes, `copy_validation`, strict copies of attributes, XTTE0950, and document-level validation in `Validating`; see "Construction validation" and "Copies and documents" below), `typed_sources` (M4b: a source validated as it is parsed, in one pass — `xsd-schema`'s `TypedBuilderHandler` inside this crate's `SourceBuild` handler, which drops the whitespace text of element-only content as XDM 1.0 §6.7.4 says; this crate's sink; one `SchemaValidator` per run, identity constraints on; the typed admission copy for §4.3 `input-type-annotations="strip"` (is-id kept by re-registering ids) and §4.4 with the simple-content exemption), `functions` (the §16 evaluator), `format` (§16.4 / §16.5 glue: the function conversion rules for `$value`, `$picture`, `$language`, `$calendar`, `$country`; the decimal-format name → XTDE1280; `$calendar` expanded with no default namespace, format-date-037), `expressions`, `serialize` (a result tree through `src/serialize/`), `sort` (`xsl:sort`, `xsl:perform-sort`), `calls` (stylesheet functions), `keys` (key indexes), `grouping` (`xsl:for-each-group`), `analyze` (`xsl:analyze-string`, the run's regex cache), `results` (`xsl:result-document`, the base output URI, XTDE1480 / XTDE1490, the §2.4 primary result; `SecondaryResult`), `number` (`xsl:number`: §12.1 `value` with the backwards-compatible NaN rule, XTDE0980; §12.2 the place marker of a node — single / multiple / any, the implied count pattern, walks only up and forward because the navigator's previous-sibling move scans from the first child; XTTE0990 / XTTE1000; XTDE0030 for computed conversion attributes; the nodes before $S are counted by a `Walk` — the tree in document order for `any`, a parent's children for `single` / `multiple` — that counts every implied pattern at once without `count` (`Census`, by node kind and expanded name), keeps an index of the numbers it gave once a node before its frontier is asked for (`Index`), and is kept per instruction (`NumberMemo`; `Walks`, by owner: every tree and every parent — a walk past 32 nodes always, the shorter ones until more than 1,024 walks are kept) while the local variables the patterns read keep their values (`Stability`, compared exactly: nodes by identity, strings / booleans / integers / doubles by type and bits) — numbering is linear in the nodes walked and the evaluations, in any order, over any number of names, namespaces, trees and parents; a pattern calling a stylesheet function counts afresh every time, see "`xsl:number` cost" below) |
+| `src/runtime/` | `Transformation`: `mod.rs` (entry points), `context` (§5.4; the §19.1 output state is `XsltContext::final_output`: only the initial context is final, `empty()` contexts are temporary, and the listed constructs clear it for their content), `dispatch` (§6), `patterns`, `eval` (instructions), `content`, `variables`, `documents` (loading, §4.4 admission, the admission of host-built typed trees and typed parameters), `validate` (M4d: what `xsl:attribute` validates — `type`, `strict`, `lax`, XTTE1540 / 1510 / 1512 / 1515 / 1545 —, the boundary each element constructor announces, and `Validating`, the validating receiver in front of every tree builder: the annotation rule and `strict` element validation through the push API; M4e: the boundaries of copies and document nodes, `copy_validation`, strict copies of attributes, XTTE0950, and document-level validation in `Validating`; M4f: `type` and `lax` on every constructor — a run per boundary rooted
+as `xsd-schema`'s `ValidationRoot` says; see "Construction validation", "Copies and documents" and "Type-driven and lax
+validation" below), `typed_sources` (M4b: a source validated as it is parsed, in one pass — `xsd-schema`'s `TypedBuilderHandler` inside this crate's `SourceBuild` handler, which drops the whitespace text of element-only content as XDM 1.0 §6.7.4 says; this crate's sink; one `SchemaValidator` per run, identity constraints on; the typed admission copy for §4.3 `input-type-annotations="strip"` (is-id kept by re-registering ids) and §4.4 with the simple-content exemption), `functions` (the §16 evaluator), `format` (§16.4 / §16.5 glue: the function conversion rules for `$value`, `$picture`, `$language`, `$calendar`, `$country`; the decimal-format name → XTDE1280; `$calendar` expanded with no default namespace, format-date-037), `expressions`, `serialize` (a result tree through `src/serialize/`), `sort` (`xsl:sort`, `xsl:perform-sort`), `calls` (stylesheet functions), `keys` (key indexes), `grouping` (`xsl:for-each-group`), `analyze` (`xsl:analyze-string`, the run's regex cache), `results` (`xsl:result-document`, the base output URI, XTDE1480 / XTDE1490, the §2.4 primary result; `SecondaryResult`), `number` (`xsl:number`: §12.1 `value` with the backwards-compatible NaN rule, XTDE0980; §12.2 the place marker of a node — single / multiple / any, the implied count pattern, walks only up and forward because the navigator's previous-sibling move scans from the first child; XTTE0990 / XTTE1000; XTDE0030 for computed conversion attributes; the nodes before $S are counted by a `Walk` — the tree in document order for `any`, a parent's children for `single` / `multiple` — that counts every implied pattern at once without `count` (`Census`, by node kind and expanded name), keeps an index of the numbers it gave once a node before its frontier is asked for (`Index`), and is kept per instruction (`NumberMemo`; `Walks`, by owner: every tree and every parent — a walk past 32 nodes always, the shorter ones until more than 1,024 walks are kept) while the local variables the patterns read keep their values (`Stability`, compared exactly: nodes by identity, strings / booleans / integers / doubles by type and bits) — numbering is linear in the nodes walked and the evaluations, in any order, over any number of names, namespaces, trees and parents; a pattern calling a stylesheet function counts afresh every time, see "`xsl:number` cost" below) |
 | `src/receiver.rs` | `Receiver` (with the `validation_boundary` event, M4d — also before an attribute a `strip` copy made, M4e — and `append_copy` with the copy's `CopyValidation`, M4e), `ComplexContentNormalizer` (§5.7.1; `copy_selected`: the copy of one selected node under its validation), `ResultBuilder` (builds bindings as they arrive; `file_id`), `SequenceCollector` (copies and parentless nodes built through `Validating` too), `TemporaryOutputState` (the content of `xsl:document`: d-o-e dropped, §11.5/§20.2) |
 | `src/store.rs` | `DocumentStore`: arena-allocated documents, URI identity, `generate-id()` |
 | `src/output.rs` | `OutputDefinition`: the `xsl:output` attributes merged by import precedence (§20), `cdata-section-elements` united, `use-character-maps` concatenated and expanded; `compile/output.rs` reads `xsl:output` / `xsl:character-map` (XTSE1560, XTSE1570, XTSE1580, XTSE1590, XTSE1600, XTSE0020 parameter domains) |
@@ -56,6 +58,7 @@ cargo test                         # unit tests + every tests/*.rs except the W3
                                    # + m3d_formatting + m3e_compat + m4a_schema_loading + m4a_review
                                    # + m4b_typed_sources + m4b_review + m4c_typed_patterns
                                    # + m4d_construction_validation + m4e_copies_documents
+                                   # + m4f_type_lax
                                    # (tests/common/mod.rs: `common::body` drops the default XML
                                    # declaration for the tests written before M3a)
                                    # (the W3C harness skips itself in a debug build)
@@ -144,7 +147,9 @@ assertion about the tree reads — `assert`, `assert-xml`, `assert-string-value`
 never add or remove a node. A failure of the stylesheet's own serialization is the run's error only
 when the case asks for serialization (`<output serialize="yes"/>`; the catalog's default is `no`);
 otherwise the tree assertions still run and only the serialization assertions see the failure (M3a).
-An `assert-serialization` without `method` is compared under the method the stylesheet used.
+An `assert-serialization` without `method` is compared under the method the stylesheet used; an expected-result
+file that is not UTF-8 is decoded by its BOM or declared encoding (`resolver::decode_xml`; `validation-0201`'s
+ISO-8859-1 `schvalid001.out`, M4f), a UTF-8 one as before.
 Secondary results (`xsl:result-document`) are kept the same way in `RunOutput::secondary`, each under the
 absolute URI it was written to, with the same serialization-failure policy; the adapter sets the base output
 URI to the test-set directory (with a trailing slash), and `assert-result-document`'s relative `uri` matches
@@ -260,11 +265,13 @@ a schema set 9–27 µs). Every XPath static context gets the set (`with_schema_
 built-in type but no imported one (§3.12). The static checks of `[xsl:]type` (XTSE1520, XTSE1530 — the whole set is
 in scope, D-7), `[xsl:]validation` / `default-validation` values (XTSE0020) and XTSE1505 are in `compile/checks.rs`;
 the value is read into `model::Validation` on every node constructor (the module's `default-validation` filling an
-absent one) and what is not implemented yet is **fenced at evaluation** (`runtime/eval.rs` `validation_fence`,
-`Validation::owner`) as `XSLT2-NOTIMPL` naming M4f (`type` on elements, copies and documents, `lax` on everything but
-`xsl:attribute`); `strip` everywhere, `preserve` and `strict` on element constructors, `strict` / `lax` / `type` on
-`xsl:attribute` and the implicit final result tree under `default-validation` run since M4d, `preserve` and `strict`
-on copies, `xsl:document` and `xsl:result-document` since M4e (below). (Typed patterns were fenced with M4c when the
+absent one) and takes effect when the instruction is **evaluated**; `strip` everywhere, `preserve` and `strict` on
+element constructors, `strict` / `lax` / `type` on `xsl:attribute` and the implicit final result tree under
+`default-validation` run since M4d, `preserve` and `strict` on copies, `xsl:document` and `xsl:result-document` since
+M4e, `type` and `lax` on every constructor since M4f (below). The one fence left: a `type` naming an XPath 2.0 type an
+XML Schema 1.0 set has no definition of (`xs:untypedAtomic` on an element or copy, `xs:anyAtomicType`,
+`xs:dayTimeDuration`, `xs:yearMonthDuration`) is `XSLT2-NOTIMPL` naming M4g (upstream proposal C72;
+`Transformation::resolve_validation_type`). (M4a's `validation_fence` / `Validation::owner` table went with M4f.) (Typed patterns were fenced with M4c when the
 pattern compiled, until M4c.) A stylesheet function with the name and arity 1 of a user
 atomic type's constructor function is XTSE0770, whatever `override` says (decision D-A, `compile/functions.rs`); one
 in the XML Schema namespace is XTSE0080 (§3.2). (The upstream limits M4a met — QName / NOTATION enumerations compared
@@ -285,7 +292,10 @@ does it since `66e3e3f`, C66); whitespace text in element-only content is not in
 crate's `SourceBuild` drops it until the typed build does, C67). An invalid document is an error with the
 loader's code for an unparsable one (FODC0002 for `doc()` / `document()`, F&O 1.0 §15.5.4; XTDE1170 for the principal
 source), the message naming the first errors and their nodes (B8 instance paths); `Lax` with an undeclared root is
-NOT-IMPL (M4f, upstream C36); a basic processor asked to validate is XTDE1665. A typed document atomizes to typed
+XML Schema 1.1 §5.2's lax wildcard validation (upstream C36 `ValidationRoot::Lax`, M4f: no error for the root, its
+declared descendants validated; the typed build leaves it unbound, `xs:untyped` — XDM 1.0 §3.3.1.1's answer when no
+descendant was validated, not when one was, `xs:anyType`, as for every lax-wildcard element of a typed source:
+upstream proposal C85); a basic processor asked to validate is XTDE1665. A typed document atomizes to typed
 values and an untyped one exactly as before (one flow, `has_type_annotations`): keys, sort keys and grouping keys see
 typed values. `input-type-annotations="strip"` in any module (§4.3) strips every source tree at admission — untyped,
 nilled false, the ids the attributes give kept (re-registered on the copy; an element's own `xs:ID` waits for C62,
@@ -319,9 +329,9 @@ XSD 1.0 set does not define is NOT-IMPL (M4g, upstream C72)), XTTE1545 for a typ
 §3.2.4.1 clause 4) → XTTE1510; the binding is the type (and the declaration for `strict`), the string value the
 normalized value; `strip` / `preserve` → untyped; `lax` (decision D-d1) as `strict` with a declaration (XTTE1515),
 untyped without one. **Boundaries**: every element / document constructor announces its validation with
-`Receiver::validation_boundary` (`receiver::Boundary::{Strip, Preserve, Strict}`) just before `start_element` /
-`start_document` — literal result elements and `xsl:element` (`element_boundary`; `lax` / `type` NOT-IMPL (M4f)),
-`xsl:copy` and `xsl:document` (`strip`; the rest M4e), `xsl:result-document` (`strip`), temporary trees (`preserve`,
+`Receiver::validation_boundary` (`receiver::Boundary::{Strip, Preserve, Strict}`; `Lax`, `Type`, `Untyped` since
+M4f) just before `start_element` / `start_document` — literal result elements and `xsl:element`
+(`Transformation::element_boundary`), `xsl:copy` and `xsl:document` (`strip`; the rest M4e), `xsl:result-document` (`strip`), temporary trees (`preserve`,
 §9.4 / §19.2.2), the implicit final result tree (the principal module's `default-validation`, §3.6; M4a's M4e fence on
 `preserve` is gone, decision D-d3). The normalizer passes a boundary on with the element's start tag, and a document
 node opened in element content just before its first child (never, if it stays empty — an attribute may follow it).
@@ -422,6 +432,36 @@ validates again only a type that can hold an ID, `may_hold_id`; a tree without I
 `preserve` 42 ms (nilled read off the typed value, upstream P21), `strict` 71 ms; `xsl:result-document` of the same
 table `strip` / `preserve` 38–39 ms, `strict` (document level) 70–71 ms, about what `strict` on the table as an
 element costs. Schema-aware run on `87f9b49`: 6,163 of 6,355, profile 420 of 579.
+
+**Type-driven and lax validation** (M4f; upstream C36; `tests/m4f_type_lax.rs`, `../../XSLT2_M4F_REPORT.md`).
+`Transformation::{element_boundary, document_boundary, copy_validation}` (`runtime/validate.rs`) map `[xsl:]type` and
+`lax` to `receiver::Boundary::{Type(TypeKey), Lax, Untyped}` / `CopyValidation::{Type, Lax, Untyped}` (the type
+resolved by `resolve_validation_type`; for `xsl:copy-of` at the first element, attribute or document node it copies —
+§11.9.2: "These attributes are ignored when copying an item that is not an element, attribute or document node", so
+`xsl:copy` of a text node and atomic items take no validation). In `Validating` each `strict` / `lax` / `type`
+boundary is one run whose root is assessed as its `RunMode` says, through `ValidationRuntime::set_validation_root`:
+`Strict` → `ValidationRoot::Declaration` after the XTTE1512 check, `Lax` → `ValidationRoot::Lax` (no declaration: lax
+assessment, no error; the run's **lax region** — the undeclared root and, recursively, every undeclared child of an
+element in it, "validated, again with lax validation", a per-run stack `Run::lax_region` pushed in `finish_start_tag`
+and popped in `end_element` — gets no `xsi:type` / `xsi:nil`: §19.2.1.1's note, "the presence of an xsi:type attribute
+will not of itself cause an element to be validated", decision D-f2 as revised in M4f's fix round 1; a declared
+element ends the region, and below it XML Schema decides), `Type(T)` →
+`ValidationRoot::Type(T)` (§19.2.1.2's "processor-stipulated type definition": an `xsi:type` overrides only when
+validly derived and not blocked, an abstract type needs a concrete `xsi:type`, never nilled); a run's errors are
+XTTE1510 / XTTE1515 / XTTE1540 by mode (`end_run`), `cvc-id.*` filtered as for `strict`; what a run assessed nothing of
+is `xs:anyType` / `xs:untypedAtomic` (§19.2.1.1: "Any nodes whose validation outcome is a validity property of
+notKnown are annotated as xs:anyType"). A document node with `lax` or `type` is document-level validation
+(`DocumentCheck::mode`; §19.2.2 "when validation is set to strict or lax, or when a type attribute is present"), its
+element child the root of a run of that mode (XTTE1540 / XTTE1515 for its invalidity, XTTE1555 for ID/IDREF).
+`type="xs:untyped"` (`Boundary::Untyped`, decision D-f3) is `strip` on an element and document-level validation with
+an untyped element child on a document node. Attributes copied with `lax` / `type` are validated by
+`copy_attribute_node` (`attribute_against_type`: String Valid; a complex type is XTTE1540, decision D-f4 — XSLT 3.0's
+XTTE1535 does not exist in 2.0). Copies with `lax` / `type` in simple content are built and validated, contributing
+their typed value. Cost (release, transform only, median of 7, three rounds; `../../XSLT2_M4F_REPORT.md`): 10,000 rows
+with no validation 24–25 ms; `type` on the table 60–63 ms (`strict` 61–65 ms), on every row 68 ms (`strict` 68 ms);
+`lax` over an undeclared 10,000-row tree 57 ms (one run), 62–63 ms (every row a lax root) — 49 / 56–57 ms before
+fix round 1's top-level-declaration lookup per region element (about 0.2 µs an element). Schema-aware run on
+`bde3377`: 6,280 of 6,355, profile 537 of 579.
 
 **Typed patterns** (M4c; M4 plan D-1, D-13; `tests/m4c_typed_patterns.rs`). A pattern step may use `element(*, T)`,
 `element(N, T)`, `element(N, T?)`, `attribute(*, T)`, `attribute(N, T)`, `schema-element(N)`, `schema-attribute(N)`

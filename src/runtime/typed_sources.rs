@@ -36,9 +36,18 @@
 //! **An invalid document is an error** (D-4), reported with the code the loader reports a document
 //! it cannot turn into a tree with: FODC0002 for `fn:doc` and `document()` — F&O 1.0 §15.5.4 groups
 //! "an error in retrieving a resource, or in parsing and validating its content" — and XTDE1170 for
-//! the principal source, as for its parse errors. `Lax` validation of a document whose root has no
-//! declaration (and no `xsi:type`) needs lax assessment of the validation root (XML Schema 1.1
-//! §5.2, upstream C36), which is M4f's: it is not implemented rather than silently untyped.
+//! the principal source, as for its parse errors.
+//!
+//! **`Lax`** is XML Schema 1.1 §5.2's lax wildcard validation (upstream C36,
+//! `ValidationRoot::Lax`; M4f): "If the ·validation root· and the schema determine an element
+//! declaration (by the name of the element) … or a type definition (by xsi:type), then ·strict·
+//! validation is performed. If they do not identify any declaration or definition, then ·lax
+//! assessment· is performed" — a root with no declaration and no `xsi:type` is no error, its
+//! declared descendants are validated. The typed build binds no type to an element it assessed
+//! laxly without one (it is `xs:untyped` in the tree): XDM 1.0 §3.3.1.1's answer for "[validity]
+//! … "notKnown", and the [validation attempted] property … "none"", not for "partial" (a validated
+//! descendant), where it gives `xs:anyType` — the same as for every element a lax wildcard matches
+//! in a typed source (decision D-f6 of the M4f report; upstream proposal C85).
 //!
 //! **Admission** of a typed tree (`Transformation::admit_typed`, used by every loader and for a
 //! tree the host built) applies §4.3 and §4.4 in their order — "Stripping of type annotations
@@ -55,7 +64,8 @@ use xsd_schema::navigator::{DomNavigator, DomNodeType, NamespaceAxisScope, Typed
 use xsd_schema::validation::{
     drive_quick_xml_with, AttributeView, ContentType, DoctypeView, DriveWithError,
     ElementStartView, EndElementInfo, EndOfAttributesView, SchemaInfo, SchemaValidator, TextKind,
-    ValidationError, ValidationEventHandler, ValidationFlags, ValidationSink, ValidationWarning,
+    ValidationError, ValidationEventHandler, ValidationFlags, ValidationRoot, ValidationSink,
+    ValidationWarning,
 };
 use xsd_schema::{SchemaSet, TypeKey};
 
@@ -94,13 +104,11 @@ impl ValidationSink for Collect<'_> {
 }
 
 /// The handler of one validating parse: `xsd-schema`'s typed builder, with the XDM's whitespace
-/// rule for element-only content (module docs) and a note of whether the root has a declaration.
+/// rule for element-only content (module docs).
 struct SourceBuild<'b, 'a> {
     builder: TypedBuilderHandler<'b, 'a>,
     /// For each open element: whether its type is complex with element-only or empty content.
     element_only: Vec<bool>,
-    /// Whether the root element has a declaration or an `xsi:type` (`None` before the root).
-    root_assessed: Option<bool>,
 }
 
 impl ValidationEventHandler for SourceBuild<'_, '_> {
@@ -119,9 +127,6 @@ impl ValidationEventHandler for SourceBuild<'_, '_> {
         view: ElementStartView<'_>,
         info: &SchemaInfo,
     ) -> Result<(), Self::Error> {
-        if self.root_assessed.is_none() {
-            self.root_assessed = Some(info.element_decl.is_some() || view.xsi_type.is_some());
-        }
         self.element_only.push(element_only(info));
         self.builder.after_element(view, info)
     }
@@ -274,9 +279,12 @@ impl<'a, 't> Transformation<'a, 't> {
         };
         let arena = self.store.borrow().arena();
         let mut errors = Errors::default();
-        let (built, failure, root_assessed) = {
+        let (built, failure) = {
             let validator = self.validator(set);
             let mut runtime = validator.start_run(Collect(&mut errors));
+            if validation == SourceValidation::Lax {
+                runtime.set_validation_root(ValidationRoot::Lax);
+            }
             let mut builder = BufferDocumentBuilder::new(
                 arena,
                 &tree_set.name_table,
@@ -287,10 +295,8 @@ impl<'a, 't> Transformation<'a, 't> {
             let mut handler = SourceBuild {
                 builder: TypedBuilderHandler::new(&mut builder),
                 element_only: Vec::new(),
-                root_assessed: None,
             };
             let driven = drive_quick_xml_with(xml.as_bytes(), &mut runtime, set, &mut handler);
-            let root_assessed = handler.root_assessed;
             drop(handler);
             let driven = driven.map_err(|e| match e {
                 DriveWithError::Io(e) => BufferDocumentError::Io(e),
@@ -305,19 +311,10 @@ impl<'a, 't> Transformation<'a, 't> {
             // The checks that need the whole document (IDREF without an ID, identity constraints
             // across it) report here; an operational failure comes back as the result.
             let failure = runtime.end_validation().err();
-            (built, failure, root_assessed)
+            (built, failure)
         };
         let mut doc =
             built.map_err(|e| XsltError::new(parse_code, format!("could not read {what}: {e}")))?;
-        if validation == SourceValidation::Lax && root_assessed == Some(false) {
-            return Err(XsltError::not_implemented(
-                format!(
-                    "lax validation of {what}, whose root element has no declaration (lax \
-                     assessment of the validation root, XML Schema 1.1 §5.2, upstream C36)"
-                ),
-                "M4f",
-            ));
-        }
         if let Some(failure) = failure {
             if errors.count == 0 {
                 errors.count = 1;

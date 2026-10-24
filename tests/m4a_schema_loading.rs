@@ -768,18 +768,15 @@ fn a_type_that_is_not_an_in_scope_type_is_xtse1520() {
             "{body}"
         );
     }
-    // With the default namespace for types, the unprefixed name is found (and the fence of the later
-    // sub-milestone is what stops it, once evaluated).
+    // With the default namespace for types, the unprefixed name is found: the element is validated
+    // against `h:hatsize` when it is evaluated (M4f; it was M4f's fence until M4f).
     let main = sheet(&format!(
         "{IMPORT_HATS}{}",
         root_template(
-            r#"<xsl:element name="e" type="hatsize" xpath-default-namespace="urn:hats"/>"#
+            r#"<xsl:element name="e" type="hatsize" xpath-default-namespace="urn:hats">7</xsl:element>"#
         )
     ));
-    assert_eq!(
-        fenced(run_sa(&main, &hat_files())),
-        (Stage::Run, "M4f".to_string())
-    );
+    assert_eq!(run_sa(&main, &hat_files()).unwrap(), "<e>7</e>");
 }
 
 /// > \[ERR XTSE1530\] It is a static error if the value of the type attribute of an `xsl:attribute`
@@ -833,16 +830,17 @@ fn a_validation_value_that_is_not_permitted_is_xtse0020() {
     }
 }
 
-// ── The fences: what later sub-milestones own ───────────────────────────
+// ── The fences: what later sub-milestones owned ─────────────────────────
 
 /// A non-`strip` `[xsl:]validation`, and `[xsl:]type`, are accepted when the stylesheet is compiled and
-/// raise `XSLT2-NOTIMPL` naming the owning sub-milestone when the instruction is evaluated (M4_PLAN §4):
-/// M4f `type` on elements, copies and documents and `lax` but on `xsl:attribute`. What M4d implements —
-/// `preserve` and `strict` on an element constructor, `strict`, `lax` and `type` on `xsl:attribute` —
-/// and M4e — `preserve` and `strict` on copies and document nodes — runs
-/// (`tests/m4d_construction_validation.rs` and `tests/m4e_copies_documents.rs` check what they do).
+/// take effect when the instruction is evaluated. They raised `XSLT2-NOTIMPL` naming the owning
+/// sub-milestone (M4_PLAN §4) until it implemented them: M4d `preserve` and `strict` on an element
+/// constructor and everything on `xsl:attribute`, M4e `preserve` and `strict` on copies and document
+/// nodes, M4f `type` on elements, copies and documents and `lax` on everything
+/// (`tests/m4d_construction_validation.rs`, `tests/m4e_copies_documents.rs` and `tests/m4f_type_lax.rs`
+/// check what they do).
 #[test]
-fn a_non_strip_validation_is_fenced_with_its_owner_when_evaluated() {
+fn a_non_strip_validation_runs_when_evaluated() {
     for (body, expected) in [
         (r#"<e xsl:validation="preserve"/>"#, Ok("<e/>")),
         (
@@ -884,6 +882,24 @@ fn a_non_strip_validation_is_fenced_with_its_owner_when_evaluated() {
             r#"<xsl:result-document validation="strict"><e/></xsl:result-document>"#,
             Err(codes::XTTE1512),
         ),
+        // M4f: `type` on an element constructor, a copy of the source's document node (its element
+        // `doc`) and `xsl:document` — `h:hatType` needs a `size` child (XTTE1540), an empty document
+        // has no element child (XTTE1550) —, and `lax` (no declaration of `e`, of `doc`: no error).
+        (r#"<e xsl:type="h:hatType"/>"#, Err(codes::XTTE1540)),
+        (
+            r#"<xsl:element name="e" type="h:hatType"/>"#,
+            Err(codes::XTTE1540),
+        ),
+        (
+            r#"<xsl:copy-of select="." type="h:hatType"/>"#,
+            Err(codes::XTTE1540),
+        ),
+        (r#"<xsl:document type="h:hatType"/>"#, Err(codes::XTTE1550)),
+        (r#"<e xsl:validation="lax"/>"#, Ok("<e/>")),
+        (
+            r#"<xsl:copy-of select="." validation="lax"/>"#,
+            Ok("<doc/>"),
+        ),
     ] {
         let main = sheet(&format!("{IMPORT_HATS}{}", root_template(body)));
         let result = run_sa(&main, &hat_files());
@@ -892,22 +908,16 @@ fn a_non_strip_validation_is_fenced_with_its_owner_when_evaluated() {
             Err(code) => assert_eq!(failure(result), (Stage::Run, code.to_string()), "{body}"),
         }
     }
-    let cases = [
-        (r#"<e xsl:type="h:hatType"/>"#, "M4f"),
-        (r#"<xsl:element name="e" type="h:hatType"/>"#, "M4f"),
-        (r#"<xsl:copy-of select="." type="h:hatType"/>"#, "M4f"),
-        (r#"<xsl:document type="h:hatType"/>"#, "M4f"),
-        (r#"<e xsl:validation="lax"/>"#, "M4f"),
-        (r#"<xsl:copy-of select="." validation="lax"/>"#, "M4f"),
-    ];
-    for (body, owner) in cases {
-        let main = sheet(&format!("{IMPORT_HATS}{}", root_template(body)));
-        assert_eq!(
-            fenced(run_sa(&main, &hat_files())),
-            (Stage::Run, owner.to_string()),
-            "{body}"
-        );
-    }
+    // What is left: an XPath 2.0 type an XML Schema 1.0 set has no definition of (§3.13 puts it in
+    // scope) is M4g's, whose XSD 1.1 mode has one (upstream proposal C72 for 1.0).
+    let main = sheet(&format!(
+        "{IMPORT_HATS}{}",
+        root_template(r#"<e xsl:type="xs:dayTimeDuration">PT1H</e>"#)
+    ));
+    assert_eq!(
+        fenced(run_sa(&main, &hat_files())),
+        (Stage::Run, "M4g".to_string())
+    );
 }
 
 /// The fence is at evaluation: an instruction that is never evaluated costs nothing, and an explicit

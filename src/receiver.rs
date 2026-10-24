@@ -240,7 +240,6 @@ impl From<Annotations> for Carry {
 /// "These attributes are ignored when copying an item that is not an
 /// element, attribute or document node."
 ///
-/// `lax` and `type` are M4f's and never get this far.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CopyValidation {
     /// `strip`: the copy and the nodes it contains are untyped, is-id kept —
@@ -263,6 +262,41 @@ pub enum CopyValidation {
     /// over a bare [`ResultBuilder`] — ignores the boundary, as it ignores
     /// every boundary, and builds the copy untyped.
     Strict,
+    /// `lax`: as `strict`, with [`Boundary::Lax`] (§19.2.1.1: validated
+    /// against the top-level declaration when there is one, laxly otherwise).
+    Lax,
+    /// `type`: the copy of an element is validated against the type
+    /// ([`Boundary::Type`], §19.2.1.2), the copy of a document node as a
+    /// document whose element child is (§19.2.2). An attribute is validated
+    /// by the instruction, as for `strict`.
+    Type(TypeKey),
+    /// `type="xs:untyped"`: [`Boundary::Untyped`] — on an element the effect
+    /// of `strip`, on a document node document-level validation whose element
+    /// child is untyped.
+    Untyped,
+}
+
+impl CopyValidation {
+    /// Whether the copy of a node is validated (`strict`, `lax`, `type`): its
+    /// source's bindings are then not read, the validation decides.
+    pub fn validates(self) -> bool {
+        matches!(
+            self,
+            CopyValidation::Strict | CopyValidation::Lax | CopyValidation::Type(_)
+        )
+    }
+
+    /// The boundary the copy of an element or document node gets — `None`
+    /// for `strip` and `preserve`, which copy with no boundary.
+    pub fn boundary(self) -> Option<Boundary> {
+        match self {
+            CopyValidation::Strip | CopyValidation::Preserve => None,
+            CopyValidation::Strict => Some(Boundary::Strict),
+            CopyValidation::Lax => Some(Boundary::Lax),
+            CopyValidation::Type(type_key) => Some(Boundary::Type(type_key)),
+            CopyValidation::Untyped => Some(Boundary::Untyped),
+        }
+    }
 }
 
 impl Annotations {
@@ -322,6 +356,31 @@ pub enum Boundary {
     /// element child and no text children (XTTE1550), that element validated
     /// as a validation root with the ID/IDREF rule applied (XTTE1555).
     Strict,
+    /// `validation="lax"` (§19.2.1.1): as `strict` when the element has a
+    /// top-level declaration; otherwise it "is not validated, but its
+    /// attributes and children are validated, again with lax validation" —
+    /// XML Schema's lax wildcard validation (§5.2). On a document node,
+    /// document-level validation whose element child is validated so.
+    Lax,
+    /// `[xsl:]type` (§19.2.1.2): the element is assessed with this type as
+    /// the "processor-stipulated type definition", whatever its name; on a
+    /// document node, document-level validation whose element child is.
+    Type(TypeKey),
+    /// `[xsl:]type="xs:untyped"`: XDM 1.0 §2.6.2, "the dynamic type of an
+    /// element node that has not been validated, or has been validated in skip
+    /// mode", with untyped content (§6.2.1) — on an element the effect of
+    /// `strip`; on a document node, document-level validation (§19.2.2 "when a
+    /// type attribute is present": XTTE1550) whose element child is untyped.
+    Untyped,
+}
+
+impl Boundary {
+    /// Whether the boundary requests validation (§19.2.2: "when validation is
+    /// set to strict or lax, or when a type attribute is present") — on a
+    /// document node, document-level validation.
+    pub fn requests_validation(self) -> bool {
+        !matches!(self, Boundary::Strip | Boundary::Preserve)
+    }
 }
 
 /// A destination for the event stream (§9.2).
@@ -474,9 +533,9 @@ pub(crate) fn xtte1550(what: &str) -> XsltError {
     XsltError::new(
         codes::XTTE1550,
         format!(
-            "a document node validated with validation=\"strict\" must have exactly one element \
-             child, no text child, and only comments and processing instructions besides: it has \
-             {what}"
+            "a document node whose validation is requested (validation=\"strict\" or \"lax\", or \
+             a type) must have exactly one element child, no text child, and only comments and \
+             processing instructions besides: it has {what}"
         ),
     )
 }
@@ -1472,11 +1531,14 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
     ///   of the validation process"), a document node a document-level
     ///   validation (a document node opened with [`Boundary::Strict`], in
     ///   element content too: §5.7.1 replaces it by its children afterwards);
-    ///   the source's bindings are not read.
+    ///   the source's bindings are not read;
+    /// - `lax` and `type` (M4f): as `strict`, with [`Boundary::Lax`] /
+    ///   [`Boundary::Type`]; `type="xs:untyped"` is [`Boundary::Untyped`] over
+    ///   a copy made as `strip` makes it.
     ///
     /// "These attributes are ignored when copying an item that is not an
-    /// element, attribute or document node." An attribute with `strict` is
-    /// validated by the instruction, not here.
+    /// element, attribute or document node." An attribute with `strict`,
+    /// `lax` or `type` is validated by the instruction, not here.
     pub(crate) fn copy_selected(
         &mut self,
         nav: &Nav<'t>,
@@ -1488,19 +1550,36 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                 DomNodeType::Root | DomNodeType::Element | DomNodeType::Attribute,
                 CopyValidation::Strip,
             ) => self.copy_subtree(nav, namespaces, Carry::Ids),
-            (DomNodeType::Root, CopyValidation::Strict) => {
-                self.validation_boundary(Boundary::Strict)?;
+            (DomNodeType::Attribute, validation) if validation != CopyValidation::Preserve => {
+                Err(XsltError::internal(
+                    "a validated copy of an attribute is validated before it is passed on",
+                ))
+            }
+            // `type="xs:untyped"` on an element: the effect of `strip`, is-id kept.
+            (DomNodeType::Element, CopyValidation::Untyped) => {
+                self.validation_boundary(Boundary::Untyped)?;
+                self.copy_subtree(nav, namespaces, Carry::Ids)
+            }
+            (DomNodeType::Root, CopyValidation::Untyped) => {
+                self.validation_boundary(Boundary::Untyped)?;
+                self.start_document()?;
+                self.copy_subtree(nav, namespaces, Carry::Ids)?;
+                self.end_document()
+            }
+            (DomNodeType::Root, validation) if validation.validates() => {
+                if let Some(boundary) = validation.boundary() {
+                    self.validation_boundary(boundary)?;
+                }
                 self.start_document()?;
                 self.copy_subtree(nav, namespaces, Carry::Nothing)?;
                 self.end_document()
             }
-            (DomNodeType::Element, CopyValidation::Strict) => {
-                self.validation_boundary(Boundary::Strict)?;
+            (DomNodeType::Element, validation) if validation.validates() => {
+                if let Some(boundary) = validation.boundary() {
+                    self.validation_boundary(boundary)?;
+                }
                 self.copy_subtree(nav, namespaces, Carry::Nothing)
             }
-            (DomNodeType::Attribute, CopyValidation::Strict) => Err(XsltError::internal(
-                "a strict copy of an attribute is validated before it is passed on",
-            )),
             (DomNodeType::Root | DomNodeType::Element | DomNodeType::Attribute, _) => {
                 self.copy_subtree(nav, namespaces, Carry::All)
             }
@@ -1664,7 +1743,7 @@ impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
             // `DocumentMark::forwarded`), so the destination cannot see that it has no element
             // child — which is XTTE1550 when its validation was requested (§19.2.2).
             Some(mark) if !mark.forwarded => match mark.boundary {
-                Some(Boundary::Strict) => Err(xtte1550("no child")),
+                Some(boundary) if boundary.requests_validation() => Err(xtte1550("no child")),
                 _ => Ok(()),
             },
             _ => self.out.end_document(),
@@ -2634,15 +2713,14 @@ impl<'s, 't> SequenceCollector<'s, 't> {
             // is not observable — `fn:id` needs a document node at the root of
             // the tree), its own annotation with `preserve`.
             DomNodeType::Attribute => {
-                let binding = match validation {
-                    CopyValidation::Strip => None,
-                    CopyValidation::Preserve => CopySource::schema_binding(nav),
-                    CopyValidation::Strict => {
-                        return Err(XsltError::internal(
-                            "a strict copy of an attribute is validated before it is passed on",
-                        ))
-                    }
-                };
+                let binding =
+                    match validation {
+                        CopyValidation::Strip => None,
+                        CopyValidation::Preserve => CopySource::schema_binding(nav),
+                        _ => return Err(XsltError::internal(
+                            "a validated copy of an attribute is validated before it is passed on",
+                        )),
+                    };
                 let (name, value) = (Name::of(nav), nav.value());
                 self.push_parentless(
                     move |out| {

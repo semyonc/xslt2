@@ -330,27 +330,35 @@ fn strict_validation_of_an_undeclared_root_is_an_error() {
 }
 
 /// `Lax` with a declared root validates as `Strict` does (the root is assessed against its
-/// declaration); with an undeclared root it would need lax assessment of the validation root
-/// (XML Schema 1.1 §5.2, upstream C36), which is M4f's: not implemented, never a silently untyped
-/// tree.
+/// declaration). With an undeclared root it is XML Schema 1.1 §5.2's lax wildcard validation
+/// (upstream C36, `ValidationRoot::Lax`; it was M4f's fence until M4f): "If they do not identify any
+/// declaration or definition, then ·lax assessment· is performed" — no error for the root, its
+/// declared descendants validated and typed (`order`), an invalid one an error.
 #[test]
-fn lax_validation_types_a_declared_root_and_fences_an_undeclared_one() {
-    let main = root_template(
-        "<xsl:value-of select=\"data(/orders/order[1]/qty) instance of xs:integer\"/>",
-    );
+fn lax_validation_types_a_declared_root_and_laxly_assesses_an_undeclared_one() {
+    let main =
+        root_template("<xsl:value-of select=\"data(//order[1]/qty) instance of xs:integer\"/>");
     assert_eq!(
         out(run_over(&main, ORDERS, SourceValidation::Lax)),
         "<out>true</out>"
     );
+    assert_eq!(
+        out(run_over(
+            &main,
+            "<unknown><order><qty> 7 </qty></order></unknown>",
+            SourceValidation::Lax,
+        )),
+        "<out>true</out>"
+    );
+    // An invalid document is an error under `Lax` too, with a declared root or below an undeclared
+    // one.
+    let e = err(run_over(&main, INVALID_ORDERS, SourceValidation::Lax));
+    assert_eq!(e.code, codes::XTDE1170, "{e}");
     let e = err(run_over(
         &main,
-        "<unknown><qty>1</qty></unknown>",
+        "<unknown><order><qty>seven</qty></order></unknown>",
         SourceValidation::Lax,
     ));
-    assert!(e.is_not_implemented(), "{e}");
-    assert!(e.message.ends_with("(M4f)"), "{}", e.message);
-    // An invalid document with a declared root is an error under `Lax` too.
-    let e = err(run_over(&main, INVALID_ORDERS, SourceValidation::Lax));
     assert_eq!(e.code, codes::XTDE1170, "{e}");
 }
 

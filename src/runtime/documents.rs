@@ -29,8 +29,9 @@ impl<'a, 't> Transformation<'a, 't> {
     /// (`SchemaContextBuilder::schema_uri`) — as it is parsed, and the run sees it typed: its nodes
     /// carry their type annotations and atomize to typed values (§2.8). A document that is not
     /// valid is an error (the code this loader reports a document it cannot parse with; the message
-    /// names the first errors and the nodes they are about). `Lax` validation of a document whose
-    /// root element has no declaration is not implemented yet (M4f). A **basic** processor has no
+    /// names the first errors and the nodes they are about). Under `Lax` a document element with
+    /// no declaration and no `xsi:type` is assessed laxly: no error, its declared descendants
+    /// validated (XML Schema 1.1 §5.2, lax wildcard validation). A **basic** processor has no
     /// schema: `Strict` or `Lax` is XTDE1665 (§21.1). `Skip` parses the document untyped.
     ///
     /// If the URI was loaded before, its document is returned as it is, whatever `validation` says

@@ -29,12 +29,12 @@ use crate::stylesheet::{CompatMode, ModuleId, StaticContextId, StaticContexts};
 /// > specified, the effect is the same as specifying validation="strip".
 ///
 /// The static rules (XTSE1505, XTSE1520, XTSE1530, XTSE0020; XTSE1660 for a
-/// basic processor) are the checker's (`compile/checks.rs`). Evaluated so far:
-/// `Strip` everywhere; `Preserve` and `Strict` on literal result elements and
-/// `xsl:element`; `Strict`, `Lax`, `Preserve` and `Type` on `xsl:attribute`
-/// (M4d: `runtime/validate.rs`). Every other combination raises
-/// `XSLT2-NOTIMPL` naming the sub-milestone that owns it (see
-/// [`Validation::owner`]) when the instruction is evaluated.
+/// basic processor) are the checker's (`compile/checks.rs`). Every value is
+/// evaluated on every node constructor since M4f (`runtime/validate.rs`); the
+/// one thing left is a `type` naming an XPath 2.0 type an XML Schema 1.0 set
+/// has no definition of (`xs:untypedAtomic` on an element, `xs:anyAtomicType`,
+/// `xs:dayTimeDuration`, `xs:yearMonthDuration`), `XSLT2-NOTIMPL` naming M4g
+/// when the instruction is evaluated.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Validation {
     /// The new node and the nodes it contains are untyped (§19.2.1.1).
@@ -52,20 +52,6 @@ pub enum Validation {
     Type(QName),
 }
 
-/// The kind of node constructor a [`Validation`] is on, for its owner.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Constructor {
-    /// A literal result element or `xsl:element`.
-    Element,
-    /// `xsl:attribute`.
-    Attribute,
-    /// `xsl:copy` or `xsl:copy-of`.
-    Copy,
-    /// `xsl:document`, `xsl:result-document`, or the implicit final result
-    /// tree.
-    Document,
-}
-
 impl Validation {
     /// Whether this is `strip`.
     pub fn is_strip(&self) -> bool {
@@ -81,24 +67,6 @@ impl Validation {
             Self::Lax => "validation=\"lax\"".to_string(),
             Self::Type(name) => format!("type=\"{name}\""),
         }
-    }
-
-    /// The roadmap sub-milestone that implements this validation on a
-    /// `constructor` (M4_PLAN §4): M4d constructed elements and attributes
-    /// (`strict`, `preserve`, `type` and — decision D-d1 — `lax` on an
-    /// attribute; all done), M4e copies and document nodes, M4f `type` on
-    /// elements, copies and documents and `lax` on everything but an
-    /// attribute. `None` for `strip`, which needs nothing.
-    pub fn owner(&self, constructor: Constructor) -> Option<&'static str> {
-        Some(match (self, constructor) {
-            (Self::Strip, _) => return None,
-            (Self::Lax, Constructor::Attribute) => "M4d",
-            (Self::Lax, _) => "M4f",
-            (Self::Type(_), Constructor::Attribute) => "M4d",
-            (Self::Type(_), _) => "M4f",
-            (Self::Strict | Self::Preserve, Constructor::Element | Constructor::Attribute) => "M4d",
-            (Self::Strict | Self::Preserve, Constructor::Copy | Constructor::Document) => "M4e",
-        })
     }
 }
 

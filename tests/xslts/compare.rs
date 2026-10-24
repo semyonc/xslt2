@@ -1066,8 +1066,15 @@ fn load_text(
     match file {
         Some(f) => {
             let p = cx.set_dir.join(f);
-            std::fs::read_to_string(&p)
-                .map_err(|e| format!("cannot read expected file {}: {e}", p.display()))
+            let bytes = std::fs::read(&p)
+                .map_err(|e| format!("cannot read expected file {}: {e}", p.display()))?;
+            // UTF-8 as it always was; a file that is not UTF-8 (`validation-0201`'s
+            // `schvalid001.out` is ISO-8859-1, as its XML declaration says) is decoded by its BOM or
+            // its declared encoding (`xslt2::resolver::decode_xml`), not refused.
+            Ok(match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(e) => xslt2::resolver::decode_xml(e.as_bytes()),
+            })
         }
         None => Ok(inline.to_string()),
     }

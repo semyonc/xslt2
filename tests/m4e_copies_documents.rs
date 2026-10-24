@@ -794,23 +794,37 @@ fn a_tree_typed_against_another_set_is_copied_untyped() {
     assert_eq!(run.take_warnings().len(), 1);
 }
 
-// ── What M4e does not implement ──────────────────────────────────────────────────────────────
+// ── What M4e did not implement ───────────────────────────────────────────────────────────────
 
-/// `lax` and `type` on copies and document nodes are M4f's (M4_PLAN §4 M4f: "`[xsl:]type` on …
-/// `xsl:copy`, `xsl:copy-of`, `xsl:document`, `xsl:result-document` … and `validation="lax"`
-/// everywhere"): they still raise `XSLT2-NOTIMPL` naming M4f when evaluated.
+/// `lax` and `type` on copies and document nodes were M4f's fence (M4_PLAN §4 M4f) and run since M4f
+/// (`tests/m4f_type_lax.rs` checks what they do): valid copies and documents are built, an
+/// invalid one is XTTE1515 (`lax`: the copied `e:doc` element has no `row`). An XPath 2.0 type an XML
+/// Schema 1.0 set has no definition of stays fenced, as M4g's (upstream proposal C72).
 #[test]
-fn lax_and_type_on_copies_and_documents_stay_fenced_with_m4f() {
+fn lax_and_type_on_copies_and_documents_run_since_m4f() {
     for body in [
-        r#"<out><xsl:copy-of select="/e:doc/e:row" validation="lax"/></out>"#,
-        r#"<out><xsl:copy-of select="/e:doc/e:row" type="xs:anyType"/></out>"#,
-        r#"<out><xsl:for-each select="/e:doc"><xsl:copy validation="lax"/></xsl:for-each></out>"#,
+        r#"<out><xsl:copy-of select="/e:doc/e:row[1]" validation="lax"/></out>"#,
+        r#"<out><xsl:copy-of select="/e:doc/e:row[1]" type="xs:anyType"/></out>"#,
         r#"<out><xsl:document validation="lax"><e:row/></xsl:document></out>"#,
         r#"<out><xsl:document type="xs:anyType"><e:row/></xsl:document></out>"#,
         r#"<xsl:result-document validation="lax"><e:row/></xsl:result-document>"#,
     ] {
-        assert_eq!(fenced(body), "M4f", "{body}");
+        let main = sheet(&format!(r#"<xsl:template match="/">{body}</xsl:template>"#));
+        if let Err(e) = run(&main) {
+            panic!("{body}: {e}");
+        }
     }
+    assert_code(
+        &error(
+            r#"<out><xsl:for-each select="/e:doc"><xsl:copy validation="lax"/></xsl:for-each></out>"#,
+        ),
+        codes::XTTE1515,
+        "an empty lax copy of e:doc",
+    );
+    assert_eq!(
+        fenced(r#"<out><xsl:copy-of select="/e:doc/e:row" type="xs:yearMonthDuration"/></out>"#),
+        "M4g"
+    );
 }
 
 // ══ Fix round ════════════════════════════════════════════════════════════════════════════════

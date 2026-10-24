@@ -748,15 +748,13 @@ fn xml_namespace_attributes_validate_strictly() {
 
 // ── What part 1 leaves fenced ───────────────────────────────────────────────────────────────
 
-/// `lax` and `type` on elements are M4f's (M4_PLAN §4): each still raises `XSLT2-NOTIMPL` naming its
-/// owner when evaluated. (Element validation, part 2, and `lax` on `xsl:attribute`, decision D-d1,
-/// were in this list until part 2; copies and document nodes, M4e's, until M4e —
-/// `tests/m4e_copies_documents.rs`.)
+/// What is still fenced raises `XSLT2-NOTIMPL` naming its owner when evaluated. (Element
+/// validation, part 2, and `lax` on `xsl:attribute`, decision D-d1, were in this list until part 2;
+/// copies and document nodes, M4e's, until M4e — `tests/m4e_copies_documents.rs`; `lax` and `type`
+/// on elements, M4f's, until M4f — `tests/m4f_type_lax.rs`.)
 #[test]
 fn what_part_1_does_not_implement_stays_fenced() {
     let cases = [
-        (r#"<e xsl:validation="lax"/>"#, "M4f"),
-        (r#"<e xsl:type="d:size"/>"#, "M4f"),
         // An XPath 2.0 type an XML Schema 1.0 set has no definition of (§3.13 puts it in scope):
         // M4g's XSD 1.1 mode has one (upstream proposal C72 for 1.0).
         (
@@ -1024,15 +1022,21 @@ fn lax_on_xsl_attribute() {
     );
 }
 
-/// `lax` and `type` on an element constructor stay M4f's (M4_PLAN §4 M4f, upstream C36).
+/// `lax` and `type` on an element constructor were M4f's fence (M4_PLAN §4 M4f, upstream C36) and
+/// run since M4f (`tests/m4f_type_lax.rs` checks what they do): a declared element under `lax` is
+/// validated against its declaration (`d:n` is an `xs:integer`), an element with `type` against the
+/// type (`d:size` is 1–20).
 #[test]
-fn lax_and_type_on_elements_stay_fenced_with_m4f() {
-    for body in [
-        r#"<d:doc xsl:validation="lax"/>"#,
-        r#"<xsl:element name="d:doc" validation="lax"/>"#,
-        r#"<d:n xsl:type="xs:integer">1</d:n>"#,
+fn lax_and_type_on_elements_run_since_m4f() {
+    for (body, code) in [
+        (r#"<d:n xsl:validation="lax">x</d:n>"#, codes::XTTE1515),
+        (
+            r#"<xsl:element name="d:n" validation="lax">x</xsl:element>"#,
+            codes::XTTE1515,
+        ),
+        (r#"<d:n xsl:type="d:size">21</d:n>"#, codes::XTTE1540),
     ] {
-        assert_eq!(fenced("", body), "M4f", "{body}");
+        assert_eq!(error("", body).code, code, "{body}");
     }
 }
 
