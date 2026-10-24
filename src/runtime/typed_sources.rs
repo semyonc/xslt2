@@ -3,35 +3,36 @@
 //!
 //! **One pass.** A source the host asks to validate ([`SourceValidation::Strict`] or
 //! [`SourceValidation::Lax`]) is read once by `xsd-schema`'s validation driver, which builds the
-//! typed tree as it validates (`TypedBuilderHandler`, upstream C14) with this crate's own sink
-//! (every error, with its instance path, B8) and its own handler around the builder
-//! ([`SourceBuild`]). The validator is made once per transformation (its content models are built
-//! when it is made, D-12).
+//! typed tree as it validates (`TypedBuilderHandler`, upstream C14, with its defaults: defaults as
+//! nodes) with this crate's own sink (every error, with its instance path, B8). The validator is
+//! made once per transformation (its content models are built when it is made, D-12).
 //!
-//! **What the tree holds** is the XDM of a PSVI, which differs from a parse in two rules. XDM 1.0
-//! §6.7.4 (Construction from a PSVI, read at w3.org): "if the resulting Text Node consists entirely
-//! of whitespace and the character information items used to construct this node have a parent and
-//! that parent is an element and its {content type} is not 'mixed', then the content of the Text
-//! Node is the zero-length string … an empty Text Node will be discarded when its parent is
-//! constructed". [`SourceBuild`] drops such text as it goes: whitespace children of an element whose
-//! type is complex with element-only or empty content — until upstream's typed build does it itself
-//! (WAVE_B C67), when this drop goes. XSLT §4.4's note says the same: "elements that are defined in
-//! a DTD or a Schema to contain element-only content will have whitespace text nodes stripped,
-//! regardless of the xsl:strip-space and xsl:preserve-space declarations". The other rule, the
-//! \[schema normalized value\] as the string value of a valid attribute and of a valid element with
-//! simple content (XDM 1.0 §6.2.4, §6.3.4), is the typed build's own since `wave-b` `66e3e3f` (C66):
-//! nothing here repeats it.
+//! **What the tree holds** is the XDM of a PSVI, which `xsd-schema`'s typed build gives since
+//! `wave-b` `d5f2a8e` (batch (t)); nothing here repeats it:
 //!
-//! **Defaults are not materialized** (upstream WAVE_B C39, extended by the M4b review F3): XDM 1.0
-//! §6.2.4 creates a text node for an element that takes its `default` / `fixed` value, and the
-//! PSVI's defaulted attributes are attributes of the element; upstream's typed build creates neither.
-//! A defaulted element's typed value is the default (the navigator substitutes it), its string value
-//! is empty, and under `input-type-annotations="strip"` the default is gone; a defaulted attribute is
-//! absent. So §4.3's Note ("any defaulted elements and attributes that were added to the tree by the
-//! validation process will still be present") is not met until C39 lands. No catalog schema declares
-//! an element default or fixed value; one M4b-owned case needs defaulted attributes (`validation-0701`:
-//! `schema-for-xslt20.xsd` defaults `xsl:apply-templates/@select` to `child::node()`; VERIFIED);
-//! `tests/m4b_review.rs` pins today's behaviour.
+//! - whitespace in element-only content is no text node (C67) — XDM 1.0 §6.7.4 (Construction from a
+//!   PSVI, read at w3.org): "if the resulting Text Node consists entirely of whitespace and the
+//!   character information items used to construct this node have a parent and that parent is an
+//!   element and its {content type} is not 'mixed', then the content of the Text Node is the
+//!   zero-length string … an empty Text Node will be discarded when its parent is constructed";
+//!   XSLT §4.4's note says the same ("elements that are defined in a DTD or a Schema to contain
+//!   element-only content will have whitespace text nodes stripped, regardless of the
+//!   xsl:strip-space and xsl:preserve-space declarations"). Until batch (t) this crate's own
+//!   handler around the typed builder dropped it; the validating receiver of constructed trees
+//!   still applies the rule itself (`validate::element_only`), since it does not use the typed
+//!   build;
+//! - the \[schema normalized value\] as the string value of a valid attribute and of a valid
+//!   element with simple content (XDM 1.0 §6.2.4, §6.3.4; C66, `66e3e3f`);
+//! - defaulted attributes as attribute nodes, and the `default` / `fixed` value of a valid empty
+//!   element with simple content as its text node (XDM 1.0 §6.2.4: "Default and fixed attributes
+//!   provided by XML Schema processing are added to the \[attributes\]", "where a fixed or default
+//!   value for an element is defined in the schema, and the element takes this default value, a
+//!   text node will be created to contain the value"; C39) — so §4.3's Note holds: "any defaulted
+//!   elements and attributes that were added to the tree by the validation process will still be
+//!   present" after `input-type-annotations="strip"` (`validation-0701` needs the defaulted
+//!   `select` of `schema-for-xslt20.xsd`);
+//! - an element whose typed value is a single `xs:ID` in the id index (C62), and the is-idrefs
+//!   property of elements and attributes (C54).
 //!
 //! **An invalid document is an error** (D-4), reported with the code the loader reports a document
 //! it cannot turn into a tree with: FODC0002 for `fn:doc` and `document()` — F&O 1.0 §15.5.4 groups
@@ -54,18 +55,14 @@
 //! happens before stripping of whitespace text nodes" — in one copy ([`Transformation::copy_typed`]),
 //! made only when one of them changes something.
 
-use std::convert::Infallible;
-
 use xsd_schema::document::{
     BufferDocument, BufferDocumentBuilder, BufferDocumentError, BufferDocumentOptions,
     TypedBuildError, TypedBuilderHandler,
 };
 use xsd_schema::navigator::{DomNavigator, DomNodeType, NamespaceAxisScope, TypedValue};
 use xsd_schema::validation::{
-    drive_quick_xml_with, AttributeView, ContentType, DoctypeView, DriveWithError,
-    ElementStartView, EndElementInfo, EndOfAttributesView, SchemaInfo, SchemaValidator, TextKind,
-    ValidationError, ValidationEventHandler, ValidationFlags, ValidationRoot, ValidationSink,
-    ValidationWarning,
+    drive_quick_xml_with, ContentType, DriveWithError, SchemaValidator, ValidationError,
+    ValidationFlags, ValidationRoot, ValidationSink, ValidationWarning,
 };
 use xsd_schema::{SchemaSet, TypeKey};
 
@@ -75,7 +72,7 @@ use crate::names::XML_NS;
 
 /// The XML Schema instance namespace (`xsi:nil`).
 const XSI_NS: &str = "http://www.w3.org/2001/XMLSchema-instance";
-use crate::receiver::Nav;
+use crate::receiver::{kept_of_element, Nav};
 use crate::whitespace;
 
 /// How many validation errors a message about an invalid document quotes.
@@ -101,116 +98,6 @@ impl ValidationSink for Collect<'_> {
     }
 
     fn on_warning(&mut self, _warning: ValidationWarning) {}
-}
-
-/// The handler of one validating parse: `xsd-schema`'s typed builder, with the XDM's whitespace
-/// rule for element-only content (module docs).
-struct SourceBuild<'b, 'a> {
-    builder: TypedBuilderHandler<'b, 'a>,
-    /// For each open element: whether its type is complex with element-only or empty content.
-    element_only: Vec<bool>,
-}
-
-impl ValidationEventHandler for SourceBuild<'_, '_> {
-    type Error = TypedBuildError<Infallible>;
-
-    fn on_element_start_offset(&mut self, byte_pos: usize) -> Result<(), Self::Error> {
-        self.builder.on_element_start_offset(byte_pos)
-    }
-
-    fn before_element(&mut self, view: ElementStartView<'_>) -> Result<(), Self::Error> {
-        self.builder.before_element(view)
-    }
-
-    fn after_element(
-        &mut self,
-        view: ElementStartView<'_>,
-        info: &SchemaInfo,
-    ) -> Result<(), Self::Error> {
-        self.element_only.push(element_only(info));
-        self.builder.after_element(view, info)
-    }
-
-    fn before_attribute(&mut self, view: AttributeView<'_>) -> Result<(), Self::Error> {
-        self.builder.before_attribute(view)
-    }
-
-    fn after_attribute(
-        &mut self,
-        view: AttributeView<'_>,
-        info: &SchemaInfo,
-    ) -> Result<(), Self::Error> {
-        self.builder.after_attribute(view, info)
-    }
-
-    fn skip_attribute(&mut self, view: AttributeView<'_>) -> Result<bool, Self::Error> {
-        self.builder.skip_attribute(view)
-    }
-
-    fn after_end_of_attributes(
-        &mut self,
-        view: EndOfAttributesView<'_>,
-    ) -> Result<(), Self::Error> {
-        // An XSD 1.1 type alternative selects the element's type here (the end-of-attributes
-        // information carries a type only then).
-        if view.info.schema_type.is_some() {
-            if let Some(top) = self.element_only.last_mut() {
-                *top = element_only(view.info);
-            }
-        }
-        self.builder.after_end_of_attributes(view)
-    }
-
-    fn after_end_element(
-        &mut self,
-        info: &EndElementInfo,
-        depth: usize,
-    ) -> Result<(), Self::Error> {
-        self.element_only.pop();
-        self.builder.after_end_element(info, depth)
-    }
-
-    fn on_element_end_offset(&mut self, byte_pos: usize) -> Result<(), Self::Error> {
-        self.builder.on_element_end_offset(byte_pos)
-    }
-
-    fn on_text(&mut self, kind: TextKind, text: &str) -> Result<(), Self::Error> {
-        // XDM 1.0 §6.7.4: whitespace whose parent's {content type} is not mixed is no text node.
-        if self.element_only.last() == Some(&true) && whitespace::is_all_xml_whitespace(text) {
-            return Ok(());
-        }
-        self.builder.on_text(kind, text)
-    }
-
-    fn on_comment(&mut self, text: &str) -> Result<(), Self::Error> {
-        self.builder.on_comment(text)
-    }
-
-    fn on_processing_instruction(&mut self, target: &str, data: &str) -> Result<(), Self::Error> {
-        self.builder.on_processing_instruction(target, data)
-    }
-
-    fn on_doctype(&mut self, doctype: DoctypeView<'_>) -> Result<(), Self::Error> {
-        self.builder.on_doctype(doctype)
-    }
-
-    fn on_xml_declaration(
-        &mut self,
-        declaration: &xsd_schema::xml::XmlDeclaration,
-    ) -> Result<(), Self::Error> {
-        self.builder.on_xml_declaration(declaration)
-    }
-}
-
-/// Whether the type an element was assessed with is complex with element-only or empty content —
-/// the elements whose whitespace text XDM 1.0 §6.7.4 makes no text node (module docs); the
-/// validating receiver of constructed trees applies the same rule (`validate::Validating`).
-pub(super) fn element_only(info: &SchemaInfo) -> bool {
-    matches!(info.schema_type, Some(TypeKey::Complex(_)))
-        && matches!(
-            info.content_type,
-            Some(ContentType::ElementOnly | ContentType::Empty)
-        )
 }
 
 /// The schema set a typed document is bound to, compared with the stylesheet's by address (D-13).
@@ -292,10 +179,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 BufferDocumentOptions::default(),
             )
             .map_err(|e| XsltError::internal(format!("could not start a typed tree: {e}")))?;
-            let mut handler = SourceBuild {
-                builder: TypedBuilderHandler::new(&mut builder),
-                element_only: Vec::new(),
-            };
+            let mut handler = TypedBuilderHandler::new(&mut builder);
             let driven = drive_quick_xml_with(xml.as_bytes(), &mut runtime, set, &mut handler);
             drop(handler);
             let driven = driven.map_err(|e| match e {
@@ -382,15 +266,15 @@ impl<'a, 't> Transformation<'a, 't> {
         self.copy_typed(doc, uri, strip, space_rules)
     }
 
-    /// The admission copy of a typed tree: annotations kept or stripped (`strip`; is-id kept, §4.3),
-    /// whitespace stripped by `xsl:strip-space` (§4.4).
+    /// The admission copy of a typed tree: annotations kept or stripped (`strip`; is-id and
+    /// is-idrefs kept, §4.3), whitespace stripped by `xsl:strip-space` (§4.4).
     ///
-    /// Under `strip` the ids the source's index files for an element are registered on the copy —
-    /// today the ids its attributes answer to (an `xml:id`, an `xs:ID`-typed attribute). Upstream's
-    /// index files no element by its own typed value yet (C62); when it does, an element's own id
-    /// must be registered here too (its string value against the source's index), or `strip` would
-    /// lose it (review F4; `tests/m4b_review.rs` pins today's behaviour). is-idrefs is not kept:
-    /// `fn:idref` does not exist upstream yet (C54).
+    /// Under `strip` the ids the source's index files for an element are registered on the copy
+    /// (`register_xml_id`): those its attributes answer to (an `xml:id`, an `xs:ID`-typed attribute)
+    /// and the one its own typed value is (upstream C62, `receiver::kept_of_element`; review F4,
+    /// `tests/m4b_review.rs`) — and every element and attribute with the is-idrefs property in the
+    /// source has it on the copy (`register_idrefs`, upstream C54), so `fn:id` and `fn:idref` find
+    /// on the stripped tree what they find on the typed one.
     fn copy_typed(
         &self,
         doc: &'t BufferDocument<'t>,
@@ -457,7 +341,9 @@ impl<'a, 't> Transformation<'a, 't> {
                     .start_element(nav.local_name(), nav.namespace_uri(), nav.prefix(), &decls)
                     .map_err(refused)?;
                 // §4.3: "The values of the is-id and is-idrefs properties are not changed" — the
-                // ids the element answers to in the source, registered on the copy.
+                // ids the element answers to in the source (by its attributes and by its own typed
+                // value), registered on the copy, and the is-idrefs property of the element and its
+                // attributes.
                 let mut ids: Vec<String> = Vec::new();
                 // Whether the element carries `xsi:nil`: only then can it be nilled, so only then is
                 // its typed value asked for (it is computed, not stored).
@@ -482,6 +368,9 @@ impl<'a, 't> Transformation<'a, 't> {
                             .map_err(refused)?;
                         if strip {
                             let owner = nav.current_ref();
+                            if attr.is_idrefs() {
+                                out.register_idrefs(node);
+                            }
                             if nav.document().get_element_by_id_in_tree(owner, &value)
                                 == Some(owner)
                             {
@@ -505,6 +394,14 @@ impl<'a, 't> Transformation<'a, 't> {
                     // character and element children only; review F2).
                     if has_xsi_nil && matches!(nav.typed_value(), TypedValue::Nilled) {
                         out.set_nil(elem);
+                    }
+                }
+                if strip {
+                    // The element's own: the id its typed value is (C62), its is-idrefs (C54).
+                    let kept = kept_of_element(nav);
+                    ids.extend(kept.id);
+                    if kept.idrefs {
+                        out.register_idrefs(elem);
                     }
                 }
                 for id in &ids {

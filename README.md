@@ -89,14 +89,16 @@ let outcome = run.transform_source_with("file:///in.xml", &xml, SourceValidation
 ```
 
 A validated document is parsed and typed in one pass; its nodes atomize to typed values (so keys, sort keys and
-grouping keys compare typed values), whitespace in element-only content is not in the tree (XDM 1.0 §6.7.4), and an
-invalid document is an error naming the offending nodes. `Skip` (the default) leaves documents untyped, exactly as
-before. `input-type-annotations="strip"` strips the annotations of every source tree (§4.3; the ids attributes give
-are kept), and `xsl:strip-space` spares elements with simple content (§4.4). A valid attribute or simple-content
-element has its whitespace normalized as its type says (XDM 1.0 §6.2.4, §6.3.4). Not there yet, upstream: an element's
-`default` / `fixed` value as a text node and defaulted attributes (so `strip` cannot keep them), and an element whose
-own typed value is an `xs:ID` in the `id()` index. A stylesheet module read with `document('')` is not validated by
-the transformation-wide default; `set_source_validation(uri, …)` sets the mode of any one URI.
+grouping keys compare typed values; a union-typed node to the value of its member type), whitespace in element-only
+content is not in the tree (XDM 1.0 §6.7.4), defaulted attributes are attributes of their element and an empty
+element that takes its `default` / `fixed` value has it as its text (XDM 1.0 §6.2.4), an element whose typed value is
+an `xs:ID` is found by `id()` as an `xs:ID` attribute is, `idref()` finds the elements and attributes whose typed value
+holds an `xs:IDREF`, and an invalid document is an error naming the offending nodes. `Skip` (the default) leaves
+documents untyped, exactly as before. `input-type-annotations="strip"` strips the annotations of every source tree
+(§4.3; the defaults stay, and what `id()` and `idref()` find is unchanged), and `xsl:strip-space` spares elements with
+simple content (§4.4). A valid attribute or simple-content element has its whitespace normalized as its type says
+(XDM 1.0 §6.2.4, §6.3.4). A stylesheet module read with `document('')` is not validated by the transformation-wide
+default; `set_source_validation(uri, …)` sets the mode of any one URI.
 
 **Typed patterns** (M4c). Every pattern — `match` of `xsl:template` and `xsl:key`, `count` / `from` of `xsl:number`,
 `group-starting-with` / `group-ending-with` — may use the XPath 2.0 kind tests that name schema components:
@@ -117,7 +119,9 @@ proposed Wave B item C68).
 element against the top-level declaration of its name, through `xsd-schema`'s streaming validation as the tree is
 built (§19.2.1.1): no such declaration is XTTE1512, an invalid element XTTE1510 (with nested validations, the innermost
 failure is the one reported); the validation annotates the element and everything in it, creates defaulted attributes
-and an empty element's default value, sets nilled, makes the text of a valid simple-content element and the value of
+and an empty element's default value (a QName in one is written with a prefix the element binds to its namespace,
+declared on it for an attribute where none is; for an element's own default with no such prefix in scope this is not
+implemented yet, upstream proposal C89), sets nilled, makes the text of a valid simple-content element and the value of
 a valid attribute their normalized values, drops whitespace text in element-only content, and checks identity
 constraints but not ID uniqueness or dangling IDREFs (§19.2.1.3). Nested validations run innermost first, each
 validating what the ones inside it produced, and what they produced stays when the annotations go: `strip` around a
@@ -130,15 +134,17 @@ declaration means no validation); an invalid value is XTTE1540 / XTTE1510 / XTTE
 declaration under `strict` XTTE1512, a type built from `xs:QName` or `xs:NOTATION` XTTE1545. The valid attribute is annotated with the type and its string
 value is the normalized value. Whether an annotation stays is decided by the constructors around the node — the
 outermost one whose validation is not `preserve` decides: under `strip` (the default) everything is untyped (an
-`xs:ID` attribute still identifies its element for `id()`), under `preserve` a new element is `xs:anyType` and what
+`xs:ID` attribute or element still identifies its element for `id()`, an `xs:IDREF` one is still found by
+`idref()`), under `preserve` a new element is `xs:anyType` and what
 it contains keeps its annotations, under `strict` the validation's annotations stand. A variable's temporary tree is a
 `preserve` document (typed nodes sequenced into it keep their annotations, nilled and ids), and `default-validation`
 applies per module and, for the principal module, to the implicit final result tree. Upstream items it needed —
 the current `xml.xsd` (C71) and the defaults of local attribute declarations (C74) — are fixed on `wave-b` `cfe061e`.
 
 **Copies and documents** (M4e). `xsl:copy-of` applies its `validation` to each element, attribute and document node
-it selects (§11.9.2): `preserve` keeps every annotation, nilled and is-id of what it copies; `strip` makes the copy
-untyped but keeps is-id (an `xs:ID` attribute still identifies its element for `id()`); `strict` validates the copy
+it selects (§11.9.2): `preserve` keeps every annotation, nilled, is-id and is-idrefs of what it copies; `strip` makes
+the copy untyped but keeps is-id and is-idrefs (an `xs:ID` attribute or element still identifies its element for
+`id()`, an `xs:IDREF` / `xs:IDREFS` one is still found by `idref()`); `strict` validates the copy
 of an element against the top-level declaration of its name — its descendants re-annotated by that validation —, of
 an attribute as `xsl:attribute validation="strict"` does, and of a document node as a document. `xsl:copy` of an
 element with `preserve` makes it `xs:anyType` (what its content constructs keeps its annotations), of an attribute
@@ -150,8 +156,8 @@ element child, no text child, and any comments and processing instructions (XTTE
 against its top-level declaration (XTTE1512 / XTTE1510) and, unlike element-level validation, ID uniqueness and
 IDREF targets are checked (XTTE1555). The documents of variables and of `xsl:message` are not validated (an element
 validated in a message still is), and the implicit final result tree never is (`default-validation` is `preserve` or
-`strip`). Known limits met by the catalog: a union-typed node atomizes to the member type's primitive rather than the
-member type (upstream proposal C79), an element typed `xs:ID` is not in the id index (C62), `fn:idref` (C54).
+`strip`). The upstream limits the catalog met here — a union-typed node's member type (C79), an element typed `xs:ID`
+in the id index (C62), `fn:idref` (C54) — are fixed on `wave-b` `d5f2a8e`.
 
 **Type-driven and lax validation** (M4f). `[xsl:]type` on a literal result element, `xsl:element`, `xsl:copy`,
 `xsl:copy-of`, `xsl:document` and `xsl:result-document` validates the element against the named type, whatever its
@@ -166,8 +172,9 @@ laxly — an undeclared child is not validated either, whatever its `xsi:type` s
 against its declaration; anything invalid is XTTE1515. On a document node `lax` and `type` are document-level validation (XTTE1550,
 XTTE1555 as for `strict`). Both use `xsd-schema`'s validation-root modes (C36, `ValidationRoot::{Type, Lax}`).
 `SourceValidation::Lax` for a source whose root has no declaration now runs too (lax wildcard validation; the root is
-unbound in the typed tree). Known limits met by the catalog: `fn:idref` (C54), elements typed `xs:ID` and the id
-index (C62), a union's member type (C79), the XPath 2.0 types an XML Schema 1.0 set lacks (C72).
+unbound in the typed tree). Known limit met by the catalog: the XPath 2.0 types an XML Schema 1.0 set lacks (C72);
+`fn:idref` (C54), elements typed `xs:ID` in the id index (C62) and a union's member type (C79) are fixed on `wave-b`
+`d5f2a8e`.
 
 Not implemented yet, raising `XSLT2-NOTIMPL` naming M4g (`../../xslt_doc/M4_PLAN.md` §4) when the construct is
 **evaluated** — a stylesheet that never reaches one runs: a `type` naming an XPath 2.0 type an XML Schema 1.0 set has

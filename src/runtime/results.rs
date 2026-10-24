@@ -434,6 +434,22 @@ impl<'t> Receiver<'t> for InitialResult<'_, 't> {
         self.out.element_id(id)
     }
 
+    fn attribute_idrefs(&mut self) -> Result<(), XsltError> {
+        self.out.attribute_idrefs()
+    }
+
+    fn element_idrefs(&mut self) -> Result<(), XsltError> {
+        self.out.element_idrefs()
+    }
+
+    fn attribute_copied_from(&mut self, source: &Nav<'t>) -> Result<(), XsltError> {
+        self.out.attribute_copied_from(source)
+    }
+
+    fn element_copied_from(&mut self, source: &Nav<'t>) -> Result<(), XsltError> {
+        self.out.element_copied_from(source)
+    }
+
     fn append_copy(
         &mut self,
         item: &XmlItem<Nav<'t>>,

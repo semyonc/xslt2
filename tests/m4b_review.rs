@@ -4,8 +4,9 @@
 //! trees: "the document containing the initial context node, and any document returned by the functions
 //! document, doc, or collection"), §16.1, §21.1 (XTDE1665); M4 plan D-2 ("A document typed against
 //! another set … is stripped with a warning"); XDM 1.0 §6.2.4 (nilled, is-id, element defaults) and
-//! F&O 1.0 §15.5.2 (`fn:id`), read at w3.org. Two tests pin behaviour that waits for upstream items
-//! (C39, C62): they say what changes when those land.
+//! F&O 1.0 §15.5.2 (`fn:id`), read at w3.org. Two tests (F3, F4) pinned behaviour that waited for
+//! upstream items C39 and C62; both landed on `wave-b` `d5f2a8e` (batch (t)), and the tests now
+//! check the behaviour the review asked for, as regression tests.
 
 mod common;
 
@@ -270,22 +271,19 @@ fn nilled_survives_the_admission_copy_of_an_element_with_a_comment_child() {
     }
 }
 
-// ── F3 (pinned): element and attribute defaults wait for upstream C39 ───────────────
+// ── F3: element and attribute defaults (upstream C39, `wave-b` `d5f2a8e`) ─────────────
 
 /// XDM 1.0 §6.2.4: "where a fixed or default value for an element is defined in the schema, and the
-/// element takes this default value, a text node will be created to contain the value"; §4.3's Note:
-/// "any defaulted elements and attributes that were added to the tree by the validation process will
-/// still be present". **Pinned, not met**: upstream's typed build creates neither the text node of an
-/// element default nor a defaulted attribute (WAVE_B C39, extended by the M4b review F3) — the typed
-/// value of `d` is the default, its string value empty, and under `strip` the default is gone. When
-/// C39 lands both rows become `[dflt][dflt][adflt]`. No catalog schema declares an element default or
-/// fixed value (VERIFIED, fix round).
+/// element takes this default value, a text node will be created to contain the value", and
+/// "Default and fixed attributes provided by XML Schema processing are added to the [attributes]";
+/// §4.3's Note: "any defaulted elements and attributes that were added to the tree by the
+/// validation process will still be present". Pinned `[][dflt][]` (typed) and `[][][]` (`strip`)
+/// until upstream's typed build created both (WAVE_B C39, `wave-b` `d5f2a8e`): now the element
+/// default is a text node, the defaulted attribute an attribute node, and the strip admission copy
+/// keeps both.
 #[test]
-fn element_and_attribute_defaults_are_not_materialized_yet() {
-    for (attrs, expected) in [
-        ("", "<out>[][dflt][]</out>"),
-        (r#"input-type-annotations="strip""#, "<out>[][][]</out>"),
-    ] {
+fn element_and_attribute_defaults_are_materialized() {
+    for attrs in ["", r#"input-type-annotations="strip""#] {
         let main = root_template_with(
             attrs,
             "<xsl:value-of select=\"concat('[', string(/r/d), '][', string-join(data(/r/d), ''), \
@@ -298,22 +296,20 @@ fn element_and_attribute_defaults_are_not_materialized_yet() {
             Insert::Nothing,
             |run| run.transform_source_with(SOURCE, "<r><d/></r>", SourceValidation::Strict),
         );
-        assert_eq!(result.unwrap(), expected, "{attrs}");
+        assert_eq!(result.unwrap(), "<out>[dflt][dflt][adflt]</out>", "{attrs}");
     }
 }
 
-// ── F4 (pinned): element ids wait for upstream C62 ───────────────────────────────────
+// ── F4: element ids (upstream C62, `wave-b` `d5f2a8e`) and the strip copy ────────────────
 
 /// F&O 1.0 §15.5.2 `fn:id` selects an element when "The is-id property … of the element node is true,
 /// and the typed value of the element node is equal to V", or when it "has an attribute node whose
 /// is-id property … is true"; §4.3: under `strip` "The values of the is-id and is-idrefs properties
-/// are not changed". **Pinned**: the attribute id `a1` is found, typed and stripped; the element id
-/// `id1` is found in neither, because upstream's id index files attributes only (C62). When C62 lands
-/// the typed row becomes `true true`, and the strip copy must then also register the ids the element
-/// itself answers to (today it re-registers what its attributes answer to), or the stripped row stays
-/// `true false` — the follow-up recorded in the report.
+/// are not changed". Pinned `true false` until upstream's id index filed elements (C62): the
+/// element id `id1` is now found in the typed tree, and the strip admission copy registers the id
+/// the element answers to by its own typed value as well as its attributes' (batch (t) follow-up).
 #[test]
-fn element_ids_wait_for_c62_and_strip_keeps_attribute_ids() {
+fn element_and_attribute_ids_survive_input_type_annotations_strip() {
     for attrs in ["", r#"input-type-annotations="strip""#] {
         let main = root_template_with(
             attrs,
@@ -332,7 +328,7 @@ fn element_ids_wait_for_c62_and_strip_keeps_attribute_ids() {
                 )
             },
         );
-        assert_eq!(result.unwrap(), "<out>true false</out>", "{attrs}");
+        assert_eq!(result.unwrap(), "<out>true true</out>", "{attrs}");
     }
 }
 

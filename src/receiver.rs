@@ -28,7 +28,7 @@ use xsd_schema::navigator::{DomNavigator, DomNodeType, NamespaceAxisScope, Typed
 use xsd_schema::parser::frames::SimpleTypeVariety;
 use xsd_schema::types::value::{XmlAtomicValue, XmlValue, XmlValueKind};
 use xsd_schema::types::XmlTypeCode;
-use xsd_schema::validation::{validate_simple_type, SchemaValidator};
+use xsd_schema::validation::{validate_simple_type, ContentType, SchemaValidator};
 use xsd_schema::xpath::XmlItem;
 use xsd_schema::SchemaSet;
 
@@ -211,14 +211,21 @@ enum Carry {
     /// `strict` validation re-annotates (§19.2.1.1: the validation, not the
     /// source, decides).
     Nothing,
-    /// No binding at all, but the id of each attribute that is an `xs:ID` in
-    /// its source, passed on with [`Receiver::element_id`]: a `strip` copy
-    /// loses its annotations, but "The values of the is-id and is-idrefs
-    /// properties are unchanged" (§19.2.1.1). An element's nilled property
-    /// is not read (it is set to false, and asking a typed element costs a
-    /// typed-value computation).
+    /// No binding at all, but the is-id and is-idrefs properties of each
+    /// node, passed on with [`Receiver::element_id`] (the id of an attribute
+    /// that is an `xs:ID` in its source, and of an element that is one by its
+    /// own typed value) and [`Receiver::attribute_idrefs`] /
+    /// [`Receiver::element_idrefs`]: a `strip` copy loses its annotations, but
+    /// "The values of the is-id and is-idrefs properties are unchanged"
+    /// (§19.2.1.1). An element's nilled property is not read (it is set to
+    /// false, and asking a typed element costs a typed-value computation).
     Ids,
-    /// Every binding and the nilled property.
+    /// Every binding and the nilled property — and the source of each
+    /// element and attribute ([`Receiver::element_copied_from`],
+    /// [`Receiver::attribute_copied_from`]), so that a `strip` boundary
+    /// downstream that takes the binding away
+    /// (`runtime::validate::Validating`) keeps the is-id and is-idrefs the
+    /// source has, reading them only then.
     All,
 }
 
@@ -483,14 +490,58 @@ pub trait Receiver<'t> {
     }
 
     /// The element whose start tag is open answers to `id` in the id index
-    /// (`fn:id`) although no attribute of it is bound as an `xs:ID` saying so:
-    /// an `xs:ID` attribute a copy with `validation="strip"` made untyped keeps
+    /// (`fn:id`) although no binding of it or of its attributes says so: an
+    /// `xs:ID` attribute a copy with `validation="strip"` made untyped keeps
     /// its is-id property (§19.2.1.1: "The values of the is-id and is-idrefs
-    /// properties are unchanged"). Sent by a [`ComplexContentNormalizer`] just
-    /// after that attribute. A [`ResultBuilder`] files the element under the
-    /// id; the default implementation ignores it, which is right for every
-    /// receiver that builds no tree.
+    /// properties are unchanged"), and so does an element that is an ID by
+    /// its own typed value (XDM 1.0 §6.2.4; upstream C62). Sent by a
+    /// [`ComplexContentNormalizer`] just after that attribute, or after the
+    /// element's attributes for its own id. A [`ResultBuilder`] files the
+    /// element under the id; the default implementation ignores it, which is
+    /// right for every receiver that builds no tree.
     fn element_id(&mut self, _id: &str) -> Result<(), XsltError> {
+        Ok(())
+    }
+
+    /// The attribute passed last ([`attribute`](Receiver::attribute)) has the
+    /// is-idrefs property although no binding says so: an `xs:IDREF` /
+    /// `xs:IDREFS` attribute a `strip` copy made untyped keeps it (§19.2.1.1;
+    /// §11.9.1: the copy of an attribute "will also have the same values for
+    /// the is-id and is-idrefs properties"), so `fn:idref` still finds it.
+    /// Sent by a [`ComplexContentNormalizer`] just after the attribute. A
+    /// [`ResultBuilder`] marks the attribute; the default implementation
+    /// ignores it, which is right for every receiver that builds no tree.
+    fn attribute_idrefs(&mut self) -> Result<(), XsltError> {
+        Ok(())
+    }
+
+    /// The element whose start tag is open has the is-idrefs property
+    /// although no binding says so — the element counterpart of
+    /// [`attribute_idrefs`](Receiver::attribute_idrefs), for an element whose
+    /// typed value holds an `xs:IDREF`. Sent by a [`ComplexContentNormalizer`]
+    /// after the element's attributes. A [`ResultBuilder`] marks the element,
+    /// which is filed by the tokens of its string value when it ends.
+    fn element_idrefs(&mut self) -> Result<(), XsltError> {
+        Ok(())
+    }
+
+    /// The attribute passed last is a copy of `source` that keeps its binding
+    /// (`validation="preserve"`, or a node sequenced into element content): a
+    /// receiver that takes the binding away — under a `strip` boundary,
+    /// §19.2.1.1: "The values of the is-id and is-idrefs properties are
+    /// unchanged" — keeps the is-id and is-idrefs properties `source` has.
+    /// Sent by a [`ComplexContentNormalizer`] just after the attribute. The
+    /// default implementation ignores it, which is right for every receiver
+    /// that keeps bindings as they arrive (the binding gives the properties).
+    fn attribute_copied_from(&mut self, _source: &Nav<'t>) -> Result<(), XsltError> {
+        Ok(())
+    }
+
+    /// The element whose start tag is open is a copy of `source` that keeps
+    /// its binding — the element counterpart of
+    /// [`attribute_copied_from`](Receiver::attribute_copied_from), sent after
+    /// the element's attributes.
+    fn element_copied_from(&mut self, _source: &Nav<'t>) -> Result<(), XsltError> {
         Ok(())
     }
 
@@ -540,22 +591,50 @@ pub(crate) fn xtte1550(what: &str) -> XsltError {
     )
 }
 
-/// The `xs:ID` value an attribute of type `type_key` with `value` has in `set` — its is-id
-/// property —, as the upstream builder decides it for a bound attribute: the typed value is exactly
-/// one atomic value of type `xs:ID` or a type derived from it. Only a type that can hold one is
-/// validated again (`may_hold_id`): most typed attributes are no ID.
-pub(crate) fn id_value_of(value: &str, type_key: TypeKey, set: &SchemaSet) -> Option<String> {
-    if !may_hold_id(set, type_key, 0) {
-        return None;
-    }
-    let typed = validate_simple_type(value, type_key, set).ok()?.typed_value;
-    single_id(&typed).map(str::to_string)
+/// What a copy of the attribute `nav` keeps without its binding (§19.2.1.1: "The values of the
+/// is-id and is-idrefs properties are unchanged"; §11.9.1): the id it makes its element answer to,
+/// and its is-idrefs property — both read off its source tree, which upstream classified by the
+/// attribute's typed value with its element's in-scope namespaces (batch (t) fix round 1), not
+/// classified again here. is-idrefs is the node flag (`DomNavigator::is_idrefs`). is-id: an
+/// attribute whose binding can make it an ID (`may_hold_id`) whose element answers to its value in
+/// the id index (the navigator has no `is_id`; the index files the attribute's claim for its
+/// element — the physical one, for a parentless attribute too: its hidden holder).
+pub(crate) fn kept_of_attribute(nav: &Nav<'_>) -> Kept {
+    let idrefs = nav.is_idrefs();
+    let id = (|| {
+        let binding = nav.schema_binding()?;
+        let set = nav.document().schema_set()?;
+        if !may_hold_id(set, binding.type_key, 0) {
+            return None;
+        }
+        let mut owner = nav.document().create_navigator_at(nav.current_ref());
+        if !owner.move_to_parent() {
+            return None;
+        }
+        let owner = owner.current_ref();
+        let value = nav.value();
+        (nav.document().get_element_by_id_in_tree(owner, &value) == Some(owner)).then_some(value)
+    })();
+    Kept { id, idrefs }
 }
 
 /// Whether a value of `type_key` can be an `xs:ID` value: an atomic type derived from `xs:ID`, a
 /// list whose item type, a union one of whose member types, can be (the walk of
 /// `runtime::validate::namespace_sensitive`, for `xs:ID`). A complex type cannot: an attribute's type is simple.
 fn may_hold_id(set: &SchemaSet, type_key: TypeKey, depth: u32) -> bool {
+    reaches_code(set, type_key, &[XmlTypeCode::Id], depth)
+}
+
+/// Whether a value of `type_key` can hold an `xs:IDREF` value — the is-idrefs property: an atomic
+/// type derived from `xs:IDREF`, `xs:IDREFS`, a list or a union reaching one (upstream's
+/// `IdrefsClass`). A complex type cannot.
+fn may_hold_idref(set: &SchemaSet, type_key: TypeKey) -> bool {
+    reaches_code(set, type_key, &[XmlTypeCode::IdRef, XmlTypeCode::IdRefs], 0)
+}
+
+/// Whether a simple type reaches a built-in type of one of `codes` through its derivation, its list
+/// item type or its union member types (the walk of [`may_hold_id`]).
+fn reaches_code(set: &SchemaSet, type_key: TypeKey, codes: &[XmlTypeCode], depth: u32) -> bool {
     let TypeKey::Simple(key) = type_key else {
         return false;
     };
@@ -563,7 +642,7 @@ fn may_hold_id(set: &SchemaSet, type_key: TypeKey, depth: u32) -> bool {
         return true;
     }
     if let Some(code) = set.get_type_code(key) {
-        return code == XmlTypeCode::Id;
+        return codes.contains(&code);
     }
     let Some(def) = set.arenas.simple_types.get(key) else {
         return true;
@@ -571,14 +650,104 @@ fn may_hold_id(set: &SchemaSet, type_key: TypeKey, depth: u32) -> bool {
     match def.variety {
         SimpleTypeVariety::Atomic => def
             .resolved_base_type
-            .is_none_or(|base| may_hold_id(set, base, depth + 1)),
+            .is_none_or(|base| reaches_code(set, base, codes, depth + 1)),
         SimpleTypeVariety::List => def
             .resolved_item_type
-            .is_none_or(|item| may_hold_id(set, item, depth + 1)),
+            .is_none_or(|item| reaches_code(set, item, codes, depth + 1)),
         SimpleTypeVariety::Union => def
             .resolved_member_types
             .iter()
-            .any(|&member| may_hold_id(set, member, depth + 1)),
+            .any(|&member| reaches_code(set, member, codes, depth + 1)),
+    }
+}
+
+/// What a node keeps of its is-id and is-idrefs properties when a `strip` copy or boundary takes
+/// its binding away (§4.3: "The values of the is-id and is-idrefs properties are not changed";
+/// §19.2.1.1: "The values of the is-id and is-idrefs properties are unchanged"), passed on with
+/// [`Receiver::element_id`], [`Receiver::attribute_idrefs`] and [`Receiver::element_idrefs`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Kept {
+    /// The id the node makes its element answer to in the id index: an attribute's `xs:ID` value,
+    /// or an element's own `xs:ID` typed value (upstream C62).
+    pub(crate) id: Option<String>,
+    /// The node has the is-idrefs property (upstream C54).
+    pub(crate) idrefs: bool,
+}
+
+/// The is-id and is-idrefs properties a node bound to `type_key` — a simple type, or a complex type
+/// with simple content — has with the string value `value`, as the upstream builder decides them
+/// for a bound node: is-id when the typed value is exactly one atomic value of type `xs:ID` or a
+/// type derived from it (XDM 1.0 §6.2.4, §6.3.4), is-idrefs when "any of the atomic values in the
+/// typed-value … is of type xs:IDREF or xs:IDREFS, or a type derived from one of those types". Only
+/// a type that can hold either is validated again; an attribute type that cannot answers at once.
+/// Validated **without** the node's namespaces (the public `validate_simple_type` takes none), so
+/// it is exact only for a type whose values hold no `xs:QName` / `xs:NOTATION` — a union with a
+/// QName member can be classified otherwise than validation with the node's in-scope namespaces
+/// does (batch (t) fix round 1, issue 2): `Validating` asks it only for such types, or when the run's
+/// own typed value is missing.
+pub(crate) fn kept_by_type(value: &str, type_key: TypeKey, set: &SchemaSet) -> Kept {
+    let candidate = match type_key {
+        TypeKey::Simple(_) => may_hold_id(set, type_key, 0) || may_hold_idref(set, type_key),
+        // Only complex types with simple content are asked (a run's text-only element).
+        TypeKey::Complex(_) => true,
+    };
+    if !candidate {
+        return Kept::default();
+    }
+    match validate_simple_type(value, type_key, set) {
+        Ok(result) => Kept {
+            id: single_id(&result.typed_value).map(str::to_string),
+            idrefs: holds_idref(&result.typed_value),
+        },
+        Err(_) => Kept::default(),
+    }
+}
+
+/// What a copy of the element `nav` keeps without its binding: the id it answers to by its own
+/// typed value — read off its tree's id index, which upstream files such an element in by the
+/// typed value it has with its in-scope namespaces (C62); only an element whose binding can make it
+/// an ID is looked up (`may_hold_id`, or simple content) — and its is-idrefs property (C54, a node
+/// flag: also kept by a tree that has it without a binding).
+pub(crate) fn kept_of_element(nav: &Nav<'_>) -> Kept {
+    let idrefs = nav.is_idrefs();
+    let Some(binding) = nav.schema_binding() else {
+        return Kept { id: None, idrefs };
+    };
+    let Some(set) = nav.document().schema_set() else {
+        return Kept { id: None, idrefs };
+    };
+    let candidate = match binding.type_key {
+        TypeKey::Simple(_) => may_hold_id(set, binding.type_key, 0),
+        TypeKey::Complex(_) => binding.content_type == Some(ContentType::TextOnly),
+    };
+    let id = if candidate {
+        let owner = nav.current_ref();
+        let value = nav.value_ref();
+        (nav.document().get_element_by_id_in_tree(owner, &value) == Some(owner))
+            .then(|| value.into_owned())
+    } else {
+        None
+    };
+    Kept { id, idrefs }
+}
+
+/// The is-id and is-idrefs properties a node with the typed value `value` has (XDM 1.0 §6.2.4,
+/// §6.3.4): is-id when it is exactly one `xs:ID` value, is-idrefs when it holds an `xs:IDREF`.
+pub(crate) fn kept_of_value(value: &XmlValue) -> Kept {
+    Kept {
+        id: single_id(value).map(str::to_string),
+        idrefs: holds_idref(value),
+    }
+}
+
+/// Whether a typed value holds an atomic value of type `xs:IDREF` or a type derived from it (the
+/// members of an `xs:IDREFS` value are such values) — upstream's `typed_is_idrefs`.
+fn holds_idref(value: &XmlValue) -> bool {
+    match &value.value {
+        XmlValueKind::Atomic(_) => value.type_code == XmlTypeCode::IdRef,
+        XmlValueKind::Union(member) => holds_idref(member),
+        XmlValueKind::List { items, .. } => items.iter().any(holds_idref),
+        XmlValueKind::UntypedAtomic(_) => false,
     }
 }
 
@@ -702,6 +871,22 @@ impl<'t> Receiver<'t> for TemporaryOutputState<'_, 't> {
         self.out.element_id(id)
     }
 
+    fn attribute_idrefs(&mut self) -> Result<(), XsltError> {
+        self.out.attribute_idrefs()
+    }
+
+    fn element_idrefs(&mut self) -> Result<(), XsltError> {
+        self.out.element_idrefs()
+    }
+
+    fn attribute_copied_from(&mut self, source: &Nav<'t>) -> Result<(), XsltError> {
+        self.out.attribute_copied_from(source)
+    }
+
+    fn element_copied_from(&mut self, source: &Nav<'t>) -> Result<(), XsltError> {
+        self.out.element_copied_from(source)
+    }
+
     fn append_copy(
         &mut self,
         item: &XmlItem<Nav<'t>>,
@@ -716,7 +901,7 @@ impl<'t> Receiver<'t> for TemporaryOutputState<'_, 't> {
 
 /// One open container of the normalizer.
 #[derive(Default)]
-struct Open {
+struct Open<'t> {
     /// The element's name; `None` for the document level.
     name: Option<Name>,
     binding: Option<NodeSchemaBinding>,
@@ -727,10 +912,20 @@ struct Open {
     boundary: Option<Boundary>,
     /// Namespace nodes seen for this element, not yet flushed.
     namespaces: Vec<(String, String)>,
-    /// Attributes seen for this element, not yet flushed, each with the id it
-    /// keeps without a binding (an `xs:ID` attribute a `strip` copy made
-    /// untyped; [`Receiver::element_id`]).
-    attributes: Vec<(Name, String, Option<NodeSchemaBinding>, Option<String>)>,
+    /// Attributes seen for this element, not yet flushed, each with what it
+    /// keeps of is-id and is-idrefs without a binding (an attribute a `strip`
+    /// copy made untyped; [`Receiver::element_id`],
+    /// [`Receiver::attribute_idrefs`]).
+    /// A `preserve` copy's attribute also carries its source, passed on with
+    /// [`Receiver::attribute_copied_from`].
+    attributes: Vec<Attribute<'t>>,
+    /// What the element keeps of its own is-id and is-idrefs without a
+    /// binding (an element a `strip` copy made untyped; [`Receiver::element_id`],
+    /// [`Receiver::element_idrefs`]), passed on after its attributes.
+    kept: Kept,
+    /// The source of an element a `preserve` copy made (it keeps its binding),
+    /// passed on after its attributes ([`Receiver::element_copied_from`]).
+    source: Option<Nav<'t>>,
     /// The start tag has been written downstream.
     flushed: bool,
     /// A child (anything that is not an attribute or namespace) has been added.
@@ -845,7 +1040,17 @@ fn with_declarations(outer: &PrefixedScope, declared: &[(String, String)]) -> Pr
     scope.into()
 }
 
-impl Open {
+/// One buffered attribute of an open start tag: its name, value and binding, what it keeps of is-id
+/// and is-idrefs without a binding (a `strip` copy's), and the node a `preserve` copy copied.
+type Attribute<'t> = (
+    Name,
+    String,
+    Option<NodeSchemaBinding>,
+    Kept,
+    Option<Nav<'t>>,
+);
+
+impl Open<'_> {
     /// A container that inherits, which is the default everywhere.
     fn inheriting() -> Self {
         Self {
@@ -928,7 +1133,7 @@ struct DocumentMark {
 /// `xsl:namespace-alias` are M1 work.
 pub struct ComplexContentNormalizer<'t, R: Receiver<'t>> {
     out: R,
-    stack: Vec<Open>,
+    stack: Vec<Open<'t>>,
     /// Buffered text, merged and flushed at the next structural event.
     text: String,
     text_pending: bool,
@@ -1035,7 +1240,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         self.out
     }
 
-    fn top(&mut self) -> &mut Open {
+    fn top(&mut self) -> &mut Open<'t> {
         self.stack
             .last_mut()
             .expect("the document level is never popped")
@@ -1113,8 +1318,9 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         if (open.no_default || default_withheld) && !name_has_a_default {
             keep.push((String::new(), String::new()));
         }
-        let attrs: Vec<(Name, String, Option<NodeSchemaBinding>, Option<String>)> =
-            std::mem::take(&mut open.attributes);
+        let attrs: Vec<Attribute<'t>> = std::mem::take(&mut open.attributes);
+        let element_kept = std::mem::take(&mut open.kept);
+        let element_source = open.source.take();
 
         // §11.7: "If a namespace prefix is mapped to a particular namespace URI
         // using the xsl:namespace instruction, or by using xsl:copy or
@@ -1134,7 +1340,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
 
         let attr_names: Vec<(&str, &str)> = attrs
             .iter()
-            .map(|(n, _, _, _)| (n.prefix.as_str(), n.uri.as_str()))
+            .map(|(n, _, _, _, _)| (n.prefix.as_str(), n.uri.as_str()))
             .collect();
         let keep_refs: Vec<(&str, &str)> =
             keep.iter().map(|(p, u)| (p.as_str(), u.as_str())).collect();
@@ -1214,16 +1420,31 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
             }
             open.fixup_nodes = fixup_nodes;
         }
-        for ((name, value, binding, id), (prefix, _)) in attrs.iter().zip(fixed.iter()) {
+        for ((name, value, binding, kept, source), (prefix, _)) in attrs.iter().zip(fixed.iter()) {
             let fixed_name = Name {
                 local: name.local.clone(),
                 uri: name.uri.clone(),
                 prefix: prefix.clone(),
             };
             self.out.attribute(&fixed_name, value, *binding)?;
-            if let Some(id) = id {
+            if let Some(id) = &kept.id {
                 self.out.element_id(id)?;
             }
+            if kept.idrefs {
+                self.out.attribute_idrefs()?;
+            }
+            if let Some(source) = source {
+                self.out.attribute_copied_from(source)?;
+            }
+        }
+        if let Some(id) = &element_kept.id {
+            self.out.element_id(id)?;
+        }
+        if element_kept.idrefs {
+            self.out.element_idrefs()?;
+        }
+        if let Some(source) = &element_source {
+            self.out.element_copied_from(source)?;
         }
         self.out.end_start_tag()
     }
@@ -1377,7 +1598,8 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         name: &Name,
         value: &str,
         binding: Option<NodeSchemaBinding>,
-        id: Option<String>,
+        kept: Kept,
+        source: Option<Nav<'t>>,
     ) -> Result<(), XsltError> {
         if self.in_document_content() {
             return Err(XsltError::new(
@@ -1401,14 +1623,15 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         if let Some(slot) = open
             .attributes
             .iter_mut()
-            .find(|(n, _, _, _)| n.local == name.local && n.uri == name.uri)
+            .find(|(n, _, _, _, _)| n.local == name.local && n.uri == name.uri)
         {
             slot.1 = value.to_string();
             slot.2 = binding;
-            slot.3 = id;
+            slot.3 = kept;
+            slot.4 = source;
         } else {
             open.attributes
-                .push((name.clone(), value.to_string(), binding, id));
+                .push((name.clone(), value.to_string(), binding, kept, source));
         }
         open.last_atomic = false;
         Ok(())
@@ -1647,6 +1870,16 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
                 let nilled = binding.is_some() && matches!(nav.typed_value(), TypedValue::Nilled);
                 self.start_element(&Name::of(nav), binding, nilled)?;
                 self.top().copied = true;
+                match carry {
+                    Carry::Ids => self.top().kept = kept_of_element(nav),
+                    // A `strip` boundary downstream may take the binding away (`Validating`):
+                    // the source's properties then stay, read from the source only then. A node
+                    // without a binding has nothing to lose but the is-idrefs a tree may give it by
+                    // registration (a strip copy's), a flag: kept at once.
+                    Carry::All if binding.is_some() => self.top().source = Some(nav.clone()),
+                    Carry::All => self.top().kept = kept_of_element(nav),
+                    Carry::Nothing => {}
+                }
                 // §11.9.2: with `copy-namespaces="no"` none of the namespace
                 // nodes are copied and fixup supplies what the names need.
                 if let Some(scope) = namespaces.scope() {
@@ -1693,20 +1926,19 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
 
     fn copy_attribute(&mut self, nav: &Nav<'t>, carry: Carry) -> Result<(), XsltError> {
         let value = nav.value();
-        let (binding, id) = match carry {
-            Carry::Nothing => (None, None),
-            // The id the source's own set gives the attribute's binding — the copy has none.
-            Carry::Ids => {
-                let id = CopySource::schema_binding(nav).and_then(|binding| {
-                    let set = nav.document().schema_set()?;
-                    id_value_of(&value, binding.type_key, set)
-                });
-                (None, id)
-            }
-            Carry::All => (CopySource::schema_binding(nav), None),
+        // A `strip` copy keeps the is-id and is-idrefs its source has (`kept_of_attribute`); a
+        // `preserve` copy keeps its binding and names its source, should a `strip` boundary
+        // downstream take the binding away.
+        let (binding, kept, source) = match carry {
+            Carry::Nothing => (None, Kept::default(), None),
+            Carry::Ids => (None, kept_of_attribute(nav), None),
+            Carry::All => match CopySource::schema_binding(nav) {
+                Some(binding) => (Some(binding), Kept::default(), Some(nav.clone())),
+                None => (None, kept_of_attribute(nav), None),
+            },
         };
         self.flush_text()?;
-        self.push_attribute(&Name::of(nav), &value, binding, id)
+        self.push_attribute(&Name::of(nav), &value, binding, kept, source)
     }
 }
 
@@ -1805,7 +2037,7 @@ impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
         binding: Option<NodeSchemaBinding>,
     ) -> Result<(), XsltError> {
         self.flush_text()?;
-        self.push_attribute(name, value, binding, None)
+        self.push_attribute(name, value, binding, Kept::default(), None)
     }
 
     /// A no-op: the normalizer decides where the start tag ends, because an
@@ -1920,7 +2152,9 @@ pub struct ResultBuilder<'t> {
     builder: BufferDocumentBuilder<'t>,
     pending: Option<(Name, Option<NodeSchemaBinding>, bool)>,
     decls: Vec<(String, String)>,
-    attrs: Vec<(Name, String, Option<NodeSchemaBinding>)>,
+    /// The pending element's attributes, each with whether it keeps the is-idrefs property without
+    /// a binding ([`Receiver::attribute_idrefs`]).
+    attrs: Vec<(Name, String, Option<NodeSchemaBinding>, bool)>,
     open: Vec<u32>,
     /// The `disable-output-escaping` property of the tree (§20.2), by text
     /// node ordinal; see [`crate::serialize::EscapingMarks`].
@@ -1935,6 +2169,9 @@ pub struct ResultBuilder<'t> {
     /// The id values the pending element answers to without an attribute
     /// bound as an `xs:ID` saying so ([`file_id`](Self::file_id)).
     filed_ids: Vec<String>,
+    /// The pending element keeps the is-idrefs property without a binding
+    /// ([`Receiver::element_idrefs`]).
+    element_idrefs: bool,
 }
 
 impl<'t> ResultBuilder<'t> {
@@ -1967,19 +2204,55 @@ impl<'t> ResultBuilder<'t> {
             text_nodes: 0,
             text_len: None,
             filed_ids: Vec::new(),
+            element_idrefs: false,
         })
     }
 
     /// The element whose start tag is being built answers to `id` in the id
-    /// index (`fn:id`), although no attribute of it is bound as an `xs:ID`
-    /// saying so: an attribute whose `xs:ID` annotation a `strip` boundary
+    /// index (`fn:id`), although no binding of it or of its attributes says
+    /// so: an attribute whose `xs:ID` annotation a `strip` boundary or copy
     /// took away keeps its is-id property (§19.2.1.1: "The values of the is-id
-    /// and is-idrefs properties are unchanged"). Filed with `register_xml_id`
+    /// and is-idrefs properties are unchanged"), and so does an element that
+    /// is an ID by its own typed value. Filed with `register_xml_id`
     /// when the start tag is flushed; a value another element of the tree
     /// already answers to stays with that element (no uniqueness check, §9.4,
     /// §19.2.1.3).
     pub(crate) fn file_id(&mut self, id: String) {
         self.filed_ids.push(id);
+    }
+
+    /// The attribute passed last keeps the is-id and is-idrefs properties `kept` says, although a
+    /// `strip` boundary took its binding away (§19.2.1.1: "The values of the is-id and is-idrefs
+    /// properties are unchanged"): its element is filed under its `xs:ID` value
+    /// ([`file_id`](Self::file_id)), and it is marked is-idrefs (`register_idrefs`, when the start
+    /// tag is flushed).
+    pub(crate) fn keep_attribute(&mut self, kept: Kept) {
+        if let Some(id) = kept.id {
+            self.file_id(id);
+        }
+        if kept.idrefs {
+            if let Some(last) = self.attrs.last_mut() {
+                last.3 = true;
+            }
+        }
+    }
+
+    /// The innermost open element keeps the is-id and is-idrefs properties `kept` says, although a
+    /// `strip` boundary took its binding away (§19.2.1.1) — decided when its content is known, so
+    /// sent just before it ends: filed under its own `xs:ID` value (`register_xml_id`) and marked
+    /// is-idrefs (`register_idrefs`, filed by its string value when it ends).
+    pub(crate) fn keep_open_element(&mut self, kept: Kept) -> Result<(), XsltError> {
+        self.flush()?;
+        let Some(&elem) = self.open.last() else {
+            return Ok(());
+        };
+        if let Some(id) = kept.id {
+            register_id(&mut self.builder, &id, elem)?;
+        }
+        if kept.idrefs {
+            self.builder.register_idrefs(elem);
+        }
+        Ok(())
     }
 
     /// The finished document.
@@ -2020,7 +2293,7 @@ impl<'t> ResultBuilder<'t> {
             .start_element(&name.local, &name.uri, &name.prefix, &decls)
             .map_err(build_error)?;
         self.decls.clear();
-        for (attr, value, attr_binding) in std::mem::take(&mut self.attrs) {
+        for (attr, value, attr_binding, idrefs) in std::mem::take(&mut self.attrs) {
             let attr_ref = self
                 .builder
                 .attribute(&attr.local, &attr.uri, &attr.prefix, &value)
@@ -2029,6 +2302,9 @@ impl<'t> ResultBuilder<'t> {
                 self.builder
                     .set_node_binding(attr_ref, binding)
                     .map_err(build_error)?;
+            }
+            if idrefs {
+                self.builder.register_idrefs(attr_ref);
             }
         }
         self.builder.end_of_attributes();
@@ -2041,13 +2317,11 @@ impl<'t> ResultBuilder<'t> {
             self.builder.set_nil(elem);
         }
         for id in std::mem::take(&mut self.filed_ids) {
-            match self.builder.register_xml_id(&id, elem) {
-                // No document-level validation, so no uniqueness check (§9.4,
-                // §19.2.1.3): the first element of the tree keeps the value,
-                // as for any other id.
-                Ok(()) | Err(BufferDocumentError::DuplicateId(_)) => {}
-                Err(e) => return Err(build_error(e)),
-            }
+            register_id(&mut self.builder, &id, elem)?;
+        }
+        if std::mem::take(&mut self.element_idrefs) {
+            // Open: marked now, filed by the tokens of its string value when it ends.
+            self.builder.register_idrefs(elem);
         }
         self.open.push(elem);
         Ok(())
@@ -2056,6 +2330,19 @@ impl<'t> ResultBuilder<'t> {
 
 fn build_error(e: xsd_schema::document::BufferDocumentError) -> XsltError {
     XsltError::internal(format!("the result-tree builder refused: {e}"))
+}
+
+/// Files `elem` under `id` with `register_xml_id`. No document-level validation, so no uniqueness
+/// check (§9.4, §19.2.1.3): the first element of the tree keeps the value, as for any other id.
+fn register_id(
+    builder: &mut BufferDocumentBuilder<'_>,
+    id: &str,
+    elem: u32,
+) -> Result<(), XsltError> {
+    match builder.register_xml_id(id, elem) {
+        Ok(()) | Err(BufferDocumentError::DuplicateId(_)) => Ok(()),
+        Err(e) => Err(build_error(e)),
+    }
 }
 
 impl<'t> Receiver<'t> for ResultBuilder<'t> {
@@ -2091,7 +2378,8 @@ impl<'t> Receiver<'t> for ResultBuilder<'t> {
         value: &str,
         binding: Option<NodeSchemaBinding>,
     ) -> Result<(), XsltError> {
-        self.attrs.push((name.clone(), value.to_string(), binding));
+        self.attrs
+            .push((name.clone(), value.to_string(), binding, false));
         Ok(())
     }
 
@@ -2102,6 +2390,24 @@ impl<'t> Receiver<'t> for ResultBuilder<'t> {
     /// Files the pending element under `id` in the id index of the tree (`file_id`).
     fn element_id(&mut self, id: &str) -> Result<(), XsltError> {
         self.file_id(id.to_string());
+        Ok(())
+    }
+
+    /// Marks the attribute passed last with the is-idrefs property (`register_idrefs`, when the
+    /// start tag is flushed).
+    fn attribute_idrefs(&mut self) -> Result<(), XsltError> {
+        if let Some(last) = self.attrs.last_mut() {
+            last.3 = true;
+        }
+        Ok(())
+    }
+
+    /// Marks the pending element with the is-idrefs property (`register_idrefs`, when the start tag
+    /// is flushed; filed by its string value when it ends).
+    fn element_idrefs(&mut self) -> Result<(), XsltError> {
+        if self.pending.is_some() {
+            self.element_idrefs = true;
+        }
         Ok(())
     }
 
@@ -2709,23 +3015,23 @@ impl<'s, 't> SequenceCollector<'s, 't> {
                 let (prefix, uri) = (nav.local_name().to_string(), nav.value());
                 self.push_namespace_node(&prefix, &uri)
             }
-            // A parentless attribute: untyped with `strip` (its is-id property
-            // is not observable — `fn:id` needs a document node at the root of
-            // the tree), its own annotation with `preserve`.
+            // A parentless attribute: untyped with `strip`, its own annotation
+            // with `preserve` — copied by the normalizer as any selected
+            // attribute is (`copy_selected`), so that it keeps its is-id and
+            // is-idrefs properties for a later copy into an element (`fn:id` and
+            // `fn:idref` need a document node at the root of the tree, so they
+            // are not observable on the parentless node itself).
             DomNodeType::Attribute => {
-                let binding =
-                    match validation {
-                        CopyValidation::Strip => None,
-                        CopyValidation::Preserve => CopySource::schema_binding(nav),
-                        _ => return Err(XsltError::internal(
-                            "a validated copy of an attribute is validated before it is passed on",
-                        )),
-                    };
-                let (name, value) = (Name::of(nav), nav.value());
+                if !matches!(validation, CopyValidation::Strip | CopyValidation::Preserve) {
+                    return Err(XsltError::internal(
+                        "a validated copy of an attribute is validated before it is passed on",
+                    ));
+                }
+                let source = nav.clone();
                 self.push_parentless(
                     move |out| {
                         out.start_element(&Name::local(HOLDER), None, false)?;
-                        out.attribute(&name, &value, binding)?;
+                        out.copy_selected(&source, namespaces, validation)?;
                         out.end_start_tag()?;
                         out.end_element()
                     },

@@ -101,13 +101,13 @@ use xsd_schema::validation::{
 use xsd_schema::xpath::XmlItem;
 use xsd_schema::SchemaSet;
 
-use super::{typed_sources, Transformation};
+use super::Transformation;
 use crate::error::{codes, XsltError};
 use crate::model::Validation;
 use crate::names::{QName, XML_NS, XSD_NS};
 use crate::receiver::{
-    id_value_of, xtte1550, Boundary, CopyNamespaces, CopyValidation, Name, Nav, Receiver,
-    ResultBuilder,
+    kept_by_type, kept_of_attribute, kept_of_element, kept_of_value, xtte1550, Boundary,
+    CopyNamespaces, CopyValidation, Kept, Name, Nav, Receiver, ResultBuilder,
 };
 use crate::whitespace;
 
@@ -667,8 +667,9 @@ fn display(name: &Name) -> String {
 /// **The annotation rule.** "Conceptually, the validation requested for a child element or
 /// attribute node is applied before the validation requested for its parent element" — so the
 /// outermost enclosing boundary that is not `preserve` decides a node's annotation ([`Decider`]):
-/// under a `strip` one the node is untyped and not nilled (an attribute that loses an `xs:ID`
-/// annotation still identifies its element: "The values of the is-id and is-idrefs properties are
+/// under a `strip` one the node is untyped and not nilled (an attribute or element that loses an
+/// `xs:ID` annotation still identifies its element, and one whose typed value held an `xs:IDREF`
+/// keeps the is-idrefs property: "The values of the is-id and is-idrefs properties are
 /// unchanged"); under a `strict` one the node has what that boundary's validation gave it; when
 /// every enclosing boundary is `preserve`, a new element is `xs:anyType` and every other node
 /// keeps what it arrived with (a copied node its source's annotation, an attribute what its
@@ -708,8 +709,8 @@ fn display(name: &Name) -> String {
 ///   content is no text node (XDM 1.0 §6.7.4, read at w3.org: "if the resulting Text Node consists
 ///   entirely of whitespace and the character information items used to construct this node have
 ///   a parent and that parent is an element and its {content type} is not "mixed", then the
-///   content of the Text Node is the zero-length string" — `typed_sources::element_only`, the
-///   rule the typed source build applies).
+///   content of the Text Node is the zero-length string" — [`element_only`]; the typed source
+///   build applies the same rule, upstream's own since `wave-b` `d5f2a8e`, C67).
 ///
 /// The tree gets what the outermost run made of each node — under a `strip` boundary too, which
 /// changes annotations only (§19.2.1.1: "The typed value of the node is changed to be the same as
@@ -759,6 +760,70 @@ pub(crate) struct Validating<'v, 't> {
     /// While runs are open: the text of the current text node (with its `disable-output-escaping`
     /// flags) not passed on yet — its fate in element-only content depends on all of it.
     pending: Vec<(String, bool)>,
+    /// The element ending while runs are open, between its last content and its end tag
+    /// ([`end_element`](Receiver::end_element) → [`through_runs`](Self::through_runs)).
+    ending: Option<Ending>,
+    /// With no run open: the binding a `strip` boundary took from the attribute passed last, when
+    /// its type holds QNames (its is-id and is-idrefs then come from its source,
+    /// [`attribute_copied_from`](Receiver::attribute_copied_from)).
+    stripped_attribute: Option<NodeSchemaBinding>,
+    /// With no run open: a `strip` boundary took the binding of the element whose start tag is
+    /// open (its is-id and is-idrefs come from its source,
+    /// [`element_copied_from`](Receiver::element_copied_from)).
+    stripped_element: bool,
+}
+
+/// What the end of an element needs to know, set while it ends with runs open.
+struct Ending {
+    /// The namespaces every run open at the element has in its snapshot — those in scope at it
+    /// before the fixup of its start tag declared any —, for an element default's QNames.
+    scope: Scope,
+    /// A `strip` boundary decides the element: it keeps is-id and is-idrefs as the outermost run
+    /// gives them (`kept`, set by `through_runs`).
+    keep: bool,
+    kept: Option<Kept>,
+}
+
+/// Namespace bindings in scope, in the shape the QName fixup asks them.
+#[derive(Clone, Default)]
+struct Scope {
+    default: Option<String>,
+    /// Prefixed bindings, the innermost declaration of each prefix only, in declaration order.
+    prefixed: Vec<(String, String)>,
+}
+
+impl Scope {
+    /// The bindings `declarations` (outermost first) leave in scope; `xml` is implicit.
+    fn of<'d>(declarations: impl Iterator<Item = &'d (String, String)>) -> Self {
+        let mut scope = Scope::default();
+        for (prefix, uri) in declarations {
+            if prefix.is_empty() {
+                scope.default = (!uri.is_empty()).then(|| uri.clone());
+            } else if prefix != "xml" {
+                scope.prefixed.retain(|(p, _)| p != prefix);
+                if !uri.is_empty() {
+                    scope.prefixed.push((prefix.clone(), uri.clone()));
+                }
+            }
+        }
+        scope
+    }
+
+    fn namespace_of(&self, prefix: &str) -> Option<&str> {
+        self.prefixed
+            .iter()
+            .find(|(p, _)| p == prefix)
+            .map(|(_, uri)| uri.as_str())
+    }
+
+    /// A prefix bound to `uri` — the one declared last.
+    fn prefix_of(&self, uri: &str) -> Option<&str> {
+        self.prefixed
+            .iter()
+            .rev()
+            .find(|(_, u)| u == uri)
+            .map(|(p, _)| p.as_str())
+    }
 }
 
 /// What decides the annotations in a container: the outermost enclosing boundary that is not
@@ -791,8 +856,13 @@ struct Frame {
     document_node: bool,
     /// A document node whose validation is requested (§19.2.2): what its children were so far.
     document: Option<DocumentCheck>,
-    /// The namespace declarations of the element, as the normalizer wrote them.
+    /// The namespace declarations of the element, as the normalizer wrote them, then the prefixes
+    /// the runs' namespace fixup declared on it (`prefix_for`).
     namespaces: Vec<(String, String)>,
+    /// How many of `namespaces` the element arrived with — before the fixup of its held start tag
+    /// added any (`finish_start_tag`): the bindings every run open at the element has in its
+    /// namespace snapshot.
+    written_namespaces: usize,
     /// A document node inside another container: its children are the container's (§5.7.1), so
     /// text and child elements count toward the enclosing element ([`Validating::content_frame`]).
     transparent: bool,
@@ -951,6 +1021,9 @@ impl<'v, 't> Validating<'v, 't> {
             runs: Vec::new(),
             start: None,
             pending: Vec::new(),
+            ending: None,
+            stripped_attribute: None,
+            stripped_element: false,
         }
     }
 
@@ -983,13 +1056,6 @@ impl<'v, 't> Validating<'v, 't> {
             attribute_decl: None,
             content_type: Some(ContentType::Mixed),
         })
-    }
-
-    /// The `xs:ID` value an attribute of type `type_key` with `value` has — its is-id property —
-    /// as the upstream builder decides it for a bound attribute: the typed value is exactly one
-    /// atomic value of type `xs:ID` or a type derived from it.
-    fn id_value(&self, value: &str, type_key: TypeKey) -> Option<String> {
-        id_value_of(value, type_key, self.set?)
     }
 
     /// The decider of a container opened inside the current one with `boundary`.
@@ -1025,13 +1091,19 @@ impl<'v, 't> Validating<'v, 't> {
     /// the element is treated as if {value constraint}.{lexical form} was used as the content of
     /// the element". The result is what the outermost run made of the text, and whether any run
     /// changed it.
+    ///
+    /// When the element ends ([`Validating::ending`]): an element default of type `xs:QName` /
+    /// `xs:NOTATION` is written for the instance (the run's typed value, made with the
+    /// declaration's bindings, is the {value}; `qname_lexical` with the bindings every run has in
+    /// its snapshot), and the outermost run's typed value gives is-id and is-idrefs to an element a
+    /// `strip` boundary untypes.
     fn through_runs(
         &mut self,
         views: &[View],
         mut text: String,
         end: bool,
         simple: bool,
-    ) -> (String, bool) {
+    ) -> Result<(String, bool), XsltError> {
         let mut changed = false;
         for index in (0..self.runs.len()).rev() {
             let runtime = &mut self.runs[index].runtime;
@@ -1045,6 +1117,14 @@ impl<'v, 't> Validating<'v, 't> {
             let view = views.get(index);
             if end {
                 let info = runtime.validate_end_element();
+                let typed = (index == 0).then(|| info.typed_value.clone()).flatten();
+                let outermost = (index == 0).then(|| {
+                    (
+                        info.schema_type,
+                        info.content_type,
+                        info.validity == SchemaValidity::Valid && !info.is_nil,
+                    )
+                });
                 if let (
                     true,
                     Some(View::Simple {
@@ -1054,6 +1134,7 @@ impl<'v, 't> Validating<'v, 't> {
                 ) = (simple, view)
                 {
                     if info.validity == SchemaValidity::Valid && !info.is_nil {
+                        let defaulted = text.is_empty() && default_value.is_some();
                         if let Some(default) = default_value.as_ref().filter(|_| text.is_empty()) {
                             text = default.clone();
                             changed |= !text.is_empty();
@@ -1064,6 +1145,35 @@ impl<'v, 't> Validating<'v, 't> {
                             text = normalized;
                             changed = true;
                         }
+                        if defaulted {
+                            if let (Some(value), Some(set)) = (info.typed_value.as_ref(), self.set)
+                            {
+                                if let Some(written) =
+                                    self.element_default_written(value, &text, set)?
+                                {
+                                    text = written;
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if let (Some((schema_type, content_type, valid)), Some(set)) = (outermost, self.set)
+                {
+                    if let Some(ending) = self.ending.as_mut().filter(|ending| ending.keep) {
+                        ending.kept = Some(match (valid, typed) {
+                            (false, _) => Kept::default(),
+                            (true, Some(value)) => kept_of_value(&value),
+                            (true, None) => match schema_type {
+                                Some(type_key @ TypeKey::Simple(_)) => {
+                                    kept_of_binding(type_key, &text, set)
+                                }
+                                Some(type_key) if content_type == Some(ContentType::TextOnly) => {
+                                    kept_by_type(&text, type_key, set)
+                                }
+                                _ => Kept::default(),
+                            },
+                        });
                     }
                 }
             }
@@ -1075,7 +1185,39 @@ impl<'v, 't> Validating<'v, 't> {
                 changed = true;
             }
         }
-        (text, changed)
+        Ok((text, changed))
+    }
+
+    /// The text of an element that took its declaration's `default` / `fixed` value, when that is
+    /// or holds `xs:QName` / `xs:NOTATION` values: `value` is the run's typed value, made with the
+    /// declaration's bindings (the {value}, Structures §3.3.2; upstream since `wave-b` `d5f2a8e`),
+    /// written with prefixes the element binds to their namespaces — those it was written with,
+    /// which every run open at it has in its namespace snapshot, so an outer run reads the same
+    /// value. Where none is bound, a namespace would have to be declared on an element whose start
+    /// tag is built, and in the snapshots the runs already have: not possible through the public
+    /// API (upstream proposal C89) — `XSLT2-NOTIMPL` rather than a QName that reads another
+    /// namespace or none.
+    fn element_default_written(
+        &mut self,
+        value: &XmlValue,
+        lexical: &str,
+        set: &SchemaSet,
+    ) -> Result<Option<String>, XsltError> {
+        let Some(scope) = self.ending.as_ref().map(|ending| ending.scope.clone()) else {
+            return Ok(None);
+        };
+        self.qname_lexical(value, lexical, set, Some(&scope))
+            .map_err(|uri| {
+                XsltError::not_implemented(
+                    format!(
+                        "the default or fixed value {lexical:?} of a constructed element, a QName \
+                         in the namespace {uri:?}, where no prefix is bound to that namespace: \
+                         writing it needs a namespace declaration on the element after its start \
+                         tag (upstream proposal C89)"
+                    ),
+                    "M4g",
+                )
+            })
     }
 
     /// Passes the pending text of the current text node on — through the open runs (`views`, `end`
@@ -1085,14 +1227,14 @@ impl<'v, 't> Validating<'v, 't> {
         let mut chunks = std::mem::take(&mut self.pending);
         if chunks.len() <= 1 {
             let (text, disable_escaping) = chunks.pop().unwrap_or_default();
-            let (text, changed) = self.through_runs(views, text, end, false);
+            let (text, changed) = self.through_runs(views, text, end, false)?;
             if !changed && !text.is_empty() {
                 self.out.text(&text, disable_escaping)?;
             }
             return Ok(());
         }
         let text: String = chunks.iter().map(|(text, _)| text.as_str()).collect();
-        if !self.through_runs(views, text, end, false).1 {
+        if !self.through_runs(views, text, end, false)?.1 {
             for (text, disable_escaping) in chunks {
                 self.out.text(&text, disable_escaping)?;
             }
@@ -1135,7 +1277,7 @@ impl<'v, 't> Validating<'v, 't> {
     /// otherwise with what the runs made of it as one text node where the first text was (first,
     /// if there was none), the comments and processing instructions in their order.
     fn settle(&mut self, held: Vec<Held>, views: &[View], end: bool) -> Result<(), XsltError> {
-        let (value, changed) = self.through_runs(views, held_text(&held), end, end);
+        let (value, changed) = self.through_runs(views, held_text(&held), end, end)?;
         if !changed {
             return self.replay(held);
         }
@@ -1185,6 +1327,104 @@ impl<'v, 't> Validating<'v, 't> {
         }
     }
 
+    /// How many namespace declarations the innermost container has so far (its own, then the
+    /// fixup's) — the namespace snapshot changes exactly when this does.
+    fn declared_here(&self) -> usize {
+        self.frames.last().map_or(0, |frame| frame.namespaces.len())
+    }
+
+    /// The lexical form, in the scope of the element whose start tag is held (or of the element
+    /// ending, `fixed`), of `typed` — the {value} of a value constraint, whose QNames / NOTATIONs
+    /// hold the schema's expanded names —, when it holds any (`None` otherwise: `lexical`, its
+    /// {lexical form} normalized, is then the text): each such name written with a prefix the
+    /// element binds to its namespace (`qname_written`), the other list members keep their
+    /// lexical forms — upstream's `TypedBuilderHandler::qname_lexical_in_scope`. With `fixed`, a
+    /// namespace no prefix is bound to in it is `Err(uri)`; without, a prefix is declared.
+    fn qname_lexical(
+        &mut self,
+        typed: &XmlValue,
+        lexical: &str,
+        set: &SchemaSet,
+        fixed: Option<&Scope>,
+    ) -> Result<Option<String>, String> {
+        if !holds_qname(typed) {
+            return Ok(None);
+        }
+        match &typed.value {
+            XmlValueKind::Atomic(XmlAtomicValue::QName(qn) | XmlAtomicValue::Notation(qn)) => {
+                self.qname_written(qn, set, fixed).map(Some)
+            }
+            XmlValueKind::Union(member) => self.qname_lexical(member, lexical, set, fixed),
+            XmlValueKind::List { items, .. } => {
+                let tokens: Vec<&str> = whitespace::tokens(lexical).collect();
+                let mut out: Vec<String> = Vec::with_capacity(items.len());
+                for (i, item) in items.iter().enumerate() {
+                    let token = tokens.get(i).copied();
+                    match self.qname_lexical(item, token.unwrap_or(""), set, fixed)? {
+                        Some(written) => out.push(written),
+                        None => {
+                            out.push(token.map_or_else(|| item.to_string_value(), str::to_string))
+                        }
+                    }
+                }
+                Ok(Some(out.join(" ")))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// `qn` written for the element (upstream's order, its decision D-f3): the schema's own
+    /// prefix when the element binds it to the same namespace; unprefixed when the schema wrote it
+    /// so and the default namespace is the same; another prefix bound to the namespace; unprefixed
+    /// under a default namespace that is it; else a prefix declared on the element (`ns_dN`, as for
+    /// the attribute names fixup needs — `prefix_for`) or, with `fixed`, `Err(uri)`. The XML
+    /// namespace is `xml`'s. A name in no namespace is unprefixed: no prefix denotes no namespace,
+    /// so under a default namespace it reads as a name in that namespace (upstream's D-f2, the one
+    /// case the fixup cannot cover).
+    fn qname_written(
+        &mut self,
+        qn: &xsd_schema::types::QNameValue,
+        set: &SchemaSet,
+        fixed: Option<&Scope>,
+    ) -> Result<String, String> {
+        let local = qn.local_name();
+        let Some(ns) = qn.name().namespace_uri else {
+            return Ok(local.to_string());
+        };
+        let uri = set.name_table.resolve(ns);
+        if uri == XML_NS {
+            return Ok(format!("xml:{local}"));
+        }
+        let live;
+        let scope = match fixed {
+            Some(scope) => scope,
+            None => {
+                live = Scope::of(self.frames.iter().flat_map(|frame| frame.namespaces.iter()));
+                &live
+            }
+        };
+        match qn.prefix().filter(|prefix| !prefix.is_empty()) {
+            Some(prefix) if scope.namespace_of(prefix) == Some(uri.as_str()) => {
+                return Ok(format!("{prefix}:{local}"));
+            }
+            None if scope.default.as_deref() == Some(uri.as_str()) => {
+                return Ok(local.to_string());
+            }
+            _ => {}
+        }
+        if let Some(prefix) = scope.prefix_of(&uri) {
+            return Ok(format!("{prefix}:{local}"));
+        }
+        if scope.default.as_deref() == Some(uri.as_str()) {
+            return Ok(local.to_string());
+        }
+        if fixed.is_some() {
+            return Err(uri);
+        }
+        let prefix = self.prefix_for(&uri);
+        Ok(format!("{prefix}:{local}"))
+    }
+
     /// A prefix bound to `uri` in the scope of the held start tag, or a new one declared on it.
     fn prefix_for(&mut self, uri: &str) -> String {
         let mut bound: Vec<(&str, &str)> = Vec::new();
@@ -1217,7 +1457,14 @@ impl<'v, 't> Validating<'v, 't> {
         let set = self.set.ok_or_else(|| {
             XsltError::internal("validation of a constructed element without a schema set")
         })?;
-        let snapshot = self.snapshot(set);
+        if let Some(frame) = self.frames.last_mut() {
+            frame.written_namespaces = frame.namespaces.len();
+        }
+        // Each run sees the element with the namespaces it has by then: those it was written
+        // with, and those the namespace fixup of the runs inside declared for their defaulted
+        // attributes (§19.2.1.3: the outer validation is of what the inner ones produced).
+        let mut snapshot = self.snapshot(set);
+        let mut snapshot_of = self.declared_here();
         let xsi = |local: &str| {
             start
                 .attributes
@@ -1258,6 +1505,12 @@ impl<'v, 't> Validating<'v, 't> {
             } else {
                 (xsi_type.as_deref(), xsi_nil.as_deref())
             };
+            let declared = self.declared_here();
+            if declared != snapshot_of {
+                snapshot = self.snapshot(set);
+                snapshot_of = declared;
+            }
+            let run = &mut self.runs[index];
             let mut info = run.runtime.validate_element(
                 &start.name.local,
                 &start.name.uri,
@@ -1325,6 +1578,10 @@ impl<'v, 't> Validating<'v, 't> {
                     attribute_decl: default.attribute_key,
                     validity: SchemaValidity::Valid,
                     is_default: true,
+                    // The {value} (read with the schema element's bindings): present for a type
+                    // whose values can be or hold QNames, and what a `strip` boundary reads is-id
+                    // and is-idrefs from.
+                    typed_value: default.typed_value.clone(),
                     ..SchemaInfo::empty()
                 });
                 // XML Schema 1.1 §3.4.5.1 (Attribute Default Value): its [schema normalized value]
@@ -1332,7 +1589,20 @@ impl<'v, 't> Validating<'v, 't> {
                 // "the ·normalized value· (with respect to the {type definition}) of the
                 // [attribute]" `default` / `fixed`. A run outside this one validates it like any
                 // other attribute.
-                let value = normalized(&default.value, type_key, set).unwrap_or(default.value);
+                let lexical = normalized(&default.value, type_key, set).unwrap_or(default.value);
+                // A QName / NOTATION in it is the schema's expanded name (the {value}, read with
+                // the schema element's bindings, Datatypes §3.3.18): written again with a prefix
+                // the element binds to its namespace, one declared on it where none is — the
+                // namespace fixup Structures §3.4.5.1's Note leaves to the processor, as upstream's
+                // typed build performs it. The outer runs see that declaration (the snapshot
+                // above), so they read the value as written.
+                let value = match default.typed_value.as_ref() {
+                    Some(typed) => match self.qname_lexical(typed, &lexical, set, None) {
+                        Ok(Some(written)) => written,
+                        _ => lexical,
+                    },
+                    None => lexical,
+                };
                 slots.push(AttributeSlot {
                     name: Name::qualified(&prefix, &local, &uri),
                     value,
@@ -1358,7 +1628,7 @@ impl<'v, 't> Validating<'v, 't> {
                                 .or_else(|| decl.fixed_value.clone())
                         }),
                     },
-                    None if typed_sources::element_only(info) => View::ElementOnly,
+                    None if element_only(info) => View::ElementOnly,
                     None => View::Other,
                 },
                 _ => View::Other,
@@ -1413,19 +1683,22 @@ impl<'v, 't> Validating<'v, 't> {
         for slot in slots {
             let binding = match decider {
                 Decider::Strip => {
-                    // is-id as the binding the node had just before the strip: the one the
-                    // outermost run inside the `strip` boundary gave it (run 0 — any run outside
-                    // that boundary would decide instead), or its own.
-                    let proposed = match slot.infos.first() {
-                        Some(info) => info.as_ref().and_then(attribute_binding),
-                        None => slot.incoming,
+                    // is-id and is-idrefs as the node had them just before the strip: what the
+                    // outermost run inside the `strip` boundary (run 0 — any run outside that
+                    // boundary would decide instead) made of it, by its typed value there.
+                    let kept = match slot.infos.first() {
+                        Some(info) => info
+                            .as_ref()
+                            .map(|info| kept_of_info(info, &slot.value, set))
+                            .unwrap_or_default(),
+                        None => slot
+                            .incoming
+                            .map(|binding| kept_of_binding(binding.type_key, &slot.value, set))
+                            .unwrap_or_default(),
                     };
-                    if let Some(binding) = proposed {
-                        if let Some(id) = self.id_value(&slot.value, binding.type_key) {
-                            self.out.file_id(id);
-                        }
-                    }
-                    None
+                    self.out.attribute(&slot.name, &slot.value, None)?;
+                    self.out.keep_attribute(kept);
+                    continue;
                 }
                 Decider::Run(run) => slot.infos[run].as_ref().and_then(attribute_binding),
                 // An element's own decider is never `Document` (its start converts it).
@@ -1640,6 +1913,40 @@ fn held_text(held: &[Held]) -> String {
         .collect()
 }
 
+/// Whether a typed value is, or holds, an `xs:QName` / `xs:NOTATION` value (upstream's
+/// crate-private `holds_qname_value`).
+fn holds_qname(value: &XmlValue) -> bool {
+    match &value.value {
+        XmlValueKind::Atomic(XmlAtomicValue::QName(_) | XmlAtomicValue::Notation(_)) => true,
+        XmlValueKind::Union(member) => holds_qname(member),
+        XmlValueKind::List { items, .. } => items.iter().any(holds_qname),
+        _ => false,
+    }
+}
+
+/// is-id and is-idrefs of a node a run assessed, as the run's `SchemaInfo` gives them: from its
+/// typed value — made by the run with the node's in-scope namespaces, as upstream classifies a
+/// bound node —, or, where the run kept none, from its type when that holds no QName.
+fn kept_of_info(info: &SchemaInfo, value: &str, set: &SchemaSet) -> Kept {
+    match &info.typed_value {
+        Some(typed) => kept_of_value(typed),
+        None => match info.schema_type {
+            Some(type_key @ TypeKey::Simple(_)) => kept_of_binding(type_key, value, set),
+            _ => Kept::default(),
+        },
+    }
+}
+
+/// is-id and is-idrefs by a node's type and value alone (`kept_by_type`): exact only when the
+/// type's values hold no `xs:QName` / `xs:NOTATION` — the classification of a union with a QName
+/// member needs the node's namespaces, which only the run, or the source a copy reads, has.
+fn kept_of_binding(type_key: TypeKey, value: &str, set: &SchemaSet) -> Kept {
+    if namespace_sensitive(set, type_key, 0) {
+        return Kept::default();
+    }
+    kept_by_type(value, type_key, set)
+}
+
 /// The binding a run's `SchemaInfo` gives an attribute: its type and declaration, if it has a
 /// type (§19.2.1.1: an attribute no validation assessed is `xs:untypedAtomic`).
 fn attribute_binding(info: &SchemaInfo) -> Option<NodeSchemaBinding> {
@@ -1649,6 +1956,20 @@ fn attribute_binding(info: &SchemaInfo) -> Option<NodeSchemaBinding> {
         attribute_decl: info.attribute_decl,
         content_type: None,
     })
+}
+
+/// Whether the type a run assessed an element with is complex with element-only or empty content —
+/// the elements whose whitespace text XDM 1.0 §6.7.4 makes no text node ([`View::ElementOnly`]).
+/// (The typed source build applied the same rule in this crate until upstream's typed build took
+/// it over, `wave-b` `d5f2a8e`, C67; upstream also drops whitespace in empty content only when the
+/// element is nilled — whitespace in empty content that is not nilled makes the element invalid,
+/// `cvc-complex-type.2.1`, which here is XTTE1510 before the tree is used.)
+fn element_only(info: &SchemaInfo) -> bool {
+    matches!(info.schema_type, Some(TypeKey::Complex(_)))
+        && matches!(
+            info.content_type,
+            Some(ContentType::ElementOnly | ContentType::Empty)
+        )
 }
 
 /// The simple type of an element a run assessed, when its content is simple: a simple type, or a
@@ -1716,6 +2037,7 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
                     deferred: None,
                 }),
             namespaces: Vec::new(),
+            written_namespaces: 0,
             transparent,
             views: Vec::new(),
             held: None,
@@ -1830,17 +2152,22 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
             document_node: false,
             document: None,
             namespaces: Vec::new(),
+            written_namespaces: 0,
             transparent: false,
             views: Vec::new(),
             held: None,
         });
         if self.runs.is_empty() {
-            let (binding, nilled) = match decider {
+            let (built, nilled) = match decider {
                 Decider::Strip => (None, false),
                 _ if boundary == Some(Boundary::Preserve) => (self.any_type(), false),
                 _ => (binding, nilled),
             };
-            return self.out.start_element(name, binding, nilled);
+            // An element arriving with a binding here is a copy (only the normalizer's copies
+            // carry one): under `strip` it keeps the is-id and is-idrefs of its source, which the
+            // copy names after its attributes (`element_copied_from`).
+            self.stripped_element = decider == Decider::Strip && binding.is_some();
+            return self.out.start_element(name, built, nilled);
         }
         self.start = Some(StartTag {
             name: name.clone(),
@@ -1877,24 +2204,82 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
                 .push((name.clone(), value.to_string(), binding));
             return Ok(());
         }
-        let binding = match (self.decider(), binding) {
+        match (self.decider(), binding) {
+            // is-id and is-idrefs as the binding the strip takes away gives them (§19.2.1.1): a
+            // copy's come with its events, read from its source; an attribute an instruction
+            // validated (`xsl:attribute`, `copy_attribute_node`) has a type that holds no QName
+            // (XTTE1545), for which classifying by the type alone is exact.
             (Decider::Strip, Some(stripped)) => {
-                if let Some(id) = self.id_value(value, stripped.type_key) {
-                    self.out.file_id(id);
+                self.out.attribute(name, value, None)?;
+                if let Some(set) = self.set {
+                    if namespace_sensitive(set, stripped.type_key, 0) {
+                        // Only a copy carries such a binding: its source decides.
+                        self.stripped_attribute = Some(stripped);
+                    } else {
+                        self.stripped_attribute = None;
+                        self.out
+                            .keep_attribute(kept_of_binding(stripped.type_key, value, set));
+                    }
                 }
-                None
+                Ok(())
             }
-            (_, binding) => binding,
-        };
-        self.out.attribute(name, value, binding)
+            (_, binding) => {
+                self.stripped_attribute = None;
+                self.out.attribute(name, value, binding)
+            }
+        }
     }
 
-    /// The id an untyped copied attribute keeps (`Receiver::element_id`): filed for the element —
-    /// unless validation runs are open, whose assessment of the attribute decides its is-id (a
-    /// copy's attributes are re-assessed like any other; §19.2.1.3's serialize–parse–validate).
+    /// The id an untyped copied attribute or element keeps (`Receiver::element_id`): filed for the
+    /// element — unless validation runs are open, whose assessment of the node decides its is-id (a
+    /// copy's nodes are re-assessed like any other; §19.2.1.3's serialize–parse–validate).
     fn element_id(&mut self, id: &str) -> Result<(), XsltError> {
         if self.start.is_none() {
             self.out.file_id(id.to_string());
+        }
+        Ok(())
+    }
+
+    /// A `preserve` copy of an attribute whose binding a `strip` boundary just took away, its type
+    /// holding QNames: it keeps the is-id and is-idrefs its source has (`kept_of_attribute`, as
+    /// upstream classified it with the source's namespaces). Without a run open only.
+    fn attribute_copied_from(&mut self, source: &Nav<'t>) -> Result<(), XsltError> {
+        if self.start.is_none() && self.stripped_attribute.take().is_some() {
+            self.out.keep_attribute(kept_of_attribute(source));
+        }
+        Ok(())
+    }
+
+    /// A `preserve` copy of an element whose binding a `strip` boundary took away: it keeps the
+    /// is-id it has by its own typed value and its is-idrefs as its source has them
+    /// (`kept_of_element`). Without a run open only (a run's assessment decides otherwise).
+    fn element_copied_from(&mut self, source: &Nav<'t>) -> Result<(), XsltError> {
+        if self.start.is_none() && std::mem::take(&mut self.stripped_element) {
+            let kept = kept_of_element(source);
+            if let Some(id) = kept.id {
+                self.out.file_id(id);
+            }
+            if kept.idrefs {
+                self.out.element_idrefs()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The is-idrefs property an untyped copied attribute keeps (`Receiver::attribute_idrefs`), as
+    /// for its is-id ([`element_id`](Self::element_id)).
+    fn attribute_idrefs(&mut self) -> Result<(), XsltError> {
+        if self.start.is_none() {
+            self.out.attribute_idrefs()?;
+        }
+        Ok(())
+    }
+
+    /// The is-idrefs property an untyped copied element keeps (`Receiver::element_idrefs`), as
+    /// for its is-id ([`element_id`](Self::element_id)).
+    fn element_idrefs(&mut self) -> Result<(), XsltError> {
+        if self.start.is_none() {
+            self.out.element_idrefs()?;
         }
         Ok(())
     }
@@ -1958,13 +2343,35 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
         if self.set.is_none() {
             return self.out.end_element();
         }
-        let frame = self.frames.pop().expect("an element is open");
         if self.runs.is_empty() {
+            self.frames.pop().expect("an element is open");
             return self.out.end_element();
         }
-        match frame.held {
-            Some(held) => self.settle(held, &frame.views, true)?,
-            None => self.pass_pending(&frame.views, true)?,
+        let scope = {
+            let (frame, outer) = self.frames.split_last().expect("an element is open");
+            Scope::of(
+                outer
+                    .iter()
+                    .flat_map(|frame| frame.namespaces.iter())
+                    .chain(frame.namespaces[..frame.written_namespaces].iter()),
+            )
+        };
+        let frame = self.frames.pop().expect("an element is open");
+        self.ending = Some(Ending {
+            scope,
+            keep: frame.decider == Decider::Strip,
+            kept: None,
+        });
+        let content = match frame.held {
+            Some(held) => self.settle(held, &frame.views, true),
+            None => self.pass_pending(&frame.views, true),
+        };
+        let ending = self.ending.take();
+        content?;
+        // §19.2.1.1 under `strip`: "The values of the is-id and is-idrefs properties are
+        // unchanged" — those the outermost run inside the boundary gave the element.
+        if let Some(kept) = ending.and_then(|ending| ending.kept) {
+            self.out.keep_open_element(kept)?;
         }
         // Every open run saw the element start (`finish_start_tag`) and has now seen it end.
         for run in &mut self.runs {
