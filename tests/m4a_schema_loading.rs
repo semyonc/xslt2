@@ -163,19 +163,6 @@ fn failure(outcome: Outcome) -> (Stage, String) {
     }
 }
 
-/// The milestone a `XSLT2-NOTIMPL` names (the trailing `(…)` of its message).
-fn fenced(outcome: Outcome) -> (Stage, String) {
-    match outcome {
-        Ok(text) => panic!("expected XSLT2-NOTIMPL, got the result {text:?}"),
-        Err((stage, e)) => {
-            assert!(e.is_not_implemented(), "expected XSLT2-NOTIMPL, got {e}");
-            let message = e.message.clone();
-            let open = message.rfind('(').expect("a milestone in parentheses");
-            (stage, message[open + 1..message.len() - 1].to_string())
-        }
-    }
-}
-
 /// A template matching `/` whose body is `body`.
 fn root_template(body: &str) -> String {
     format!(r#"<xsl:template match="/">{body}</xsl:template>"#)
@@ -908,16 +895,25 @@ fn a_non_strip_validation_runs_when_evaluated() {
             Err(code) => assert_eq!(failure(result), (Stage::Run, code.to_string()), "{body}"),
         }
     }
-    // What is left: an XPath 2.0 type an XML Schema 1.0 set has no definition of (§3.13 puts it in
-    // scope) is M4g's, whose XSD 1.1 mode has one (upstream proposal C72 for 1.0).
+    // An XPath 2.0 duration type an XML Schema 1.0 set has no definition of (§3.13 puts it in
+    // scope) stays fenced, now naming upstream proposal C72 (decision D-g2 as the user revised it;
+    // `tests/m4g_xsd11_residue.rs`); `xs:untypedAtomic` runs since M4g.
     let main = sheet(&format!(
         "{IMPORT_HATS}{}",
         root_template(r#"<e xsl:type="xs:dayTimeDuration">PT1H</e>"#)
     ));
-    assert_eq!(
-        fenced(run_sa(&main, &hat_files())),
-        (Stage::Run, "M4g".to_string())
-    );
+    match run_sa(&main, &hat_files()) {
+        Err((Stage::Run, e)) => assert!(
+            e.is_not_implemented() && e.message.contains("upstream proposal C72"),
+            "{e}"
+        ),
+        other => panic!("expected the C72 fence, got {other:?}"),
+    }
+    let main = sheet(&format!(
+        "{IMPORT_HATS}{}",
+        root_template(r#"<e xsl:type="xs:untypedAtomic">PT1H</e>"#)
+    ));
+    assert_eq!(run_sa(&main, &hat_files()).unwrap(), "<e>PT1H</e>");
 }
 
 /// The fence is at evaluation: an instruction that is never evaluated costs nothing, and an explicit

@@ -693,7 +693,7 @@ mod tests {
         assert!(back.is_raised());
 
         // A processor failure stays one.
-        let failure = XsltError::not_implemented("x", "M4");
+        let failure = XsltError::not_implemented("x", "M2k");
         assert!(XsltError::from(failure.into_xpath_error()).is_not_implemented());
     }
 }

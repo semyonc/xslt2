@@ -281,6 +281,10 @@ pub enum CopyValidation {
     /// of `strip`, on a document node document-level validation whose element
     /// child is untyped.
     Untyped,
+    /// `type` naming an XPath 2.0 type the schema set cannot validate against
+    /// itself ([`XPathType`]; the workaround for upstream proposal C72): as
+    /// `type`, with [`Boundary::XPathType`].
+    XPathType(XPathType),
 }
 
 impl CopyValidation {
@@ -289,7 +293,10 @@ impl CopyValidation {
     pub fn validates(self) -> bool {
         matches!(
             self,
-            CopyValidation::Strict | CopyValidation::Lax | CopyValidation::Type(_)
+            CopyValidation::Strict
+                | CopyValidation::Lax
+                | CopyValidation::Type(_)
+                | CopyValidation::XPathType(_)
         )
     }
 
@@ -302,6 +309,7 @@ impl CopyValidation {
             CopyValidation::Lax => Some(Boundary::Lax),
             CopyValidation::Type(type_key) => Some(Boundary::Type(type_key)),
             CopyValidation::Untyped => Some(Boundary::Untyped),
+            CopyValidation::XPathType(xpath) => Some(Boundary::XPathType(xpath)),
         }
     }
 }
@@ -379,6 +387,131 @@ pub enum Boundary {
     /// `strip`; on a document node, document-level validation (§19.2.2 "when a
     /// type attribute is present": XTTE1550) whose element child is untyped.
     Untyped,
+    /// `[xsl:]type` naming an XPath 2.0 type (§3.13) the schema set cannot
+    /// validate against itself — **a workaround for upstream proposal C72**
+    /// ([`XPathType`]): the element is assessed as [`Boundary::Type`] assesses
+    /// it, against the type's nearest definition in the set
+    /// ([`XPathType::stand_in`]) plus the rule that definition lacks
+    /// ([`XPathType::admits`]), and annotated with the type itself when the set
+    /// has a component for it, otherwise with that nearest definition.
+    XPathType(XPathType),
+}
+
+/// A type XPath 2.0 adds to the XML Schema namespace (XDM 1.0 §2.6.2: "the data
+/// model defines five additional types: xs:anyAtomicType, xs:untyped,
+/// xs:untypedAtomic, xs:dayTimeDuration, and xs:yearMonthDuration"), which
+/// §3.13 puts in the in-scope schema components of every XSLT 2.0 processor
+/// — and which an `[xsl:]type` attribute may therefore name (§19.2.1.2) — but
+/// which `xsd-schema` cannot validate against: an XML Schema 1.0 set has no
+/// component for any of them, and an XML Schema 1.1 set none that validates
+/// `xs:untypedAtomic` (`xs:untyped` is [`Boundary::Untyped`] instead).
+///
+/// **Workaround** for upstream proposals C72 (`xslt_doc/WAVE_B_PLAN.md`), which
+/// would give an XML Schema 1.0 set these components, and C92, a validator for
+/// a 1.1 set's `xs:untypedAtomic`: this crate validates
+/// against the type's definition itself and annotates with the nearest type
+/// the set has, saying so (`Transformation::take_warnings`). Where the set
+/// has the type, the annotation is exact. The two durations never come here
+/// from a 1.0 set: they are `XSLT2-NOTIMPL` naming C72 there (their stand-in's
+/// typed value, an `xs:duration`, is not ordered; `runtime::validate`'s
+/// `DurationPolicy`), and a 1.1 set has them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum XPathType {
+    /// `xs:untypedAtomic`: every string ("When xs:untypedAtomic is specified
+    /// as the type, no validation takes place", XDM 1.0 §2.6.4); stand-in
+    /// `xs:anySimpleType`.
+    UntypedAtomic,
+    /// `xs:anyAtomicType`: every string (its lexical space is "the set of all
+    /// finite-length sequences of zero or more characters", XML Schema 1.1
+    /// Part 2 §3.2.2.2); stand-in `xs:anySimpleType`.
+    AnyAtomicType,
+    /// `xs:dayTimeDuration`: `xs:duration` restricted by the pattern
+    /// `[^YM]*[DT].*` (XDM 1.0 §2.6.2); stand-in `xs:duration`.
+    DayTimeDuration,
+    /// `xs:yearMonthDuration`: `xs:duration` restricted by the pattern
+    /// `[^DT]*` (XDM 1.0 §2.6.2); stand-in `xs:duration`.
+    YearMonthDuration,
+}
+
+impl XPathType {
+    /// The type `xs:{local}` names, if it is one of these.
+    pub fn of_local_name(local: &str) -> Option<XPathType> {
+        Some(match local {
+            "untypedAtomic" => XPathType::UntypedAtomic,
+            "anyAtomicType" => XPathType::AnyAtomicType,
+            "dayTimeDuration" => XPathType::DayTimeDuration,
+            "yearMonthDuration" => XPathType::YearMonthDuration,
+            _ => return None,
+        })
+    }
+
+    /// The local name of the type in the XML Schema namespace.
+    pub fn local_name(self) -> &'static str {
+        match self {
+            XPathType::UntypedAtomic => "untypedAtomic",
+            XPathType::AnyAtomicType => "anyAtomicType",
+            XPathType::DayTimeDuration => "dayTimeDuration",
+            XPathType::YearMonthDuration => "yearMonthDuration",
+        }
+    }
+
+    /// The nearest type of every schema set, which the element or attribute is
+    /// validated against (with [`admits`](Self::admits)): `xs:anySimpleType`
+    /// (every string, simple content) for `xs:untypedAtomic` and
+    /// `xs:anyAtomicType`, `xs:duration` for the two durations.
+    pub fn stand_in(self, set: &SchemaSet) -> TypeKey {
+        let builtins = set.builtin_types();
+        TypeKey::Simple(match self {
+            XPathType::UntypedAtomic | XPathType::AnyAtomicType => builtins.any_simple_type,
+            XPathType::DayTimeDuration | XPathType::YearMonthDuration => builtins.duration,
+        })
+    }
+
+    /// The set's own component for the type, when it has one (an XML Schema 1.1
+    /// set has all four).
+    pub fn native(self, set: &SchemaSet) -> Option<TypeKey> {
+        let builtins = set.builtin_types();
+        match self {
+            XPathType::UntypedAtomic => builtins.untyped_atomic,
+            XPathType::AnyAtomicType => builtins.any_atomic_type,
+            XPathType::DayTimeDuration => builtins.day_time_duration,
+            XPathType::YearMonthDuration => builtins.year_month_duration,
+        }
+        .map(TypeKey::Simple)
+    }
+
+    /// The annotation a node valid against the type gets: the set's own
+    /// component, else the stand-in.
+    pub fn annotation(self, set: &SchemaSet) -> TypeKey {
+        self.native(set).unwrap_or_else(|| self.stand_in(set))
+    }
+
+    /// Whether the annotation is the type itself.
+    pub fn is_exact(self, set: &SchemaSet) -> bool {
+        self.native(set).is_some()
+    }
+
+    /// The rule the stand-in lacks, on the [schema normalized value] a value of
+    /// the stand-in has (XDM 1.0 §2.6.2's patterns, implicitly anchored as an
+    /// XML Schema pattern is): `[^YM]*[DT].*` — a `D` or `T` before which there
+    /// is no `Y` or `M` — for `xs:dayTimeDuration`, `[^DT]*` for
+    /// `xs:yearMonthDuration`; nothing for the other two.
+    pub fn admits(self, normalized: &str) -> bool {
+        match self {
+            XPathType::UntypedAtomic | XPathType::AnyAtomicType => true,
+            XPathType::DayTimeDuration => match normalized.find(['D', 'T']) {
+                Some(at) => !normalized[..at].contains(['Y', 'M']),
+                None => false,
+            },
+            XPathType::YearMonthDuration => !normalized.contains(['D', 'T']),
+        }
+    }
+}
+
+impl std::fmt::Display for XPathType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "xs:{}", self.local_name())
+    }
 }
 
 impl Boundary {
@@ -2720,6 +2853,9 @@ pub struct SequenceCollector<'s, 't> {
     /// The validator a `strict` boundary in a group validates with
     /// ([`with_validator`](Self::with_validator)).
     validator: Option<&'s SchemaValidator<'s>>,
+    /// Where the groups' validation says what the run's warnings say
+    /// ([`with_warnings`](Self::with_warnings)).
+    warnings: Option<&'s RefCell<Vec<String>>>,
     /// What the open group will produce.
     group: GroupKind,
     /// The base URI the open `GroupKind::Document` group takes (§11.5).
@@ -2764,6 +2900,7 @@ impl<'s, 't> SequenceCollector<'s, 't> {
             zero_length_texts: 0,
             pending_boundary: None,
             validator: None,
+            warnings: None,
         }
     }
 
@@ -2773,6 +2910,24 @@ impl<'s, 't> SequenceCollector<'s, 't> {
     pub(crate) fn with_validator(mut self, validator: Option<&'s SchemaValidator<'s>>) -> Self {
         self.validator = validator;
         self
+    }
+
+    /// The collector of a transformation whose warnings are `warnings`: the
+    /// validation of its groups adds the C72 workaround's there
+    /// (`Validating::with_warnings`).
+    pub(crate) fn with_warnings(mut self, warnings: Option<&'s RefCell<Vec<String>>>) -> Self {
+        self.warnings = warnings;
+        self
+    }
+
+    /// A validating receiver in front of `builder`, as this collector's
+    /// groups validate.
+    fn validating(
+        &self,
+        builder: ResultBuilder<'t>,
+        schema_set: Option<&'t SchemaSet>,
+    ) -> Validating<'s, 't> {
+        Validating::new(builder, schema_set, self.validator).with_warnings(self.warnings)
     }
 
     /// How many items of the sequence were zero-length text nodes, which
@@ -2832,7 +2987,7 @@ impl<'s, 't> SequenceCollector<'s, 't> {
         let schema_set = self.store.borrow().schema_set();
         let annotations = Annotations::of_copies(schema_set);
         let mut nested = ComplexContentNormalizer::with_annotations(
-            Validating::new(builder, schema_set, self.validator),
+            self.validating(builder, schema_set),
             annotations,
         );
         if let Some(boundary) = self.pending_boundary.take() {
@@ -2909,8 +3064,7 @@ impl<'s, 't> SequenceCollector<'s, 't> {
     ) -> Result<(), XsltError> {
         let builder = self.new_builder(GroupKind::Element)?;
         let schema_set = self.store.borrow().schema_set();
-        let mut pipeline =
-            ComplexContentNormalizer::new(Validating::new(builder, schema_set, self.validator));
+        let mut pipeline = ComplexContentNormalizer::new(self.validating(builder, schema_set));
         build(&mut pipeline)?;
         self.push_holder(pipeline.into_inner().into_inner().finish()?, locate)
     }
@@ -2994,11 +3148,8 @@ impl<'s, 't> SequenceCollector<'s, 't> {
             DomNodeType::Root => {
                 let builder = self.new_builder(GroupKind::Document)?;
                 let schema_set = self.store.borrow().schema_set();
-                let mut pipeline = ComplexContentNormalizer::new(Validating::new(
-                    builder,
-                    schema_set,
-                    self.validator,
-                ));
+                let mut pipeline =
+                    ComplexContentNormalizer::new(self.validating(builder, schema_set));
                 pipeline.start_document()?;
                 pipeline.copy_selected(nav, namespaces, validation)?;
                 pipeline.end_document()?;

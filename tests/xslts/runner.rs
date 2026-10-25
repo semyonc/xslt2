@@ -25,6 +25,8 @@ pub struct TestRun<'a> {
     /// Test-set directory: base for relative URIs and `xsl:result-document` hrefs.
     pub base_dir: PathBuf,
     pub schema_aware: bool,
+    /// `--schema-aware --xsd11`: the schema context is built as an XML Schema 1.1 one (M4g).
+    pub xsd11: bool,
     pub strict_recoverable: bool,
 }
 
@@ -58,6 +60,11 @@ pub struct ResultDocument {
     /// output method used for serialization, which affects the way in which the actual results
     /// can be compared with the expected results".
     pub method: Option<String>,
+    /// Whether the stylesheet's serialization indented (`indent="yes"` in effect): with the `xhtml`
+    /// and `html` methods an indenting serializer "MAY add or remove whitespace" within the
+    /// limits of Serialization 1.0 §6.1.3 / §7.4.3, which `assert-serialization` then allows
+    /// (`compare::indented_serializations_equal`).
+    pub indent: bool,
     /// The base URI of the tree's document node, which the re-parse of `tree` gives the document
     /// it evaluates `assert` over: for a secondary result, the URI it was written to (XSLT 2.0
     /// §19.1: "The base URI of the document node at the root of the final result tree is based
@@ -86,6 +93,7 @@ impl ResultDocument {
             tree: Ok(text),
             serialization_error: None,
             method: None,
+            indent: false,
             base_uri: None,
             typed_asserts: Vec::new(),
         }
@@ -146,6 +154,7 @@ pub fn prepare<'a>(
     case: &'a TestCase,
     env: ResolvedEnvironment,
     schema_aware: bool,
+    xsd11: bool,
     strict_recoverable: bool,
 ) -> TestRun<'a> {
     let stylesheet = principal_stylesheet(case, &env, set);
@@ -156,6 +165,7 @@ pub fn prepare<'a>(
         stylesheet,
         base_dir: set.dir.clone(),
         schema_aware,
+        xsd11: schema_aware && xsd11,
         strict_recoverable,
     }
 }

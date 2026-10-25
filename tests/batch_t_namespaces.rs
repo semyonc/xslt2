@@ -17,8 +17,9 @@
 //!    — this processor performs it, as upstream's typed build does). An outer validation sees the
 //!    default as an attribute of the element (§19.2.1.3's serialize–parse–validate), with the
 //!    prefix it was written with in scope. An element's `default` / `fixed` text likewise, where a
-//!    prefix for its namespace is in scope; where none is, the processor cannot declare one after
-//!    the element's start tag (upstream proposal C89) and says so (`XSLT2-NOTIMPL`).
+//!    prefix for its namespace is in scope; where none is, the prefix is declared on the element —
+//!    since M4g, whose workaround for upstream proposal C89 holds the element's start tag until
+//!    it ends (until then `XSLT2-NOTIMPL`).
 //! 2. Whether a node is an ID or has the is-idrefs property depends on its typed value (XDM 1.0
 //!    §6.2.4, §6.3.4), which for a union with a QName member depends on the node's in-scope
 //!    namespaces: a `strip` copy keeps the properties its source has ("The values of the is-id and
@@ -305,24 +306,28 @@ fn an_element_default_qname_is_written_with_a_prefix_in_scope() {
 }
 
 /// Where no prefix for the {value}'s namespace is in scope at the element (the instance binds `p`
-/// elsewhere or nowhere), the text needs a namespace declaration on an element whose start tag
-/// is already built, which neither the tree builder's public API nor an outer validation's
-/// namespace snapshot allows (upstream proposal C89): `XSLT2-NOTIMPL`, not a tree whose QName
-/// reads another namespace or cannot be read.
+/// elsewhere or nowhere), the text needs a namespace declaration on the element. Until M4g that
+/// was `XSLT2-NOTIMPL` (upstream proposal C89: neither the tree builder's public API nor an outer
+/// validation's namespace snapshot can take a declaration after the start tag); since M4g the
+/// start tag of an element that may take such a value is held until it ends (the C89
+/// workaround, `tests/m4g_xsd11_residue.rs`), and the prefix is declared on it: the tree's
+/// QName is the {value}.
 #[test]
-fn an_element_default_qname_with_no_prefix_in_scope_is_not_implemented() {
+fn an_element_default_qname_with_no_prefix_in_scope_is_declared_since_m4g() {
     for scope in [r#"xmlns:p="urn:other""#, ""] {
-        let e = answer_over(
-            "",
-            TDOC,
-            &format!(
-                r#"<xsl:variable name="t"><qd xsl:validation="strict" {scope}/></xsl:variable>"#
-            ),
-            "string($t/qd), namespace-uri-from-QName(data($t/qd))",
-        )
-        .expect_err("a fence");
-        assert!(e.is_not_implemented(), "{scope}: {e}");
-        assert!(e.message.contains("C89"), "{scope}: {e}");
+        assert_eq!(
+            answer_over(
+                "",
+                TDOC,
+                &format!(
+                    r#"<xsl:variable name="t"><qd xsl:validation="strict" {scope}/></xsl:variable>"#
+                ),
+                "string($t/qd), namespace-uri-from-QName(data($t/qd))",
+            )
+            .expect("the default is written with a declared prefix"),
+            "ns_d0:dvalue urn:p",
+            "{scope}"
+        );
     }
 }
 

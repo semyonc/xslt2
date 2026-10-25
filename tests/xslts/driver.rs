@@ -82,7 +82,7 @@ fn print_usage() {
     println!("  -f, --failed          Print only fail / wrongError / harnessError cases");
     println!("  -l, --list            List test-sets with applicable/runnable counts and exit");
     println!("      --schema-aware    Enable the schema_aware feature (runs SA cases)");
-    println!("      --xsd11           With --schema-aware: XSD 1.1 schemas are available");
+    println!("      --xsd11           With --schema-aware: XSD 1.1 is satisfied and every schema context is XML Schema 1.1");
     println!("      --strict          Recoverable errors are signalled (on-multiple-match=error)");
     println!("      --stub            Run the M0 stub engine instead of the processor");
     println!("      --debug           Run the suite in a debug build (slow; normally skipped)");
@@ -91,6 +91,7 @@ fn print_usage() {
     println!("                        declarations everywhere, as if every assertion carried");
     println!("                        ignore-prefixes=\"true\". The catalog default is false");
     println!("                        (Canonical-XML equivalence); this is for triage only.");
+    println!("      --host-timezone   Keep the host's implicit timezone (default: TZ=UTC, the catalog's)");
     println!("      --report FILE     Write results in the W3C xslt30-test-results XML format");
     println!("      --expect-pass N   Exit with status 1 if fewer than N cases pass");
     println!(
@@ -150,6 +151,8 @@ fn parse_args() -> Options {
             "--debug" => o.force_debug = true,
             "--skip" => o.skip.push(value(&mut i, "--skip")),
             "--lenient-xml" => o.lenient_xml = true,
+            // Read in `main` (the implicit timezone).
+            "--host-timezone" => {}
             "--report" => o.report = Some(PathBuf::from(value(&mut i, "--report"))),
             "--expect-pass" => {
                 o.expect_pass = Some(value(&mut i, "--expect-pass").parse().unwrap_or_else(|_| {
@@ -196,6 +199,17 @@ fn suite_version(root: &std::path::Path) -> String {
 }
 
 fn main() {
+    // The implicit timezone (review R12). XSLT 2.0 §5.4.3.2: "The implicit timezone is
+    // implementation-defined"; this processor's is the host's local offset, so a run's results
+    // would depend on where and when it runs (`date-012` fails under CEST, +02:00, and passes
+    // under CET). The harness pins UTC, the value the catalog assumes ("we currently assume that
+    // an absent timezone means UTC", `date-012` … `date-018`, `date-042`), through the process's
+    // `TZ`: upstream compares a value without a timezone by the host's local offset, not by the
+    // dynamic context's implicit timezone, so `TZ` is the one setting every path reads.
+    // `--host-timezone` keeps the host's. Set here, before the worker thread starts.
+    if !std::env::args().any(|arg| arg == "--host-timezone") {
+        std::env::set_var("TZ", "UTC");
+    }
     // Q33: no tail-call elimination in M1, so a deeply recursive named
     // template needs a bigger stack than a thread gets by default. The whole
     // run happens on one such thread; per-case panics are still caught by the
@@ -369,7 +383,14 @@ fn run_suite() {
                             continue;
                         }
                     };
-                    let run = runner::prepare(&set, case, env, opts.schema_aware, opts.strict);
+                    let run = runner::prepare(
+                        &set,
+                        case,
+                        env,
+                        opts.schema_aware,
+                        opts.xsd11,
+                        opts.strict,
+                    );
                     let exec = runner::execute(engine.as_ref(), &run);
                     rec.micros = exec.duration.as_micros();
                     if let Some(p) = exec.panic {

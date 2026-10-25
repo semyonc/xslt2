@@ -201,17 +201,6 @@ fn error_with(attrs: &str, content: &str) -> XsltError {
     }
 }
 
-/// The milestone a `XSLT2-NOTIMPL` names.
-fn fenced(content: &str) -> String {
-    let e = error(content);
-    assert!(
-        e.is_not_implemented(),
-        "expected XSLT2-NOTIMPL, got {e}\n{content}"
-    );
-    let open = e.message.rfind('(').expect("a milestone in parentheses");
-    e.message[open + 1..e.message.len() - 1].to_string()
-}
-
 fn inner(text: &str) -> String {
     let text = text.trim();
     if text == "<out/>" {
@@ -798,8 +787,9 @@ fn a_tree_typed_against_another_set_is_copied_untyped() {
 
 /// `lax` and `type` on copies and document nodes were M4f's fence (M4_PLAN §4 M4f) and run since M4f
 /// (`tests/m4f_type_lax.rs` checks what they do): valid copies and documents are built, an
-/// invalid one is XTTE1515 (`lax`: the copied `e:doc` element has no `row`). An XPath 2.0 type an XML
-/// Schema 1.0 set has no definition of stays fenced, as M4g's (upstream proposal C72).
+/// invalid one is XTTE1515 (`lax`: the copied `e:doc` element has no `row`). An XPath 2.0 duration
+/// type an XML Schema 1.0 set has no definition of stays fenced, now naming upstream proposal C72
+/// (decision D-g2 as the user revised it; `tests/m4g_xsd11_residue.rs`).
 #[test]
 fn lax_and_type_on_copies_and_documents_run_since_m4f() {
     for body in [
@@ -821,9 +811,10 @@ fn lax_and_type_on_copies_and_documents_run_since_m4f() {
         codes::XTTE1515,
         "an empty lax copy of e:doc",
     );
-    assert_eq!(
-        fenced(r#"<out><xsl:copy-of select="/e:doc/e:row" type="xs:yearMonthDuration"/></out>"#),
-        "M4g"
+    let e = error(r#"<out><xsl:copy-of select="/e:doc/e:row" type="xs:yearMonthDuration"/></out>"#);
+    assert!(
+        e.is_not_implemented() && e.message.contains("upstream proposal C72"),
+        "{e}"
     );
 }
 

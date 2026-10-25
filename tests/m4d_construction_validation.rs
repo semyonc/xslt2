@@ -209,17 +209,6 @@ fn error(top: &str, body: &str) -> XsltError {
     }
 }
 
-/// The milestone a `XSLT2-NOTIMPL` names.
-fn fenced(top: &str, body: &str) -> String {
-    let e = error(top, body);
-    assert!(
-        e.is_not_implemented(),
-        "expected XSLT2-NOTIMPL, got {e}\n{body}"
-    );
-    let open = e.message.rfind('(').expect("a milestone in parentheses");
-    e.message[open + 1..e.message.len() - 1].to_string()
-}
-
 fn inner(text: &str) -> String {
     let text = text.trim();
     if text == "<out/>" {
@@ -748,23 +737,23 @@ fn xml_namespace_attributes_validate_strictly() {
 
 // ── What part 1 leaves fenced ───────────────────────────────────────────────────────────────
 
-/// What is still fenced raises `XSLT2-NOTIMPL` naming its owner when evaluated. (Element
-/// validation, part 2, and `lax` on `xsl:attribute`, decision D-d1, were in this list until part 2;
-/// copies and document nodes, M4e's, until M4e — `tests/m4e_copies_documents.rs`; `lax` and `type`
-/// on elements, M4f's, until M4f — `tests/m4f_type_lax.rs`.)
+/// What part 1 fenced runs now. (Element validation, part 2, and `lax` on `xsl:attribute`,
+/// decision D-d1, were fenced until part 2; copies and document nodes, M4e's, until M4e —
+/// `tests/m4e_copies_documents.rs`; `lax` and `type` on elements, M4f's, until M4f —
+/// `tests/m4f_type_lax.rs`.) An XPath 2.0 duration type an XML Schema 1.0 set has no definition of
+/// stays fenced, now naming upstream proposal C72 instead of M4g (decision D-g2 as the user revised
+/// it: the stand-in `xs:duration` would give an unordered typed value), the message pointing to the
+/// XML Schema 1.1 option, which has the type (`tests/m4g_xsd11_residue.rs`).
 #[test]
-fn what_part_1_does_not_implement_stays_fenced() {
-    let cases = [
-        // An XPath 2.0 type an XML Schema 1.0 set has no definition of (§3.13 puts it in scope):
-        // M4g's XSD 1.1 mode has one (upstream proposal C72 for 1.0).
-        (
-            r#"<xsl:attribute name="n" type="xs:dayTimeDuration">PT1H</xsl:attribute>"#,
-            "M4g",
-        ),
-    ];
-    for (body, owner) in cases {
-        assert_eq!(fenced("", body), owner, "{body}");
-    }
+fn what_part_1_did_not_implement_runs() {
+    let e = error(
+        "",
+        r#"<xsl:attribute name="n" type="xs:dayTimeDuration">PT1H</xsl:attribute>"#,
+    );
+    assert!(
+        e.is_not_implemented() && e.message.contains("upstream proposal C72"),
+        "{e}"
+    );
     // `default-validation="preserve"` gives `xsl:copy-of` the value `preserve` (§3.6), which runs
     // since M4e: the copy keeps its annotation, here in the implicit final result tree, which the
     // principal module's `preserve` does not strip (decision D-d3).

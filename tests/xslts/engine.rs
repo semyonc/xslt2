@@ -16,7 +16,7 @@ use xsd_schema::xpath::{XPathContext, XPathExpr};
 
 use xslt2::{
     Compiler, MemoryResolver, ModeKey, QName, Resolver, SchemaContext, SourceValidation,
-    TransformOptions, XsltError, XsltFunctions,
+    TransformOptions, XsdVersion, XsltError, XsltFunctions,
 };
 
 use crate::catalog::QName as CatalogQName;
@@ -82,6 +82,8 @@ struct Job {
     /// Schema-aware runs: the environment's `<schema>` documents the context is given as host
     /// schemas (XSLT 2.0 §3.13's implementation-defined mechanism; `context_schema`).
     schemas: Vec<PathBuf>,
+    /// Schema-aware runs: the version of XML Schema the context implements (`context_version`).
+    xsd_version: XsdVersion,
     /// Schema-aware runs: the case's expected result, whose `assert`s are evaluated on a typed
     /// primary result tree while it exists (`ResultDocument::typed_asserts`).
     assertion: crate::catalog::Assertion,
@@ -108,6 +110,31 @@ fn context_schema(role: Option<&str>) -> bool {
         role,
         None | Some("source-reference") | Some("stylesheet-import")
     )
+}
+
+/// The version of XML Schema the schema context of a schema-aware run implements (M4g; M4 plan
+/// D-3: one version per context, 1.0 by default): **1.1** with `--xsd11` — the catalog's `XSD_1.1`
+/// feature is then satisfied, and the cases that need it expect XML Schema 1.1 behaviour (W3C XSD
+/// 1.1 namespace fixup in `import-schema-164`, assertions in `strip-space-009`, type alternatives
+/// in `validation-1301`) — and also when one of the environment's schemas that go into the
+/// context declares `xsd-version="1.1"` (`admin/catalog-schema.xsd`: `xsd-version`, a decimal,
+/// default `1.0`): the schema document is an XML Schema 1.1 document, which a 1.0 set cannot read.
+/// Otherwise 1.0. (A schema declared `1.0` is read by a 1.1 context too, as XML Schema 1.1
+/// reads 1.0 documents: `import-schema-164`'s `schema092.xsd` says `1.0` and needs 1.1.)
+fn context_version(run: &TestRun) -> XsdVersion {
+    let declares_1_1 = run.env.schemas.iter().any(|schema| {
+        context_schema(schema.role.as_deref())
+            && schema
+                .xsd_version
+                .as_deref()
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .is_some_and(|v| v >= 1.1)
+    });
+    if run.schema_aware && (run.xsd11 || declares_1_1) {
+        XsdVersion::V1_1
+    } else {
+        XsdVersion::V1_0
+    }
 }
 
 /// The validation of a source document in a run: the catalog's `source/@validation` ("whether
@@ -273,6 +300,7 @@ impl Job {
             // href would resolve against the directory's parent.
             base_output_uri: format!("{}/", xslt2::resolver::path_to_uri(&run.base_dir)),
             schema_aware: run.schema_aware,
+            xsd_version: context_version(run),
             schemas,
             assertion: if run.schema_aware {
                 run.case.result.clone()
@@ -310,12 +338,10 @@ impl Job {
         // compiled with the set's name table. A basic run keeps its own table.
         let basic_names = NameTable::new();
         let context = if self.schema_aware {
-            let builder = self
-                .schemas
-                .iter()
-                .fold(SchemaContext::builder(), |builder, path| {
-                    builder.schema_file(path)
-                });
+            let builder = self.schemas.iter().fold(
+                SchemaContext::builder().xsd_version(self.xsd_version),
+                |builder, path| builder.schema_file(path),
+            );
             match builder
                 .with_resolver(Arc::clone(&resolver))
                 .stylesheet_file(&self.stylesheet, &functions)
@@ -441,19 +467,20 @@ fn primary_result(
         Err(e) if serialize => return Err(e),
         Err(e) => (String::new(), Some(e)),
     };
-    let (tree, method) = match outcome.primary {
+    let (tree, method, indent) = match outcome.primary {
         Some(doc) => {
             // The method `serialize_primary` used — with §20's rule that an XHTML result of a 1.0
-            // stylesheet defaults to `xml`.
-            let method = compiled
+            // stylesheet defaults to `xml` — and whether it indented.
+            let params = compiled
                 .primary_serialization_params(outcome)
                 .ok()
-                .flatten()
-                .map(|p| method_name(p.method).to_string());
-            (default_serialization(doc), method)
+                .flatten();
+            let method = params.as_ref().map(|p| method_name(p.method).to_string());
+            let indent = params.is_some_and(|p| p.indent);
+            (default_serialization(doc), method, indent)
         }
         // No primary result: `serialize_primary` wrote nothing either.
-        None => (Ok(String::new()), None),
+        None => (Ok(String::new()), None, false),
     };
     let typed_asserts = match (outcome.primary, compiled.schema_set()) {
         (Some(doc), Some(set)) if doc.has_type_annotations() => {
@@ -466,6 +493,7 @@ fn primary_result(
         tree,
         serialization_error,
         method,
+        indent,
         base_uri: None,
         typed_asserts,
     })
@@ -486,15 +514,15 @@ fn secondary_result(
         Err(e) if serialize => return Err(e),
         Err(e) => (String::new(), Some(e)),
     };
-    let method = compiled
-        .secondary_serialization_params(result)
-        .ok()
-        .map(|p| method_name(p.method).to_string());
+    let params = compiled.secondary_serialization_params(result).ok();
+    let method = params.as_ref().map(|p| method_name(p.method).to_string());
+    let indent = params.is_some_and(|p| p.indent);
     Ok(ResultDocument {
         serialized,
         tree: default_serialization(result.document),
         serialization_error,
         method,
+        indent,
         base_uri: Some(result.uri.clone()),
         typed_asserts: Vec::new(),
     })
@@ -804,6 +832,7 @@ pub fn self_test() -> usize {
         stylesheet: Some(dir.join("probe.xsl")),
         base_dir: dir.to_path_buf(),
         schema_aware: false,
+        xsd11: false,
         strict_recoverable: false,
     };
     let run = probe_run(vec![
@@ -916,6 +945,35 @@ pub fn self_test() -> usize {
     check(
         job_of(Vec::new(), schemas(), false).schemas.is_empty(),
         "a basic run has no schema context",
+    );
+    // M4g: the context is XML Schema 1.1 with `--xsd11`, or when a schema that goes into it
+    // declares `xsd-version="1.1"`; 1.0 otherwise (a `secondary` 1.1 schema does not count: it
+    // is loaded through another one's directives).
+    let versioned = |role: Option<&str>, version: Option<&str>| ResolvedSchema {
+        xsd_version: version.map(str::to_string),
+        ..schema("v.xsd", role)
+    };
+    let version_of = |schemas: Vec<ResolvedSchema>, schema_aware: bool, xsd11: bool| {
+        let run = TestRun {
+            schema_aware,
+            xsd11,
+            env: ResolvedEnvironment {
+                schemas,
+                ..Default::default()
+            },
+            ..probe_run(Vec::new())
+        };
+        Job::from(&run).expect("the probe job builds").xsd_version
+    };
+    check(
+        version_of(schemas(), true, false) == XsdVersion::V1_0
+            && version_of(schemas(), true, true) == XsdVersion::V1_1
+            && version_of(vec![versioned(None, Some("1.1"))], true, false) == XsdVersion::V1_1
+            && version_of(vec![versioned(None, Some("1.0"))], true, true) == XsdVersion::V1_1
+            && version_of(vec![versioned(Some("secondary"), Some("1.1"))], true, false)
+                == XsdVersion::V1_0
+            && version_of(vec![versioned(None, Some("1.1"))], false, true) == XsdVersion::V1_0,
+        "the schema context's XML Schema version: --xsd11, or a context schema of xsd-version 1.1",
     );
 
     // P1-1: the inline principal is the *base* of its document, not the resource at the test-set
@@ -1308,6 +1366,35 @@ pub fn self_test() -> usize {
     check(
         verdict("CIRCLED DIGIT ONE", Some("1 to 1000"), false) == Applicability::Run,
         "satisfied=\"false\" of an unsupported range is runnable",
+    );
+
+    // The implicit timezone the harness pins (`driver::main`, review R12): UTC, the value the
+    // catalog assumes ("we currently assume that an absent timezone means UTC", `date-012` …
+    // `date-018`, `date-042`) — for `implicit-timezone()`, for `current-dateTime()`, and for comparing a
+    // value without a timezone with one that has one (upstream reads the host's local offset
+    // there, so only the process's `TZ` pins it).
+    let sheet = r#"<xsl:stylesheet version="2.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+          xmlns:xs="http://www.w3.org/2001/XMLSchema">
+        <xsl:output method="text"/>
+        <xsl:template match="/"><xsl:value-of select="implicit-timezone(),
+            timezone-from-dateTime(current-dateTime()),
+            xs:dateTime('1996-12-12T13:13:00') = xs:dateTime('1996-12-12T13:13:00+02:00'),
+            xs:dateTime('1996-12-12T13:13:00') = xs:dateTime('1996-12-12T13:13:00Z')"/></xsl:template>
+      </xsl:stylesheet>"#;
+    let compiled = Compiler::new(&names, &functions)
+        .compile_str(sheet, "urn:harness-timezone-probe")
+        .expect("the timezone probe compiles");
+    let arena = Bump::new();
+    let outcome = compiled
+        .transformation(&arena, TransformOptions::default())
+        .transform_source("urn:harness-timezone-probe-source", "<in/>")
+        .expect("the timezone probe runs");
+    let text = compiled
+        .serialize_primary(&outcome)
+        .expect("the timezone probe serializes");
+    check(
+        text == "PT0S PT0S false true",
+        &format!("the implicit timezone is UTC (the timezone probe wrote {text:?})"),
     );
     checks
 }

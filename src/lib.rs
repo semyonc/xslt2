@@ -78,3 +78,5 @@ pub use runtime::{
 };
 pub use schema::{ImportSource, SchemaContext, SchemaContextBuilder, SchemaImport};
 pub use store::{DocId, DocumentStore, StoredDocument};
+/// The version of XML Schema a [`SchemaContext`] implements ([`SchemaContextBuilder::xsd_version`]).
+pub use xsd_schema::XsdVersion;

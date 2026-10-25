@@ -34,7 +34,7 @@ PSVI, `BufferDocument`). Separate git repository.
 | `src/runtime/` | `Transformation`: `mod.rs` (entry points), `context` (§5.4; the §19.1 output state is `XsltContext::final_output`: only the initial context is final, `empty()` contexts are temporary, and the listed constructs clear it for their content), `dispatch` (§6), `patterns`, `eval` (instructions), `content`, `variables`, `documents` (loading, §4.4 admission, the admission of host-built typed trees and typed parameters), `validate` (M4d: what `xsl:attribute` validates — `type`, `strict`, `lax`, XTTE1540 / 1510 / 1512 / 1515 / 1545 —, the boundary each element constructor announces, and `Validating`, the validating receiver in front of every tree builder: the annotation rule and `strict` element validation through the push API; M4e: the boundaries of copies and document nodes, `copy_validation`, strict copies of attributes, XTTE0950, and document-level validation in `Validating`; M4f: `type` and `lax` on every constructor — a run per boundary rooted
 as `xsd-schema`'s `ValidationRoot` says; see "Construction validation", "Copies and documents" and "Type-driven and lax
 validation" below), `typed_sources` (M4b: a source validated as it is parsed, in one pass — `xsd-schema`'s `TypedBuilderHandler` as it is, which since `wave-b` `d5f2a8e` drops the whitespace text of element-only content as XDM 1.0 §6.7.4 says (C67; this crate's own `SourceBuild` handler that did it went in the batch (t) follow-up) and makes defaulted attributes and element defaults nodes (C39); this crate's sink; one `SchemaValidator` per run, identity constraints on; the typed admission copy for §4.3 `input-type-annotations="strip"` (is-id and is-idrefs kept by re-registering: `register_xml_id` for the ids an element answers to by its attributes and by its own typed value, `register_idrefs`) and §4.4 with the simple-content exemption), `functions` (the §16 evaluator), `format` (§16.4 / §16.5 glue: the function conversion rules for `$value`, `$picture`, `$language`, `$calendar`, `$country`; the decimal-format name → XTDE1280; `$calendar` expanded with no default namespace, format-date-037), `expressions`, `serialize` (a result tree through `src/serialize/`), `sort` (`xsl:sort`, `xsl:perform-sort`), `calls` (stylesheet functions), `keys` (key indexes), `grouping` (`xsl:for-each-group`), `analyze` (`xsl:analyze-string`, the run's regex cache), `results` (`xsl:result-document`, the base output URI, XTDE1480 / XTDE1490, the §2.4 primary result; `SecondaryResult`), `number` (`xsl:number`: §12.1 `value` with the backwards-compatible NaN rule, XTDE0980; §12.2 the place marker of a node — single / multiple / any, the implied count pattern, walks only up and forward because the navigator's previous-sibling move scans from the first child; XTTE0990 / XTTE1000; XTDE0030 for computed conversion attributes; the nodes before $S are counted by a `Walk` — the tree in document order for `any`, a parent's children for `single` / `multiple` — that counts every implied pattern at once without `count` (`Census`, by node kind and expanded name), keeps an index of the numbers it gave once a node before its frontier is asked for (`Index`), and is kept per instruction (`NumberMemo`; `Walks`, by owner: every tree and every parent — a walk past 32 nodes always, the shorter ones until more than 1,024 walks are kept) while the local variables the patterns read keep their values (`Stability`, compared exactly: nodes by identity, strings / booleans / integers / doubles by type and bits) — numbering is linear in the nodes walked and the evaluations, in any order, over any number of names, namespaces, trees and parents; a pattern calling a stylesheet function counts afresh every time, see "`xsl:number` cost" below) |
-| `src/receiver.rs` | `Receiver` (with the `validation_boundary` event, M4d — also before an attribute a `strip` copy made, M4e — and `append_copy` with the copy's `CopyValidation`, M4e; `element_id`, `attribute_idrefs`, `element_idrefs`: the is-id and is-idrefs a `strip` copy keeps without a binding, batch (t) follow-up; `attribute_copied_from`, `element_copied_from`: the source of a `preserve` copy's node, read only by a receiver that strips its binding, its fix round 1), `ComplexContentNormalizer` (§5.7.1; `copy_selected`: the copy of one selected node under its validation), `ResultBuilder` (builds bindings as they arrive; `file_id`; `keep_attribute` / `keep_open_element`: is-id and is-idrefs of a node a `strip` boundary untyped, as `Validating` decides them), `SequenceCollector` (copies and parentless nodes built through `Validating` too), `TemporaryOutputState` (the content of `xsl:document`: d-o-e dropped, §11.5/§20.2) |
+| `src/receiver.rs` | `XPathType` (M4g, the C72 workaround: the XPath 2.0 types a set cannot validate against, their stand-ins and rules; `Boundary::XPathType`, `CopyValidation::XPathType`), `Receiver` (with the `validation_boundary` event, M4d — also before an attribute a `strip` copy made, M4e — and `append_copy` with the copy's `CopyValidation`, M4e; `element_id`, `attribute_idrefs`, `element_idrefs`: the is-id and is-idrefs a `strip` copy keeps without a binding, batch (t) follow-up; `attribute_copied_from`, `element_copied_from`: the source of a `preserve` copy's node, read only by a receiver that strips its binding, its fix round 1), `ComplexContentNormalizer` (§5.7.1; `copy_selected`: the copy of one selected node under its validation), `ResultBuilder` (builds bindings as they arrive; `file_id`; `keep_attribute` / `keep_open_element`: is-id and is-idrefs of a node a `strip` boundary untyped, as `Validating` decides them), `SequenceCollector` (copies and parentless nodes built through `Validating` too), `TemporaryOutputState` (the content of `xsl:document`: d-o-e dropped, §11.5/§20.2) |
 | `src/store.rs` | `DocumentStore`: arena-allocated documents, URI identity, `generate-id()` |
 | `src/output.rs` | `OutputDefinition`: the `xsl:output` attributes merged by import precedence (§20), `cdata-section-elements` united, `use-character-maps` concatenated and expanded; `compile/output.rs` reads `xsl:output` / `xsl:character-map` (XTSE1560, XTSE1570, XTSE1580, XTSE1590, XTSE1600, XTSE0020 parameter domains) |
 | `src/serialize/` | The serializer (M3a; Serialization 1.0 2E, read at w3.org): `params` (an output definition resolved against a tree — §20's default method, per-method defaults, SEPM/SESU checks), `markup` (the `xml`, `xhtml`, `html` methods, iterative), `html` (HTML 4.01 / XHTML tables, URI escaping), `encoding` (UTF-8, UTF-16, US-ASCII, ISO-8859-1; anything else SESU0007), `charmap`, `marks` (`disable-output-escaping` kept beside the tree, §20.2); the text method in `mod.rs`. The result is a `String` (the encoding phase skipped, Ser. §4); `serialize_primary_to_bytes` encodes |
@@ -44,7 +44,7 @@ validation" below), `typed_sources` (M4b: a source validated as it is parsed, in
 | `src/compile/decimal_format.rs` | `xsl:decimal-format` (§16.4.1): values recorded per attribute with their import precedence, merged attribute by attribute after the declaration pass (XTSE1290 for two values at the top precedence), then XTSE1295 / XTSE1300 on the merged format; `char` attributes untrimmed, one character (XTSE0020). `CompiledStylesheet::decimal_format(name)` |
 | `src/functions.rs` | The §16 function library as an XPath catalog, plus the `use-when` evaluator. No stub is left since M3d (`stubs` holds only §3.8's fallback error function) |
 | `src/collation.rs`, `src/collation/uca.rs`, `src/collation/uca/search.rs` | The collation registry (`CollationResolver`): codepoint, HTML ASCII case-insensitive, host-registered; `CaseOrderCollation` for `xsl:sort lang` / `case-order`; with the `icu-collation` feature the F&O 3.1 §5.3.3 UCA URIs and locale-tailored sorting on ICU4X 1.5 (`uca.rs`) and the substring search under them (`uca/search.rs`) |
-| `src/schema.rs` | The schema-aware mode (M4a; M4 plan D-1, D-7, D-9): `SchemaContext` (caller-owned; owns the `SchemaSet`, whose `NameTable` is the stylesheet's) and `SchemaContextBuilder` — a **pre-scan** of the module graph with the compiler's own `Loader` (schema-aware `use-when`), §3.14's highest-precedence `xsl:import-schema` per namespace (`plan`), loaded by location through the compiler's `Resolver` (`ResolverLoader`; a `file:` URI is handed to `xsd-schema` as its path, so C15a is avoided **for `file:` URIs only**: under another base `ResolverLoader::request` removes the dot segments `xsd-schema` keeps, and passes a relative location on relative, never absolutized against the working directory — but `xsd-schema` still keys a document by its own spelling, so one non-`file:` document under two spellings loads twice, C15a), by namespace only (the embedded `xml.xsd` / `xlink.xsd`, also the fallback when a location of those namespaces cannot be read; the built-in `xsi:` declarations; the Schema for Schemas is not available, so an import of the XML Schema namespace is not `found()`), or inline as a **slice** of the module text with the inherited namespace bindings injected after `<xs:schema`, the elements §3.12 `use-when` excludes blanked out byte for byte (`blank_excluded`), and the location `<base URI>#schema-N` (N from 1 per module; a module reached twice loads its inline schemas once, `DeclarationId`; errors mapped back to the module line). A document that cannot be read is no error (§3.14); one that is not a valid schema, or has another target namespace than the declaration's, is XTSE0220; XTSE0215 for an inline schema with `schema-location` or a conflicting `namespace`; XTSE0010 for content other than one `xs:schema`. `check_coverage`: `Compiler::schema_aware` refuses a stylesheet whose imports the context did not load (`XSLT2-INTERNAL`) — a namespace-only import is satisfied by a context that holds the namespace's components (`SchemaContext::covers`). `in_scope_type` / `built_in_type` / `has_user_constructor`: the in-scope types for XTSE1520 / XTSE1530, `type-available` and `function-available` (`functions::TypeScope`). **Host schemas** (M4b, §3.13's implementation-defined mechanism, D-2): `SchemaContextBuilder::schema_uri` / `schema_file` / `schema_str`, loaded before the imports into the same set (a namespace-only import of their namespace is `found()`, a location import of the same document loads it once; unreadable or invalid → XTSE0220), listed by `SchemaContext::host_schemas` |
+| `src/schema.rs` | The schema-aware mode (M4a; M4 plan D-1, D-7, D-9): `SchemaContext` (caller-owned; owns the `SchemaSet`, whose `NameTable` is the stylesheet's) and `SchemaContextBuilder` — a **pre-scan** of the module graph with the compiler's own `Loader` (schema-aware `use-when`), §3.14's highest-precedence `xsl:import-schema` per namespace (`plan`), loaded by location through the compiler's `Resolver` (`ResolverLoader`; a `file:` URI is handed to `xsd-schema` as its path, so C15a is avoided **for `file:` URIs only**: under another base `ResolverLoader::request` removes the dot segments `xsd-schema` keeps, and passes a relative location on relative, never absolutized against the working directory — but `xsd-schema` still keys a document by its own spelling, so one non-`file:` document under two spellings loads twice, C15a), by namespace only (the embedded `xml.xsd` / `xlink.xsd`, also the fallback when a location of those namespaces cannot be read; the built-in `xsi:` declarations; the Schema for Schemas is not available, so an import of the XML Schema namespace is not `found()`), or inline as a **slice** of the module text with the inherited namespace bindings injected after `<xs:schema`, the elements §3.12 `use-when` excludes blanked out byte for byte (`blank_excluded`), and the location `<base URI>#schema-N` (N from 1 per module; a module reached twice loads its inline schemas once, `DeclarationId`; errors mapped back to the module line). A document that cannot be read is no error (§3.14); one that is not a valid schema, or has another target namespace than the declaration's, is XTSE0220; XTSE0215 for an inline schema with `schema-location` or a conflicting `namespace`; XTSE0010 for content other than one `xs:schema`. `check_coverage`: `Compiler::schema_aware` refuses a stylesheet whose imports the context did not load (`XSLT2-INTERNAL`) — a namespace-only import is satisfied by a context that holds the namespace's components (`SchemaContext::covers`). `in_scope_type` / `built_in_type` / `has_user_constructor`: the in-scope types for XTSE1520 / XTSE1530, `type-available` and `function-available` (`functions::TypeScope`). **Host schemas** (M4b, §3.13's implementation-defined mechanism, D-2): `SchemaContextBuilder::schema_uri` / `schema_file` / `schema_str`, loaded before the imports into the same set (a namespace-only import of their namespace is `found()`, a location import of the same document loads it once; unreadable or invalid → XTSE0220), listed by `SchemaContext::host_schemas`. **XML Schema version** (M4g, D-3): `SchemaContextBuilder::xsd_version` (default 1.0; 1.1 = `SchemaSet::with_version(V1_1)` for every document of the context), `SchemaContext::xsd_version` |
 | `src/regex.rs` | §15 regular expressions: `regexml`'s XPath 2.0 dialect (`Regex::xpath20`, the constructor `xsd-schema`'s `fn:matches` uses too), XTDE1140 / XTDE1145 / XTDE1150 by `ErrorKind`, and the engine's 64-level nesting limit as `XSLT2-INTERNAL` |
 
 ## Build
@@ -59,6 +59,7 @@ cargo test                         # unit tests + every tests/*.rs except the W3
                                    # + m4b_typed_sources + m4b_review + m4c_typed_patterns
                                    # + m4d_construction_validation + m4e_copies_documents
                                    # + m4f_type_lax + batch_t_followup + batch_t_namespaces
+                                   # + m4g_xsd11_residue
                                    # (tests/common/mod.rs: `common::body` drops the default XML
                                    # declaration for the tests written before M3a)
                                    # (the W3C harness skips itself in a debug build)
@@ -119,11 +120,15 @@ directives of the schema that includes it), as host schemas (`SchemaContextBuild
 loaded with `transform_source_with` / `register_source_with` as its `validation` says (`engine::source_validation`:
 `strict`, `lax`, `skip`; **no attribute** is `strict` when the environment has a `source-reference` schema, `skip`
 otherwise — decision D-M of `../../XSLT2_M4B_REPORT.md`); a basic run validates nothing. (The M4a "M4b fence" is
-gone.) Run it beside the default run and diff each against its own baseline (the first schema-aware one is
-`../../baselines/xslts-sa-5794-at-xsd-27180f2-xslt2-8340257.xml`):
+gone.) `--xsd11` (M4g) satisfies `XSD_1.1` and builds every schema context as XML Schema 1.1 (`engine::context_version`,
+which also gives a 1.1 context to a case whose context schemas declare `xsd-version="1.1"`). Run it beside the default
+run and diff each against its own baseline (the first schema-aware one is
+`../../baselines/xslts-sa-5794-at-xsd-27180f2-xslt2-8340257.xml`, the first `--xsd11` one
+`../../baselines/xslts-sa11-6301-at-xsd-7608d3a-xslt2-6c6f9ba.xml`):
 
 ```bash
 cargo test --release --test xslts -- -s ../../xslt30-test --skip unicode-90 --schema-aware --report /tmp/sa.xml
+cargo test --release --test xslts -- -s ../../xslt30-test --skip unicode-90 --schema-aware --xsd11 --report /tmp/sa11.xml
 ```
 
 **Per-case diff against a baseline** — the zero pass→non-pass gate. Baseline reports and the XSD FAIL-name
@@ -158,6 +163,26 @@ the re-parsed document's base URI (`base-uri()`, `result-document-0102`).
 `assert-string-value` normalizes unless `normalize-space="false"` (the catalog's `default="true"`), with
 XML whitespace only. `assert-true` / `-false` / `-count` / `-type` / `-deep-eq` / `-permutation` need a
 raw sequence result, which an XSLT 2.0 run never delivers: `harnessError`.
+
+**Exclusions are decided last** (M4g, `filter::applicability`): a case whose dependencies the configuration does
+not satisfy stays not run, so a schema-aware case on `EXCLUDED` is "not run" in a basic run and "excluded" only in
+the schema-aware runs (the 64 basic exclusions are unaffected: the default run is identical case by case). M4g added
+13 schema-aware entries, each a decision for the user (`../../XSLT2_M4G_REPORT.md`, part 2; a `--schema-aware` run
+counts 12 of them as excluded: `strip-space-009` needs `XSD_1.1`, so without `--xsd11` it is not run). **`assert-serialization`
+under indentation** (M4g, `compare::indented_serializations_equal`): with the `xhtml` or `html` method and
+`indent="yes"` in effect (`ResultDocument::indent`) two serializations are equal when they differ only in whitespace
+Serialization 1.0 §6.1.3 / §7.4.3 lets an indenter add or remove — markup identical, formatted elements (`pre`,
+`script`, `style`, `textarea`) exact; whitespace may be added or removed only where it touches the start or end tag of
+an element that is not inline (`INLINE`: XHTML 1.0 / HTML 4.01 `%inline` with `script`, XHTML 1.1 `ruby`), or lies
+outside the document element; everywhere else (next to an inline element's tag, a comment, a PI, a CDATA section, or
+inside text) a whitespace run must stay a whitespace run (fix round 1, review R1/R2); the catalog lets a driver "ignore
+differences in the serialization that are known to be irrelevant (that is, capable of being produced by a conformant
+implementation)" (`validation-0201`). **The implicit timezone** (fix round 1, review R12): `driver::main` sets
+`TZ=UTC` before the worker thread starts — the catalog's assumption ("we currently assume that an absent timezone means
+UTC", `date-012` … `date-018`, `date-042`); `--host-timezone` keeps the host's. `TZ`, not an API option, because
+upstream compares a value without a timezone by the host's local offset (chrono `Local`), not by the dynamic
+context's implicit timezone (noticed; proposed as C94); `--self-test` checks the pin. Baselines taken before
+2026-10-25 ran under CEST (+02:00): `date-012` fails there, passes under UTC.
 
 `NOT-IMPL` is this processor's own `XSLT2-NOTIMPL` code: the case is runnable and fails, but it
 fails because a feature belongs to a later milestone, not because the answer is wrong. Dependency
@@ -268,10 +293,12 @@ the value is read into `model::Validation` on every node constructor (the module
 absent one) and takes effect when the instruction is **evaluated**; `strip` everywhere, `preserve` and `strict` on
 element constructors, `strict` / `lax` / `type` on `xsl:attribute` and the implicit final result tree under
 `default-validation` run since M4d, `preserve` and `strict` on copies, `xsl:document` and `xsl:result-document` since
-M4e, `type` and `lax` on every constructor since M4f (below). The one fence left: a `type` naming an XPath 2.0 type an
-XML Schema 1.0 set has no definition of (`xs:untypedAtomic` on an element or copy, `xs:anyAtomicType`,
-`xs:dayTimeDuration`, `xs:yearMonthDuration`) is `XSLT2-NOTIMPL` naming M4g (upstream proposal C72;
-`Transformation::resolve_validation_type`). (M4a's `validation_fence` / `Validation::owner` table went with M4f.) (Typed patterns were fenced with M4c when the
+M4e, `type` and `lax` on every constructor since M4f (below), `xs:untypedAtomic` / `xs:anyAtomicType` in `type`
+since M4g (a workaround for upstream C72, "XML Schema 1.1 and the workarounds" below). No construct is fenced as a
+sub-milestone's any more: what is left is M2k's UCA collations without their feature, and two fences naming upstream
+proposals — `xs:dayTimeDuration` / `xs:yearMonthDuration` in `type` in an XML Schema 1.0 context (C72) and an
+`xsi:type="xs:untypedAtomic"` in a 1.1 one (C92). (M4a's
+`validation_fence` / `Validation::owner` table went with M4f.) (Typed patterns were fenced with M4c when the
 pattern compiled, until M4c.) A stylesheet function with the name and arity 1 of a user
 atomic type's constructor function is XTSE0770, whatever `override` says (decision D-A, `compile/functions.rs`); one
 in the XML Schema namespace is XTSE0080 (§3.2). (The upstream limits M4a met — QName / NOTATION enumerations compared
@@ -335,7 +362,8 @@ Schema-aware run: 6,304 of 6,355, profile 561 of 579.
 **Construction validation** (M4d; M4 plan D-5, D-10, D-12, D-13; `tests/m4d_construction_validation.rs`,
 `../../XSLT2_M4D_REPORT.md`). `runtime/validate.rs` validates what `xsl:attribute` constructs: `type` → the type
 (`get_built_in_type_by_qname` / `lookup_type`; `xs:untypedAtomic` is the unvalidated annotation; an XPath-only type an
-XSD 1.0 set does not define is NOT-IMPL (M4g, upstream C72)), XTTE1545 for a type built from `xs:QName` /
+XSD 1.0 set does not define goes through the C72 workaround, or — the two durations — is the C72 fence, "XML Schema
+1.1 and the workarounds" below), XTTE1545 for a type built from `xs:QName` /
 `xs:NOTATION` (`namespace_sensitive`, the walk of upstream's private `type_has_qname_values`), `validate_simple_type`
 → XTTE1540; `strict` → the top-level declaration (`lookup_attribute`; none → XTTE1512), its type (none →
 `xs:anySimpleType`), XTTE1545, `validate_simple_type` and the `fixed` value (`fixed_values_equal`, XML Schema 1.1
@@ -380,8 +408,8 @@ namespace keeps its lexical form, D-f2; `Validating::qname_lexical`; each run's 
 runs inside it declared theirs, so an outer run reads the value as written — batch (t) follow-up fix round 1), the
 text of an element a run assessed with simple content its normalized value or, empty, the declaration's default /
 fixed value (a QName in it written with a prefix in scope at the element from the run's typed value — the {value};
-with none in scope `XSLT2-NOTIMPL`, upstream proposal C89: no public way to declare the prefix on a start tag already
-built, nor in the runs' snapshots)
+with none in scope a prefix declared on the element, whose start tag is held for that: the C89 workaround, "XML Schema
+1.1 and the workarounds" below)
 (the content held until the element ends,
 comments and PIs kept in order; `disable-output-escaping` kept only where the text did not change), whitespace text in
 element-only / empty content no text node (XDM 1.0 §6.7.4, `validate::element_only` — the typed source build's rule
@@ -499,6 +527,78 @@ with no validation 24–25 ms; `type` on the table 60–63 ms (`strict` 61–65 
 fix round 1's top-level-declaration lookup per region element (about 0.2 µs an element). Schema-aware run on
 `bde3377`: 6,280 of 6,355, profile 537 of 579.
 
+**Implementation-defined choices of the schema-aware mode** (written up in M4g; `../../XSLT2_M4G_REPORT.md` part 2):
+§3.13's mechanisms are the host schemas (`SchemaContextBuilder::schema_uri` / `schema_file` / `schema_str`, one set
+with the imports, D-2) and the XML Schema 1.1 option (below); the whole set is in scope (D-7), so §3.14's
+"These rules do not cause names to be imported transitively" is not enforced (a name of the set is usable without an
+`xsl:import-schema` of its namespace); a location import whose document has another target namespace than the
+declaration is XTSE0220 unless the set already holds a schema document of that namespace (a host schema's, or an
+earlier import's), when it is a hint passed over (`found()` false; decision D-g11, XML Schema 1.1 §4.2.6.2: "it is
+open to applications to ignore all but the first <import> for a given namespace"; `import-schema-186`, `-187`) — so
+order-dependent (an earlier import counts only when it was loaded first), and a document an earlier import's own
+`xs:import` brings in does not count (directives are resolved after every declaration); each location passed over, or
+not readable, is a `SchemaContext::warnings` entry (fix round 1, review R8). In a 1.1 context the in-scope types add
+Part 2 1.1's `xs:dateTimeStamp` (`schema::XSD11_PART_2_ADDITIONS`, with its constructor function), not Structures'
+`xs:error` (review R6/R7);
+source validation is the host's choice per loader and document, default `skip`, stylesheet modules read by
+`document('')` not validated by the default (D-4, D-V), and in the harness a source with no `validation` attribute is
+`strict` when its environment has a `source-reference` schema (D-M). In an XML Schema 1.1 context `xs:anyURI` is
+1.1's for XTDE0835 / XTDE0865 / XTDE0905 (`eval::check_namespace_uri`: no at-most-one-`#` rule; `error-0905b`).
+
+**XML Schema 1.1 and the workarounds** (M4g; M4 plan D-3; `tests/m4g_xsd11_residue.rs`, `../../XSLT2_M4G_REPORT.md`).
+`SchemaContextBuilder::xsd_version(XsdVersion::V1_1)` (`xslt2::XsdVersion` is upstream's; default 1.0 — XSLT 2.0's
+normative reference is XML Schema 1.0) builds the context's one set with `SchemaSet::with_version` (`Loading::new`):
+every schema document of the context is read as XML Schema 1.1, and `Transformation::validator` (the one validator of a
+run, for sources and constructed trees) adds `ValidationFlags::PROCESS_ASSERTIONS` for a 1.1 set (upstream B9: inline
+fragment buffering, through the push API too) — §3.13's implementation-defined mechanisms. `SchemaContext::
+xsd_version`, `SchemaContext::with_version`. Harness: `--schema-aware --xsd11` satisfies `XSD_1.1` and builds every
+context as 1.1; without `--xsd11` a case whose context schemas declare `xsd-version="1.1"` gets a 1.1 context too
+(`engine::context_version`; today only `strip-space-009`, which needs `XSD_1.1` anyway); its baseline is
+`../../baselines/xslts-sa11-6301-at-xsd-7608d3a-xslt2-6c6f9ba.xml` (the untouched M4g tree, 1.0 contexts).
+**Workarounds** (each documented as one in the code, named after the upstream item that replaces it, and left open in
+`../../xslt_doc/WAVE_B_PLAN.md`):
+- **C72** (`receiver::XPathType`, `Boundary::XPathType`, `CopyValidation::XPathType`, `RunMode::XPath`;
+  `Transformation::resolve_validation_type` → `validate::Named`): `xs:untypedAtomic`, `xs:anyAtomicType` in
+  `[xsl:]type` where the set has no component (1.0), and `xs:untypedAtomic` always (upstream 1.1 has the component but
+  "No validator for type code UntypedAtomic": proposal C92). **`xs:dayTimeDuration` / `xs:yearMonthDuration` in a 1.0
+  context are fenced** where the type is resolved (`check_xpath_type_policy`, `validate::DurationPolicy::Fence`,
+  `DURATIONS_IN_1_0`): `XSLT2-NOTIMPL` naming upstream proposal C72, the message pointing to the XML Schema 1.1 option
+  (`SchemaContextBuilder::xsd_version`), on elements, attributes, copies, documents and an `xsi:type` under
+  `xs:anyAtomicType` — decision D-g2 as the user revised it (fix round 1, review R3): their stand-in's typed value, an
+  `xs:duration`, is not ordered (`lt`, arithmetic, `sum` / `max`, `xsl:sort` raise type errors; the same on attributes,
+  VERIFIED), whereas the other two types' typed value is exact. The stand-in code for the durations stays, reached only
+  with `DurationPolicy::StandIn`. An element
+  or document child is a run with `ValidationRoot::Type(stand_in)` (`xs:anySimpleType`, `xs:duration`); at the root's
+  start (`xpath_root_xsi_type`) an `xsi:type` naming the type itself is withheld, any other is XTTE1540 except under
+  `xs:anyAtomicType`, where `xs:anySimpleType` (its base type) is XTTE1540, `xs:untypedAtomic` becomes the root's type
+  (`Run::root_xpath`; a duration there is the C72 fence, as in `[xsl:]type`), and any
+  other passes on and must govern with an atomic type (`is_atomic_type`; fix round 1, review R4); at its end
+  `XPathType::admits` checks XDM 1.0 §2.6.2's duration patterns on the [schema normalized value] (`run_text`,
+  `Run::extra` → XTTE1540 in `end_run`); the root's binding is `XPathType::annotation` of `Run::root_xpath` (the set's
+  own key, else the stand-in; `emit_start`). Attributes: `attribute_against_xpath_type` (String Valid with the stand-in
+  + `admits`), `xs:untypedAtomic` unbound (D-d7). The approximation is reported once per run and type in
+  `Transformation::take_warnings` (`note_xpath_type`, never for an exact annotation) where a node is validated against
+  a stand-in — the root's start in `start_in_run` (`Validating::with_warnings`, also in `SequenceCollector`), and
+  `attribute_against_xpath_type` — not where the type is named (review R9). **C92 through `xsi:type`** (review R5): an `xsi:type` naming `xs:untypedAtomic`
+  that reaches a run in a 1.1 set is `XSLT2-NOTIMPL` naming C92 (`start_in_run`); a stand-in would fail the derivation
+  (`xs:anySimpleType` is not derived from `xs:anyAtomicType`), and a source's `xsi:type` is upstream's to assess.
+- **C89** (`Frame::deferred`, `Tag`, `Validating::{finish_start_tag, start_in_run, emit_start, complete_deferred,
+  end_deferred}`, `tag_frame`, `Ending::declare`): `finish_start_tag` hands the start tag to the runs innermost first
+  (`start_in_run`); when a run's start info gives the element a declaration with a `default` / `fixed` value whose
+  simple content may hold QNames (`may_take_a_namespace_sensitive_value`; a complex type's
+  `resolved_simple_content_type`, unknown → yes), it stops: the runs outside it and the builder do not see the start
+  tag yet. At the element's end (`end_deferred`, the element still the innermost frame) each run, innermost first, sees
+  the start tag if it has not (its snapshot including what was declared by then), then the held text and the end
+  (`run_text`); a run that applies the default writes it with `qname_lexical(…, None)`, declaring `ns_dN` on the
+  element (`prefix_for` on `tag_frame` / the innermost frame); then `emit_start`, the content, the end. An element child
+  (`start_element`) completes the start first (`complete_deferred`, `tag_frame` = the element's frame, which a
+  transparent document frame may cover) and releases the held content as before. The old `XSLT2-NOTIMPL` is now an
+  `XSLT2-INTERNAL` for the case the hold should have caught. Cost: none measurable (M4d's 10,000-row table with a
+  held QName-default child per row 94–98 ms against 95–99 ms before; `../../XSLT2_M4G_REPORT.md`). A 1.1 context
+  validates a source as fast as a 1.0 one (31–34 ms for 10,000 rows); an `xs:assert` per row costs about 8 µs a row.
+Schema-aware run on `7608d3a` (M4g, fix round 1, `TZ=UTC`): 6,310 of 6,343 runnable (76 excluded), profile 566 of
+567; `--xsd11` 6,310 of 6,342, profile 569 of 569; default 5,760, icu 5,762 (baselines `../../baselines/*-m4g-fr1-*`).
+
 **Typed patterns** (M4c; M4 plan D-1, D-13; `tests/m4c_typed_patterns.rs`). A pattern step may use `element(*, T)`,
 `element(N, T)`, `element(N, T?)`, `attribute(*, T)`, `attribute(N, T)`, `schema-element(N)`, `schema-attribute(N)`
 and `document-node(…)` around an element test, in every pattern (`match` of templates and keys, `xsl:number count` /
@@ -524,9 +624,8 @@ the typed value, proposed P21), against 3.0–3.6 s for the same rules written `
 element(*, tᵢ)]`. Fixed upstream on `wave-b` `cfe061e` (C69): XPath's derives-from no longer counts a member type of a union as
 derived from the union (XPath 2.0 §2.5.4: restriction / extension only; Structures' *Type Derivation OK (Simple)*
 clause 2.2.4 stays validation's rule), so `element(*, U)` no longer matches an element typed by a member of `U` —
-`match-197` passes. Not done: `document-node(E)`
-in a pattern tests the first element child only (XPath §2.5.4.2: exactly one element, besides comments and PIs) —
-pre-existing, also untyped; `instance of` is right. Schema-aware run on `66e3e3f`: 6,017 of 6,355, profile 274 of 579.
+`match-197` passes. `document-node(E)` in a pattern needs exactly one element child and no text child, comments and
+PIs allowed (XPath §2.5.4.2; since M4g — it tested the first element child only, `import-schema-055`). Schema-aware run on `66e3e3f`: 6,017 of 6,355, profile 274 of 579.
 
 ## The `regexml` engine
 

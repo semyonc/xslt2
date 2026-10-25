@@ -477,12 +477,20 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
                     ..
                 }) => unserialized(e),
                 Some(p) => {
+                    let method = method.as_deref().or(p.method.as_deref());
                     if serializations_equal(
                         trim_trailing_newlines(&expected),
                         trim_trailing_newlines(&p.serialized),
-                        method.as_deref().or(p.method.as_deref()),
+                        method,
                         || !cx.inputs.may_produce_cr(),
-                    ) {
+                    ) || (p.indent
+                        && matches!(method, Some("xhtml") | Some("html"))
+                        && indented_serializations_equal(
+                            &expected,
+                            &p.serialized,
+                            method == Some("html"),
+                        ))
+                    {
                         Verdict::pass()
                     } else {
                         Verdict::fail(format!(
@@ -1518,6 +1526,219 @@ fn serializations_equal(
         && inputs_cannot_produce_cr()
 }
 
+/// Whether two serializations by the `xhtml` or `html` method with `indent="yes"` differ only in
+/// whitespace an indenting serializer may add or remove — the catalog lets a driver "ignore
+/// differences in the serialization that are known to be irrelevant (that is, capable of being
+/// produced by a conformant implementation)" (`admin/catalog-schema.xsd`, `assert-serialization`;
+/// decision D-g12).
+///
+/// Serialization 1.0 2E §6.1.3 (xhtml; §7.4.3 says the same of html, read at w3.org): "If the
+/// indent parameter has the value yes, the serializer MAY add or remove whitespace as it serializes
+/// the result tree, if it observes the following constraints. Whitespace MUST NOT be added other
+/// than before or after an element, or adjacent to an existing whitespace character. Whitespace
+/// MUST NOT be added or removed adjacent to an inline element. … Whitespace MUST NOT be added or
+/// removed inside a formatted element, the formatted elements being those … with local names pre,
+/// script, style, and textarea", and its Note: the effect "is to ensure any insertion or deletion
+/// of whitespace would not affect how a conforming HTML user agent would render the output".
+///
+/// The rule applied, no wider: both texts are cut into markup and text; markup must be identical;
+/// inside a formatted element text must be identical; elsewhere a run of whitespace counts as one
+/// space, and its edge is ignored only where it touches the start or end tag of an element that is
+/// not inline (where an indenter adds and removes whitespace: "before or after an element") or lies
+/// outside the document element (whitespace there is no content of the tree). An edge next to an
+/// inline element's tag, or next to a comment or processing instruction inside an element, counts:
+/// whitespace there may neither be added where there was none nor taken away. What an inline
+/// element is follows `INLINE`.
+pub fn indented_serializations_equal(expected: &str, actual: &str, html: bool) -> bool {
+    match (indent_tokens(expected, html), indent_tokens(actual, html)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// The inline elements of the serializer's rule: "those elements in the XHTML namespace in the
+/// %inline category of any of the XHTML 1.0 DTD's, in the %inline.class category of the XHTML 1.1
+/// DTD, and elements in the XHTML namespace with local names ins and del if they are used as
+/// inline elements" (§6.1.3), and for `html` "those included in the %inline category of any of the
+/// HTML 4.01 DTD's, as well as the ins and del elements if they are used as inline elements"
+/// (§7.4.3). Read at w3.org: HTML 4.01 Transitional `%inline` = `%fontstyle` (TT I B U S STRIKE
+/// BIG SMALL), `%phrase` (EM STRONG DFN CODE SAMP KBD VAR CITE ABBR ACRONYM), `%special` (A IMG
+/// APPLET OBJECT FONT BASEFONT BR SCRIPT MAP Q SUB SUP SPAN BDO IFRAME), `%formctrl` (INPUT SELECT
+/// TEXTAREA LABEL BUTTON) — Strict is a subset —; XHTML 1.0 Transitional's `%inline` the same
+/// names without `script`; XHTML 1.1 `%Inline.class` = br span, em strong dfn code samp kbd var
+/// cite abbr acronym q, tt i b big small sub sup, bdo, a, img map object, input select textarea
+/// label button, ruby. One list serves both methods (the union: stricter for each); `ins` / `del`
+/// always count as inline (stricter than "if they are used as inline elements").
+const INLINE: &[&str] = &[
+    "a", "abbr", "acronym", "applet", "b", "basefont", "bdo", "big", "br", "button", "cite",
+    "code", "del", "dfn", "em", "font", "i", "iframe", "img", "input", "ins", "kbd", "label",
+    "map", "object", "q", "ruby", "s", "samp", "script", "select", "small", "span", "strike",
+    "strong", "sub", "sup", "textarea", "tt", "u", "var",
+];
+
+/// The formatted elements of §6.1.3 / §7.4.3.
+const FORMATTED: &[&str] = &["pre", "script", "style", "textarea"];
+
+/// HTML 4.01's elements with no end tag (`EMPTY` in its DTDs), which the `html` method writes as a
+/// start tag alone; they open no content.
+const HTML_VOID: &[&str] = &[
+    "area", "base", "basefont", "br", "col", "frame", "hr", "img", "input", "isindex", "link",
+    "meta", "param",
+];
+
+#[derive(Debug, PartialEq)]
+enum IndentToken {
+    Markup(String),
+    Text(String),
+}
+
+/// `text` as markup and normalized text (see `indented_serializations_equal`); `None` when a
+/// piece of markup does not end.
+fn indent_tokens(text: &str, html: bool) -> Option<Vec<IndentToken>> {
+    // 1. Cut into markup (with the element name of a tag and whether it closes) and raw text, each
+    // piece with the element depth it is at.
+    enum Raw<'s> {
+        Markup(&'s str, Option<(String, bool)>),
+        Text(&'s str, usize),
+    }
+    let mut raw = Vec::new();
+    let mut rest = text;
+    let mut depth = 0usize;
+    while !rest.is_empty() {
+        if rest.starts_with('<') {
+            let end = if rest.starts_with("<!--") {
+                rest.find("-->")? + 3
+            } else if rest.starts_with("<![CDATA[") {
+                rest.find("]]>")? + 3
+            } else if rest.starts_with("<?") {
+                rest.find("?>")? + 2
+            } else {
+                let mut quote = None;
+                let mut end = None;
+                for (i, c) in rest.char_indices().skip(1) {
+                    match (quote, c) {
+                        (None, '"' | '\'') => quote = Some(c),
+                        (Some(q), c) if c == q => quote = None,
+                        (None, '>') => {
+                            end = Some(i + 1);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                end?
+            };
+            let markup = &rest[..end];
+            let tag = (!markup.starts_with("<!") && !markup.starts_with("<?")).then(|| {
+                let closing = markup.starts_with("</");
+                let name: String = markup[if closing { 2 } else { 1 }..]
+                    .chars()
+                    .take_while(|c| !c.is_ascii_whitespace() && *c != '>' && *c != '/')
+                    .collect();
+                let local = name.rsplit(':').next().unwrap_or("").to_string();
+                (
+                    if html {
+                        local.to_ascii_lowercase()
+                    } else {
+                        local
+                    },
+                    closing,
+                )
+            });
+            if let Some((name, closing)) = &tag {
+                if *closing {
+                    depth = depth.saturating_sub(1);
+                } else {
+                    // An empty-element tag, or an HTML void element, opens nothing.
+                    let empty =
+                        markup.ends_with("/>") || (html && HTML_VOID.contains(&name.as_str()));
+                    if !empty {
+                        depth += 1;
+                    }
+                }
+            }
+            raw.push(Raw::Markup(markup, tag));
+            rest = &rest[end..];
+        } else {
+            let end = rest.find('<').unwrap_or(rest.len());
+            raw.push(Raw::Text(&rest[..end], depth));
+            rest = &rest[end..];
+        }
+    }
+    // 2. Normalize the text by its neighbours.
+    let mut out = Vec::new();
+    let mut formatted = 0usize;
+    for (i, piece) in raw.iter().enumerate() {
+        match piece {
+            Raw::Markup(markup, tag) => {
+                if let Some((name, closing)) = tag {
+                    if FORMATTED.contains(&name.as_str()) && !markup.ends_with("/>") {
+                        if *closing {
+                            formatted = formatted.saturating_sub(1);
+                        } else {
+                            formatted += 1;
+                        }
+                    }
+                }
+                out.push(IndentToken::Markup(markup.to_string()));
+            }
+            Raw::Text(text, _) if formatted > 0 => out.push(IndentToken::Text(text.to_string())),
+            Raw::Text(text, depth) => {
+                // An edge counts unless the neighbour on that side is the start or end tag of an
+                // element that is not inline, or the text lies outside the document element.
+                let counts = |piece: Option<&Raw<'_>>| {
+                    *depth > 0
+                        && match piece {
+                            Some(Raw::Markup(_, Some((name, _)))) => {
+                                INLINE.contains(&name.as_str())
+                            }
+                            // A comment, processing instruction or CDATA section in content.
+                            Some(Raw::Markup(_, None)) => true,
+                            _ => false,
+                        }
+                };
+                let before = i.checked_sub(1).map(|j| &raw[j]);
+                let after = raw.get(i + 1);
+                let mut collapsed = String::with_capacity(text.len());
+                let mut in_space = false;
+                for c in text.chars() {
+                    if matches!(c, ' ' | '\t' | '\n' | '\r') {
+                        if !in_space {
+                            collapsed.push(' ');
+                        }
+                        in_space = true;
+                    } else {
+                        collapsed.push(c);
+                        in_space = false;
+                    }
+                }
+                let (keep_start, keep_end) = (counts(before), counts(after));
+                let collapsed = if collapsed.trim_matches(' ').is_empty() {
+                    // A run of whitespace alone: it counts (as one space) if either edge does.
+                    if keep_start || keep_end {
+                        collapsed
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    let mut t = collapsed.as_str();
+                    if !keep_start {
+                        t = t.trim_start_matches(' ');
+                    }
+                    if !keep_end {
+                        t = t.trim_end_matches(' ');
+                    }
+                    t.to_string()
+                };
+                if !collapsed.is_empty() {
+                    out.push(IndentToken::Text(collapsed));
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
 /// At least one CRLF, every LF preceded by a CR, and no CR anywhere else.
 fn crlf_throughout(s: &str) -> bool {
     let crlf = s.matches("\r\n").count();
@@ -2225,6 +2446,7 @@ pub mod self_test {
                 tree: Ok("<a>x</a>".into()),
                 serialization_error: Some(xslt2::XsltError::new("SESU0007", "no such encoding")),
                 method: None,
+                indent: false,
                 base_uri: None,
                 typed_asserts: Vec::new(),
             }),
@@ -2598,6 +2820,7 @@ pub mod self_test {
                 tree: Ok(tree.into()),
                 serialization_error: None,
                 method: None,
+                indent: false,
                 base_uri: None,
                 typed_asserts: Vec::new(),
             }),
@@ -2743,6 +2966,7 @@ pub mod self_test {
                 tree: Err("cannot write".into()),
                 serialization_error: None,
                 method: None,
+                indent: false,
                 base_uri: None,
                 typed_asserts: Vec::new(),
             }),
@@ -2923,6 +3147,86 @@ pub mod self_test {
         );
     }
 
+    /// Serialization 1.0 §6.1.3 / §7.4.3 (`indented_serializations_equal`): `validation-0201`'s
+    /// differences pass — a newline after the XML declaration, whitespace between block-level
+    /// tags, more or less whitespace in a run next to an inline element, whitespace at the end of
+    /// a block —; whitespace removed or added next to an inline element where there was none,
+    /// inside a formatted element, or a changed character, attribute or tag does not; nor does
+    /// anything without `indent="yes"` or with another method.
+    fn indented_xhtml_may_differ_only_where_an_indenter_may_change_whitespace() {
+        let eq = |a: &str, b: &str| indented_serializations_equal(a, b, false);
+        assert!(eq(
+            "<?xml version=\"1.0\"?><html><head><meta a=\"1\" /><style>x</style><title>T</title></head></html>",
+            "<?xml version=\"1.0\"?>\n<html>\n  <head>\n    <meta a=\"1\" />\n    <style>x</style>\n    <title>T</title>\n  </head>\n</html>",
+        ));
+        assert!(eq(
+            "<h1>J <span>K</span> \n      </h1><p>end.\n   </p>",
+            "<h1>J <span>K</span> </h1><p>end.</p>",
+        ));
+        assert!(eq(
+            "<p><a>x</a> \n   <span>y</span></p>",
+            "<p><a>x</a> <span>y</span></p>"
+        ));
+        assert!(!eq(
+            "<p><a>x</a> <span>y</span></p>",
+            "<p><a>x</a><span>y</span></p>"
+        ));
+        assert!(!eq("<p>a <b>x</b></p>", "<p>a<b>x</b></p>"));
+        assert!(!eq("<pre> x</pre>", "<pre>x</pre>"));
+        assert!(!eq("<p>ab</p>", "<p>a b</p>"));
+        assert!(!eq("<p a=\"1\">x</p>", "<p a=\"2\">x</p>"));
+        // Review R1: whitespace added next to a comment or processing instruction inside an
+        // element, where there was none, is neither "before or after an element" nor "adjacent to
+        // an existing whitespace character" (§6.1.3) — and taking one away changes rendering.
+        assert!(!eq("<p>a<!--c-->b</p>", "<p>a <!--c--> b</p>"));
+        assert!(!eq("<p>a<?x y?>b</p>", "<p>a <?x y?> b</p>"));
+        assert!(!eq("<p>a <!--c--> b</p>", "<p>a<!--c-->b</p>"));
+        assert!(eq("<p>a <!--c--> b</p>", "<p>a \n <!--c-->  b</p>"));
+        assert!(!eq("<p>a<![CDATA[b]]>c</p>", "<p>a <![CDATA[b]]> c</p>"));
+        // … while at document level (outside the document element) whitespace is no content.
+        assert!(eq("<!--c--><html/>", "<!--c-->\n<html/>"));
+        // Review R2: `script` (HTML 4.01 %special) and `ruby` (XHTML 1.1 %Ruby.class) are inline.
+        assert!(!indented_serializations_equal(
+            "<p>a <script>x</script></p>",
+            "<p>a<script>x</script></p>",
+            true
+        ));
+        assert!(!eq("<p>a <ruby>x</ruby></p>", "<p>a<ruby>x</ruby></p>"));
+        assert!(!eq("<p>x</p>", "<div>x</div>"));
+        assert!(!indented_serializations_equal(
+            "<P>x <B>y</B></P>",
+            "<P>x<B>y</B></P>",
+            true
+        ));
+        let doc = |text: &str, method: &str, indent: bool| RunOutput {
+            primary: Some(ResultDocument {
+                method: Some(method.into()),
+                indent,
+                ..ResultDocument::same(text)
+            }),
+            ..Default::default()
+        };
+        let expected = "<html>\n  <body/>\n</html>";
+        let a = Assertion::AssertSerialization {
+            expected: "<html><body/></html>".into(),
+            file: None,
+            method: None,
+            ignore_prefixes: false,
+        };
+        check(
+            evaluate(&a, &doc(expected, "xhtml", true), &cx()),
+            Outcome::Pass,
+        );
+        check(
+            evaluate(&a, &doc(expected, "xhtml", false), &cx()),
+            Outcome::Fail,
+        );
+        check(
+            evaluate(&a, &doc(expected, "xml", true), &cx()),
+            Outcome::Fail,
+        );
+    }
+
     pub fn run() -> Summary {
         let functions: &[fn()] = &[
             assert_over_a_typed_result_reads_the_tree,
@@ -2955,6 +3259,7 @@ pub mod self_test {
             tree_assertions_read_the_default_serialization,
             string_value_normalization_is_xpath_normalize_space,
             an_xml_stylesheet_instruction_is_not_an_xml_declaration,
+            indented_xhtml_may_differ_only_where_an_indenter_may_change_whitespace,
         ];
         for f in functions {
             f();

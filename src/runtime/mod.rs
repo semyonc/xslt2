@@ -638,6 +638,12 @@ impl<'a, 't> Transformation<'a, 't> {
         std::mem::take(&mut self.warnings.borrow_mut())
     }
 
+    /// Whether the run's schema context is an XML Schema 1.1 one (M4g,
+    /// `SchemaContextBuilder::xsd_version`): the built-in datatypes are then XML Schema 1.1's.
+    pub(crate) fn xsd11(&self) -> bool {
+        self.schema_set.is_some_and(xsd_schema::SchemaSet::is_xsd11)
+    }
+
     /// Loads the document the resolver serves at `uri` and runs over it.
     pub fn transform_uri(&self, uri: &str) -> Result<Outcome<'t>, XsltError> {
         let id = self.load_uri(uri)?;

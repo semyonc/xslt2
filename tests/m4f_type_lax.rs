@@ -781,20 +781,27 @@ fn lax_source_validation_of_an_undeclared_root() {
 
 /// The XPath 2.0 types that §3.13 puts in scope and an XML Schema 1.0 set has no definition of
 /// (`xs:untypedAtomic`, `xs:anyAtomicType`, `xs:dayTimeDuration`, `xs:yearMonthDuration`) on an
-/// element constructor or a copy: `XSLT2-NOTIMPL` naming M4g, whose XSD 1.1 mode has them (upstream
-/// proposal C72 for 1.0) — as for `xsl:attribute` since M4d (D-d7). The catalog's
-/// `validation-0108` / `-0109` need it.
+/// element constructor or a copy were `XSLT2-NOTIMPL` naming M4g. Since M4g the first two are
+/// worked around (upstream proposal C72, `tests/m4g_xsd11_residue.rs`): validated by their XDM
+/// definitions, annotated with the nearest type of the set; the two durations stay fenced, now
+/// naming C72 (decision D-g2 as the user revised it). A copy of an element with an element child is
+/// no `xs:anyAtomicType`, a simple type.
 #[test]
-fn xpath_only_types_on_elements_stay_fenced_with_m4g() {
-    for content in [
-        r#"<out><f:x xsl:type="xs:untypedAtomic">a</f:x></out>"#,
-        r#"<out><xsl:element name="f:x" type="xs:dayTimeDuration">PT1H</xsl:element></out>"#,
-        r#"<out><xsl:copy-of select="/" type="xs:anyAtomicType"/></out>"#,
-    ] {
-        let e = error(content);
-        assert!(e.is_not_implemented(), "{content}: {e}");
-        assert!(e.message.ends_with("(M4g)"), "{content}: {}", e.message);
-    }
+fn xpath_only_types_on_elements_run_since_m4g() {
+    assert_eq!(
+        result(r#"<out><f:x xsl:type="xs:untypedAtomic">a</f:x></out>"#),
+        r#"<out><f:x xmlns:f="urn:m4f">a</f:x></out>"#
+    );
+    let e =
+        error(r#"<out><xsl:element name="f:x" type="xs:dayTimeDuration">PT1H</xsl:element></out>"#);
+    assert!(
+        e.is_not_implemented() && e.message.contains("upstream proposal C72"),
+        "{e}"
+    );
+    let e = error(
+        r#"<xsl:variable name="v"><a><b/></a></xsl:variable><out><xsl:copy-of select="$v/a" type="xs:anyAtomicType"/></out>"#,
+    );
+    assert_eq!(e.code, codes::XTTE1540, "{e}");
 }
 
 // ══ Fix round 1: the lax region ══════════════════════════════════════════════════════════════

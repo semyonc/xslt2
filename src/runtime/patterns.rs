@@ -864,19 +864,31 @@ fn node_test_matches(
         }
         return match inner {
             None => true,
+            // XPath 2.0 §2.5.4.2: "document-node(E) matches any document node that contains
+            // exactly one element node, optionally accompanied by one or more comment and
+            // processing instruction nodes, if E is an ElementTest or SchemaElementTest that
+            // matches the element node" — so a second element child, or any text child, and the
+            // test fails (`import-schema-055`; until M4g only the first element child was
+            // tested).
             Some(inner) => {
                 let mut child = nav.clone();
                 if !child.move_to_first_child() {
                     return false;
                 }
+                let mut element = None;
                 loop {
-                    if child.node_type() == DomNodeType::Element {
-                        return node_test_matches(inner, PatternAxis::Child, &child, cx);
+                    match child.node_type() {
+                        DomNodeType::Element if element.is_none() => element = Some(child.clone()),
+                        DomNodeType::Comment | DomNodeType::ProcessingInstruction => {}
+                        _ => return false,
                     }
                     if !child.move_to_next_sibling() {
-                        return false;
+                        break;
                     }
                 }
+                element.is_some_and(|element| {
+                    node_test_matches(inner, PatternAxis::Child, &element, cx)
+                })
             }
         };
     }

@@ -288,7 +288,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 let uri = match namespace {
                     Some(avt) => {
                         let uri = self.avt(avt, frame, cx)?;
-                        check_namespace_uri(&uri, codes::XTDE0835)?;
+                        check_namespace_uri(&uri, codes::XTDE0835, self.xsd11())?;
                         uri
                     }
                     None => self.static_prefix(instruction, prefix).ok_or_else(|| {
@@ -334,7 +334,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 let uri = match namespace {
                     Some(avt) => {
                         let uri = self.avt(avt, frame, cx)?;
-                        check_namespace_uri(&uri, codes::XTDE0865)?;
+                        check_namespace_uri(&uri, codes::XTDE0865, self.xsd11())?;
                         uri
                     }
                     None if prefix.is_empty() => String::new(),
@@ -381,7 +381,7 @@ impl<'a, 't> Transformation<'a, 't> {
                         "xsl:namespace must not produce a zero-length namespace URI",
                     ));
                 }
-                check_namespace_uri(&uri, codes::XTDE0905)?;
+                check_namespace_uri(&uri, codes::XTDE0905, self.xsd11())?;
                 if (prefix == "xml") != (uri == XML_NS) {
                     return Err(XsltError::new(
                         codes::XTDE0925,
@@ -791,14 +791,19 @@ impl<'a, 't> Transformation<'a, 't> {
 ///    `error-0905a` feeds `####` to `xsl:namespace` and requires XTDE0905, under
 ///    the dependency `<feature value="XSD_1.1" satisfied="false"/>`, while its
 ///    twin `error-0905b` runs the same stylesheet for an XSD 1.1 processor and
-///    requires **no** error, citing W3C bug 30180. This processor reports itself
-///    as not XSD-1.1-schema-aware, so it is `error-0905a` that applies to it.
+///    requires **no** error, citing W3C bug 30180. So the rule holds where
+///    `xs:anyURI` is XML Schema 1.0's — a basic processor and a schema-aware one
+///    with an XML Schema 1.0 context (`error-0905a`) — and not in an XML Schema
+///    1.1 context (`xsd11`, M4g's option, `SchemaContextBuilder::xsd_version`),
+///    whose `xs:anyURI` is the local `datatypes.html`'s: rule 1 alone
+///    (`error-0905b`). (`xsd-schema`'s own `xs:anyURI` validation accepts `####`
+///    in both versions.)
 ///
 /// Nothing else. `error-0835a` (`##not-a-uri`) and `error-0865a`
 /// (`http://####/`) were relaxed in 2019 — "Processors have dispensation to
 /// treat all strings as valid namespaces" — and now accept either the error or
 /// success, so they constrain nothing either way.
-fn check_namespace_uri(uri: &str, code: &str) -> Result<(), XsltError> {
+fn check_namespace_uri(uri: &str, code: &str, xsd11: bool) -> Result<(), XsltError> {
     /// The namespace `xmlns` declarations themselves nominally live in; no
     /// node may be in it (§5.7.3's XDM constraints, erratum E6).
     const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
@@ -808,7 +813,7 @@ fn check_namespace_uri(uri: &str, code: &str) -> Result<(), XsltError> {
             format!("{XMLNS_NS} cannot be used as a namespace URI"),
         ));
     }
-    if !uri.chars().all(is_xml_char) || uri.matches('#').count() > 1 {
+    if !uri.chars().all(is_xml_char) || (!xsd11 && uri.matches('#').count() > 1) {
         return Err(XsltError::new(
             code,
             format!("{uri:?} is not in the lexical space of xs:anyURI"),

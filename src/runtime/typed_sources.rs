@@ -131,11 +131,19 @@ impl<'a, 't> Transformation<'a, 't> {
             // the navigator computes a typed value from the binding and the string value when one
             // is asked for. The runtime still computes every value validity needs (facets, ID /
             // IDREF, identity constraints), so dropping the flag changes no result (review F9).
-            SchemaValidator::new(
-                set,
-                (ValidationFlags::default() | ValidationFlags::PROCESS_IDENTITY_CONSTRAINTS)
-                    - ValidationFlags::BUILD_PSVI_TYPED_VALUES,
-            )
+            //
+            // In an XML Schema 1.1 context (`SchemaContextBuilder::xsd_version`, M4g) assertions
+            // are part of the assessment too (XML Schema 1.1 Part 1 §3.4.4.2 clause 6, "Assertion
+            // Satisfied"; §3.13's implementation-defined 1.1 mode): upstream evaluates them only
+            // when asked (B9, `PROCESS_ASSERTIONS`, by buffering each asserted element's subtree),
+            // for sources and constructed trees alike — this validator serves both.
+            let mut flags = (ValidationFlags::default()
+                | ValidationFlags::PROCESS_IDENTITY_CONSTRAINTS)
+                - ValidationFlags::BUILD_PSVI_TYPED_VALUES;
+            if set.is_xsd11() {
+                flags |= ValidationFlags::PROCESS_ASSERTIONS;
+            }
+            SchemaValidator::new(set, flags)
         })
     }
 

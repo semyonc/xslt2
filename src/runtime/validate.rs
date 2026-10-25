@@ -82,7 +82,45 @@
 //! [`Boundary::Untyped`] — `strip` on an element, plus the structure rule on a document node. An
 //! attribute copied with `lax` or `type` is validated here, as `xsl:attribute`'s `lax` and `type`
 //! are; with a complex type it is XTTE1540 (String Valid needs a simple type).
+//!
+//! **Workarounds for upstream gaps** (M4g; each names the upstream item that would replace it,
+//! `xslt_doc/WAVE_B_PLAN.md`):
+//!
+//! - **C72 — XPath 2.0 types the schema set cannot validate against.** `[xsl:]type` may name
+//!   `xs:untypedAtomic`, `xs:anyAtomicType`, `xs:dayTimeDuration` or `xs:yearMonthDuration`
+//!   (§3.13 puts them in scope), but an XML Schema 1.0 set has no component for them, and an XML
+//!   Schema 1.1 set none that validates `xs:untypedAtomic`. They are [`XPathType`]s: an element
+//!   or document is a [`Boundary::XPathType`] run, assessed against the type's stand-in (the
+//!   nearest type of every set: `xs:anySimpleType`, `xs:duration`) with what the stand-in lacks
+//!   checked here — XDM 1.0 §2.6.2's patterns for the durations on the root's [schema normalized
+//!   value], the derivation rule for an `xsi:type` on the root (Structures clause 1.2.1.2.4) —, an
+//!   attribute is validated so with String Valid; any failure is XTTE1540. Under
+//!   `xs:anyAtomicType` an `xsi:type` on the root naming one of the other three takes its place
+//!   ([`Validating::xpath_root_xsi_type`]). The node is annotated with the set's own component
+//!   where there is one (1.1), otherwise with the stand-in, and the run says so once per type
+//!   where a node is validated against a stand-in (`Transformation::take_warnings`): `instance of`
+//!   and the typed value then answer for the stand-in (`element(*, xs:untypedAtomic)` false). The
+//!   two durations in a 1.0 set are **fenced** instead ([`DurationPolicy`]; decision D-g2 as the
+//!   user revised it, review R3): their stand-in's typed value, an `xs:duration`, is not ordered, so
+//!   they are `XSLT2-NOTIMPL` naming C72, pointing to the XML Schema 1.1 option. Replaced
+//!   by C72 (the components in a 1.0 set) and C92 (a validator for a 1.1 set's
+//!   `xs:untypedAtomic`).
+//! - **C92 — `xsi:type="xs:untypedAtomic"` in a 1.1 set** (review R5): no workaround — a stand-in
+//!   would fail the derivation check (`xs:anySimpleType` is not derived from `xs:anyAtomicType`),
+//!   and a source's `xsi:type` is assessed upstream — so such an `xsi:type` reaching a run is
+//!   `XSLT2-NOTIMPL` naming C92 (`Validating::start_in_run`), not a type error of the stylesheet.
+//! - **C89 — a QName / NOTATION element default that needs a namespace declaration.** Upstream
+//!   gives a host no way to declare a prefix on a start tag it already built, nor to add one to a
+//!   namespace snapshot a run already holds, and a run reveals the {value} of an element's
+//!   `default` / `fixed` value only at the element's end. So [`Validating`] holds the start tag
+//!   of every element a run's assessment gives such a value constraint — from the builder and
+//!   from the runs outside that one — until the element ends ([`Frame::deferred`]), declares the
+//!   prefix the value needs on it, and only then lets the outer runs and the builder see it
+//!   (`Validating::end_deferred`); an element child releases the hold early (the element then
+//!   takes no value). Replaced by C89 (the {value} of a declaration's value constraint read
+//!   before the element's content, so the prefix can be declared with the start tag).
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -107,7 +145,7 @@ use crate::model::Validation;
 use crate::names::{QName, XML_NS, XSD_NS};
 use crate::receiver::{
     kept_by_type, kept_of_attribute, kept_of_element, kept_of_value, xtte1550, Boundary,
-    CopyNamespaces, CopyValidation, Kept, Name, Nav, Receiver, ResultBuilder,
+    CopyNamespaces, CopyValidation, Kept, Name, Nav, Receiver, ResultBuilder, XPathType,
 };
 use crate::whitespace;
 
@@ -131,8 +169,12 @@ impl<'a, 't> Transformation<'a, 't> {
             // attribute node with the type annotation xs:untypedAtomic").
             Validation::Type(type_name) if is_xs(type_name, "untypedAtomic") => Ok((value, None)),
             Validation::Type(type_name) => {
-                let type_key = self.resolve_validation_type(type_name, "xsl:attribute")?;
-                self.attribute_against_type(type_key, &type_name.to_string(), name, value)
+                match self.resolve_validation_type(type_name, "xsl:attribute")? {
+                    Named::Key(type_key) => {
+                        self.attribute_against_type(type_key, &type_name.to_string(), name, value)
+                    }
+                    Named::XPath(xpath) => self.attribute_against_xpath_type(xpath, name, value),
+                }
             }
             Validation::Strict | Validation::Lax => {
                 let strict = matches!(validation, Validation::Strict);
@@ -260,21 +302,77 @@ impl<'a, 't> Transformation<'a, 't> {
     }
 
     /// The type `[xsl:]type` names, in the in-scope schema types (M4 plan D-7: the whole set;
-    /// XTSE1520 has checked that it exists). `xs:anyAtomicType`, `xs:untypedAtomic`,
-    /// `xs:yearMonthDuration` and `xs:dayTimeDuration` are XPath 2.0 types (§3.13 lists them as
-    /// in scope) that an XML Schema 1.0 set has no definitions of — a 1.1 set has them (M4g's
-    /// mode): not implemented, naming upstream proposal C72.
-    fn resolve_validation_type(&self, type_name: &QName, what: &str) -> Result<TypeKey, XsltError> {
+    /// XTSE1520 has checked that it exists).
+    ///
+    /// **Workaround for upstream proposal C72** (M4g): `xs:anyAtomicType`, `xs:untypedAtomic`,
+    /// `xs:yearMonthDuration` and `xs:dayTimeDuration` are XPath 2.0 types (§3.13 lists them as in
+    /// scope) that an XML Schema 1.0 set has no definitions of, and `xs:untypedAtomic` has none
+    /// an XML Schema 1.1 set can validate against (upstream: "No validator for type code
+    /// UntypedAtomic"; proposal C92). They are [`Named::XPath`]: validated by this crate against their
+    /// definitions ([`XPathType`]) and annotated with the set's own component where there is one,
+    /// otherwise with the nearest type of the set — said once per run and type in a warning
+    /// (`Transformation::take_warnings`), because `instance of` and the typed value then answer
+    /// for that nearest type. The warning is given where a node is validated against the stand-in
+    /// (`note_xpath_type`), not here: naming the type annotates nothing yet (a `copy-of` may copy
+    /// only atomic values; review R9). The two durations in a 1.0 set are refused here
+    /// ([`DurationPolicy`]: `XSLT2-NOTIMPL` naming C72).
+    fn resolve_validation_type(&self, type_name: &QName, what: &str) -> Result<Named, XsltError> {
         let set = self.validating_set()?;
-        resolve_type(set, type_name).ok_or_else(|| {
-            XsltError::not_implemented(
-                format!(
-                    "type=\"{type_name}\" on {what} with an XML Schema 1.0 schema set, which has \
-                     no definition of the type (upstream proposal C72)"
-                ),
-                "M4g",
-            )
+        if type_name.uri == XSD_NS {
+            if let Some(xpath) = XPathType::of_local_name(&type_name.local) {
+                if xpath == XPathType::UntypedAtomic || !xpath.is_exact(set) {
+                    check_xpath_type_policy(xpath, set, what)?;
+                    return Ok(Named::XPath(xpath));
+                }
+            }
+        }
+        resolve_type(set, type_name).map(Named::Key).ok_or_else(|| {
+            XsltError::internal(format!(
+                "type=\"{type_name}\" on {what}: not a type of the schema set, although the static \
+                 check (XTSE1520) found it"
+            ))
         })
+    }
+
+    /// An attribute's value validated against an XPath 2.0 type the set cannot validate against
+    /// (the C72 workaround, [`XPathType`]): String Valid (§19.2.1.2) for the type's definition —
+    /// the stand-in's validation, then the rule it lacks ([`XPathType::admits`]) on the [schema
+    /// normalized value] —, XTTE1540 otherwise; annotated as [`XPathType::annotation`] says.
+    /// (`xs:untypedAtomic` never comes here: every string is one, and an unvalidated attribute is
+    /// exactly an `xs:untypedAtomic` one.)
+    fn attribute_against_xpath_type(
+        &self,
+        xpath: XPathType,
+        name: &Name,
+        value: String,
+    ) -> Result<(String, Option<NodeSchemaBinding>), XsltError> {
+        let set = self.validating_set()?;
+        note_xpath_type(Some(&self.warnings), xpath, set, "an attribute");
+        let invalid = |reason: String| {
+            XsltError::new(
+                codes::XTTE1540,
+                format!(
+                    "the value {value:?} of the attribute {} is not valid for the type {xpath}: \
+                     {reason}",
+                    display(name)
+                ),
+            )
+        };
+        let result = validate_simple_type(&value, xpath.stand_in(set), set)
+            .map_err(|e| invalid(e.to_string()))?;
+        let normalized = result.normalized_value.unwrap_or_else(|| value.clone());
+        if !xpath.admits(&normalized) {
+            return Err(invalid(xpath_rule(xpath).to_string()));
+        }
+        Ok((
+            normalized,
+            Some(NodeSchemaBinding {
+                type_key: xpath.annotation(set),
+                element_decl: None,
+                attribute_decl: None,
+                content_type: None,
+            }),
+        ))
     }
 
     /// The boundary an element constructor (a literal result element, `xsl:element`, `xsl:copy`
@@ -294,9 +392,10 @@ impl<'a, 't> Transformation<'a, 't> {
             Validation::Strict => Boundary::Strict,
             Validation::Lax => Boundary::Lax,
             Validation::Type(type_name) if is_xs(type_name, "untyped") => Boundary::Untyped,
-            Validation::Type(type_name) => {
-                Boundary::Type(self.resolve_validation_type(type_name, what)?)
-            }
+            Validation::Type(type_name) => match self.resolve_validation_type(type_name, what)? {
+                Named::Key(type_key) => Boundary::Type(type_key),
+                Named::XPath(xpath) => Boundary::XPathType(xpath),
+            },
         })
     }
 
@@ -328,6 +427,7 @@ impl<'a, 't> Transformation<'a, 't> {
             Boundary::Lax => CopyValidation::Lax,
             Boundary::Type(type_key) => CopyValidation::Type(type_key),
             Boundary::Untyped => CopyValidation::Untyped,
+            Boundary::XPathType(xpath) => CopyValidation::XPathType(xpath),
         })
     }
 
@@ -341,12 +441,14 @@ impl<'a, 't> Transformation<'a, 't> {
     /// A [`Validating`] receiver over a new builder for a tree of this run.
     pub(crate) fn validating(&self, builder: ResultBuilder<'t>) -> Validating<'_, 't> {
         Validating::new(builder, self.schema_set, self.construction_validator())
+            .with_warnings(Some(&self.warnings))
     }
 
     /// A sequence collector of this run, whose groups validate as the trees do.
     pub(crate) fn collector(&self) -> crate::receiver::SequenceCollector<'_, 't> {
         crate::receiver::SequenceCollector::new(&self.store)
             .with_validator(self.construction_validator())
+            .with_warnings(Some(&self.warnings))
     }
 
     /// The schema set validation runs against: there is one whenever a validation other than
@@ -395,6 +497,15 @@ impl<'a, 't> Transformation<'a, 't> {
                     &name,
                     nav.value(),
                 )?;
+                out.attribute(&name, &value, binding)
+            }
+            CopyValidation::XPathType(xpath) => {
+                let name = Name::of(nav);
+                let (value, binding) = match xpath {
+                    // Every string is one; an unvalidated attribute is exactly one.
+                    XPathType::UntypedAtomic => (nav.value(), None),
+                    _ => self.attribute_against_xpath_type(xpath, &name, nav.value())?,
+                };
                 out.attribute(&name, &value, binding)
             }
             // `xs:untyped` is a complex type (XDM 1.0 §2.6.2): no attribute is String Valid
@@ -535,6 +646,119 @@ fn first_namespace_sensitive<'t>(nav: &Nav<'t>) -> Option<Nav<'t>> {
         }
     }
     None
+}
+
+/// How `[xsl:]type` (or an `xsi:type` under `xs:anyAtomicType`) naming one of the two XPath 2.0
+/// duration types is treated in an XML Schema 1.0 set. `Fence` (in force: decision D-g2 as the user
+/// revised it, review R3) refuses it where the type is resolved, `XSLT2-NOTIMPL` naming upstream
+/// proposal C72, the message pointing to the XML Schema 1.1 option, which has both types; `StandIn`
+/// (the alternative, kept so that the decision can be reversed in one place) validates by the
+/// type's XDM definition and annotates `xs:duration` — whose typed value is not ordered, so that
+/// `lt`, arithmetic, `sum` / `max` and `xsl:sort` raise type errors a conforming stylesheet does not
+/// cause. The other two XPath types (`xs:untypedAtomic`, `xs:anyAtomicType`) keep their stand-ins:
+/// their typed value is exact.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DurationPolicy {
+    #[allow(dead_code)]
+    StandIn,
+    Fence,
+}
+
+/// The policy in force (see [`DurationPolicy`]).
+const DURATIONS_IN_1_0: DurationPolicy = DurationPolicy::Fence;
+
+/// Whether `xpath` may go through the C72 workaround in `set` (see [`DurationPolicy`]); `what` names
+/// the construct for the message.
+fn check_xpath_type_policy(xpath: XPathType, set: &SchemaSet, what: &str) -> Result<(), XsltError> {
+    let duration = matches!(
+        xpath,
+        XPathType::DayTimeDuration | XPathType::YearMonthDuration
+    );
+    if duration && !xpath.is_exact(set) && DURATIONS_IN_1_0 == DurationPolicy::Fence {
+        return Err(XsltError::not_implemented(
+            format!(
+                "{xpath} on {what} in an XML Schema 1.0 schema context, whose schema set has no \
+                 definition of the type (the XML Schema 1.1 option, \
+                 SchemaContextBuilder::xsd_version, supports it natively)"
+            ),
+            "upstream proposal C72",
+        ));
+    }
+    Ok(())
+}
+
+/// The warning of the C72 workaround, once per run and type, where a node is annotated with the
+/// stand-in of `xpath` (`what`: an element, an attribute): what the annotation is instead of
+/// `xpath`, and what that changes. Nothing when the set has the type (the annotation is exact).
+fn note_xpath_type(
+    warnings: Option<&RefCell<Vec<String>>>,
+    xpath: XPathType,
+    set: &SchemaSet,
+    what: &str,
+) {
+    let Some(warnings) = warnings else {
+        return;
+    };
+    if xpath.is_exact(set) {
+        return;
+    }
+    let consequence = match xpath {
+        XPathType::UntypedAtomic => {
+            "their typed value is their string value as xs:untypedAtomic, as for the type itself, \
+             but `element(*, xs:untypedAtomic)` and `element(*, xs:anyAtomicType)` are false for \
+             them, in `instance of` and in typed patterns"
+        }
+        XPathType::AnyAtomicType => {
+            "their typed value is their string value as xs:untypedAtomic, as for the type itself, \
+             but `element(*, xs:anyAtomicType)` and `attribute(*, xs:anyAtomicType)` are false for \
+             them, in `instance of` and in typed patterns"
+        }
+        // Only with `DurationPolicy::StandIn`.
+        XPathType::DayTimeDuration | XPathType::YearMonthDuration => {
+            "their typed value is an xs:duration, which is not ordered: `lt` / `gt`, arithmetic, \
+             sum / avg / min / max and xsl:sort over it raise type errors, and `instance of` the \
+             type itself and typed patterns that name it are false for them"
+        }
+    };
+    let stand_in = match xpath {
+        XPathType::UntypedAtomic | XPathType::AnyAtomicType => "xs:anySimpleType",
+        XPathType::DayTimeDuration | XPathType::YearMonthDuration => "xs:duration",
+    };
+    let warning = format!(
+        "type \"{xpath}\" (first on {what}): the XML Schema 1.0 schema set has no definition of \
+         this XPath 2.0 type (upstream proposal C72), so the nodes validated against it are \
+         validated by its XDM 1.0 definition and annotated {stand_in}, its nearest type in the set; \
+         {consequence}. An XML Schema 1.1 schema context has the type"
+    );
+    let mut warnings = warnings.borrow_mut();
+    if !warnings
+        .iter()
+        .any(|known| known.starts_with(&format!("type \"{xpath}\" ")))
+    {
+        warnings.push(warning);
+    }
+}
+
+/// What an `[xsl:]type` attribute names, as validation uses it.
+pub(super) enum Named {
+    /// A type of the schema set.
+    Key(TypeKey),
+    /// An XPath 2.0 type the set cannot validate against: the C72 workaround ([`XPathType`]).
+    XPath(XPathType),
+}
+
+/// The rule of an XPath 2.0 type its stand-in lacks, for a message.
+fn xpath_rule(xpath: XPathType) -> &'static str {
+    match xpath {
+        XPathType::DayTimeDuration => {
+            "XDM 1.0 §2.6.2 restricts xs:duration to the pattern [^YM]*[DT].* (days, hours, \
+             minutes and seconds only)"
+        }
+        XPathType::YearMonthDuration => {
+            "XDM 1.0 §2.6.2 restricts xs:duration to the pattern [^DT]* (years and months only)"
+        }
+        XPathType::UntypedAtomic | XPathType::AnyAtomicType => "every string is valid",
+    }
 }
 
 /// The type `name` denotes in the in-scope schema types: a built-in type of the XML Schema
@@ -771,6 +995,14 @@ pub(crate) struct Validating<'v, 't> {
     /// open (its is-id and is-idrefs come from its source,
     /// [`element_copied_from`](Receiver::element_copied_from)).
     stripped_element: bool,
+    /// The frame of the element whose start tag is going through the runs, when that is not the
+    /// innermost frame — a start tag held for the C89 workaround ([`Frame::deferred`]) completed
+    /// under a document node in its content: the frame [`prefix_for`](Self::prefix_for)
+    /// declares on.
+    tag_frame: Option<usize>,
+    /// The run's warnings (`Transformation::take_warnings`), where a root annotated with the
+    /// stand-in of an XPath 2.0 type says so (the C72 workaround).
+    warnings: Option<&'v RefCell<Vec<String>>>,
 }
 
 /// What the end of an element needs to know, set while it ends with runs open.
@@ -782,6 +1014,9 @@ struct Ending {
     /// gives them (`kept`, set by `through_runs`).
     keep: bool,
     kept: Option<Kept>,
+    /// The element's start tag was held to its end (the C89 workaround, [`Frame::deferred`]): a
+    /// QName / NOTATION default may declare the prefix it needs on it.
+    declare: bool,
 }
 
 /// Namespace bindings in scope, in the shape the QName fixup asks them.
@@ -873,6 +1108,12 @@ struct Frame {
     /// child arrived (the element is then invalid for that run, and its content goes out as it
     /// came).
     held: Option<Vec<Held>>,
+    /// **The C89 workaround**: the start tag of an element that may take a `default` / `fixed`
+    /// value of type `xs:QName` / `xs:NOTATION`, held — from the builder and from the runs
+    /// outside the innermost one whose assessment gave it such a value constraint — until the
+    /// element ends (or an element child shows it cannot take the value): see
+    /// [`Validating::finish_start_tag`].
+    deferred: Option<Tag>,
 }
 
 /// What one run assessed an element's content as, for the values it gives the content.
@@ -916,6 +1157,28 @@ struct StartTag {
     attributes: Vec<(Name, String, Option<NodeSchemaBinding>)>,
 }
 
+/// A complete start tag on its way through the runs, innermost first
+/// ([`Validating::finish_start_tag`]) — or held in [`Frame::deferred`] with the runs below
+/// `seen_from` still to see it (the C89 workaround).
+struct Tag {
+    name: Name,
+    /// What the element arrived with (a copy's binding and nilled).
+    binding: Option<NodeSchemaBinding>,
+    nilled: bool,
+    xsi_type: Option<String>,
+    xsi_nil: Option<String>,
+    /// The element has no top-level declaration and some run has its parent in the lax region.
+    undeclared: bool,
+    slots: Vec<AttributeSlot>,
+    /// What each run (by index) said about the element at its start.
+    element_infos: Vec<Option<SchemaInfo>>,
+    /// The namespace snapshot the runs were given last, and the count of the element's own
+    /// declarations it was taken at.
+    snapshot: Option<(NamespaceContextSnapshot, usize)>,
+    /// The runs with this index and above have seen the start tag.
+    seen_from: usize,
+}
+
 /// One validation run: a `strict`, `lax` or `type` element boundary's, or the document-level
 /// validation of the element child of a document node (`document`: the index of that document
 /// node's frame).
@@ -935,9 +1198,23 @@ struct Run<'v> {
     /// element's start tag reaches the run, popped when it ends; always `false` in `strict` and
     /// `type` runs.
     lax_region: Vec<bool>,
+    /// What this crate found invalid about the root of a [`RunMode::XPath`] run (the C72
+    /// workaround): the rule the stand-in type lacks, an `xsi:type` the type does not admit.
+    extra: Vec<String>,
+    /// The XPath 2.0 type the root of a [`RunMode::XPath`] run is assessed against: the run's,
+    /// or the one an `xsi:type` on the root names in its place
+    /// ([`Validating::xpath_root_xsi_type`]); `None` in the other modes.
+    root_xpath: Option<XPathType>,
 }
 
 impl Run<'_> {
+    /// Whether the element whose start or end the run is processing is the run's root: the root
+    /// is the first element pushed on [`Run::lax_region`] and the last popped. (Before its push
+    /// — at its start — the stack is empty; at its end, before its pop, it holds the root alone.)
+    fn at_root(&self, started: bool) -> bool {
+        self.lax_region.len() == usize::from(started)
+    }
+
     /// Whether the next element to start in the run has its parent in the lax region — the
     /// run's root counts as such ("the element … being validated" by the `lax` instruction), so it
     /// is in the region exactly when it has no top-level declaration.
@@ -959,6 +1236,12 @@ enum RunMode {
     /// `type`: with the type as the processor-stipulated type definition —
     /// `ValidationRoot::Type`; invalid is XTTE1540.
     Type(TypeKey),
+    /// `type` naming an XPath 2.0 type the set cannot validate against — **the workaround for
+    /// upstream proposal C72** ([`XPathType`]): `ValidationRoot::Type` with the type's stand-in,
+    /// plus, for the root, what the stand-in lacks ([`XPathType::admits`], checked when the root
+    /// ends) and the type's own rule for an `xsi:type` on it ([`Validating::xpath_root_xsi_type`]);
+    /// the root is annotated [`XPathType::annotation`]. Invalid is XTTE1540.
+    XPath(XPathType),
 }
 
 impl RunMode {
@@ -969,15 +1252,17 @@ impl RunMode {
             Boundary::Strict => Some(RunMode::Strict),
             Boundary::Lax => Some(RunMode::Lax),
             Boundary::Type(type_key) => Some(RunMode::Type(type_key)),
+            Boundary::XPathType(xpath) => Some(RunMode::XPath(xpath)),
             Boundary::Strip | Boundary::Preserve | Boundary::Untyped => None,
         }
     }
 
-    fn root(self) -> ValidationRoot {
+    fn root(self, set: &SchemaSet) -> ValidationRoot {
         match self {
             RunMode::Strict => ValidationRoot::Declaration,
             RunMode::Lax => ValidationRoot::Lax,
             RunMode::Type(type_key) => ValidationRoot::Type(type_key),
+            RunMode::XPath(xpath) => ValidationRoot::Type(xpath.stand_in(set)),
         }
     }
 }
@@ -1024,7 +1309,17 @@ impl<'v, 't> Validating<'v, 't> {
             ending: None,
             stripped_attribute: None,
             stripped_element: false,
+            tag_frame: None,
+            warnings: None,
         }
+    }
+
+    /// The receiver of a transformation whose warnings are `warnings`: an element annotated with
+    /// the stand-in of an XPath 2.0 type (the C72 workaround) is said there, once per run and
+    /// type.
+    pub(crate) fn with_warnings(mut self, warnings: Option<&'v RefCell<Vec<String>>>) -> Self {
+        self.warnings = warnings;
+        self
     }
 
     /// The builder, once the stream is finished.
@@ -1071,9 +1366,10 @@ impl<'v, 't> Validating<'v, 't> {
     fn own_decider(&self, boundary: Option<Boundary>, run: Option<usize>) -> Decider {
         match (boundary, run) {
             (Some(Boundary::Strip | Boundary::Untyped), _) => Decider::Strip,
-            (Some(Boundary::Strict | Boundary::Lax | Boundary::Type(_)), Some(run)) => {
-                Decider::Run(run)
-            }
+            (
+                Some(Boundary::Strict | Boundary::Lax | Boundary::Type(_) | Boundary::XPathType(_)),
+                Some(run),
+            ) => Decider::Run(run),
             _ => Decider::Nothing,
         }
     }
@@ -1106,86 +1402,118 @@ impl<'v, 't> Validating<'v, 't> {
     ) -> Result<(String, bool), XsltError> {
         let mut changed = false;
         for index in (0..self.runs.len()).rev() {
-            let runtime = &mut self.runs[index].runtime;
-            if !text.is_empty() {
-                if whitespace::is_all_xml_whitespace(&text) {
-                    runtime.validate_whitespace(&text);
-                } else {
-                    runtime.validate_text(&text);
-                }
+            self.run_text(
+                index,
+                views.get(index),
+                &mut text,
+                &mut changed,
+                end,
+                simple,
+            )?;
+        }
+        Ok((text, changed))
+    }
+
+    /// One run's part of [`through_runs`](Self::through_runs): the run `index` validates `text`
+    /// (what the runs inside it made of it), ends the element when `end` says so, and leaves in
+    /// `text` what its validation makes of it (`view`: what it assessed the content as; `simple`
+    /// as for `through_runs`). `changed` is set when the text changed.
+    fn run_text(
+        &mut self,
+        index: usize,
+        view: Option<&View>,
+        text: &mut String,
+        changed: &mut bool,
+        end: bool,
+        simple: bool,
+    ) -> Result<(), XsltError> {
+        // The root of a run for an XPath 2.0 type (C72) ending: the rule its stand-in lacks.
+        let xpath_root = match self.runs[index].mode {
+            RunMode::XPath(_) if end && self.runs[index].at_root(true) => {
+                self.runs[index].root_xpath
             }
-            let view = views.get(index);
-            if end {
-                let info = runtime.validate_end_element();
-                let typed = (index == 0).then(|| info.typed_value.clone()).flatten();
-                let outermost = (index == 0).then(|| {
-                    (
-                        info.schema_type,
-                        info.content_type,
-                        info.validity == SchemaValidity::Valid && !info.is_nil,
-                    )
-                });
-                if let (
-                    true,
-                    Some(View::Simple {
-                        type_key,
-                        default_value,
-                    }),
-                ) = (simple, view)
-                {
-                    if info.validity == SchemaValidity::Valid && !info.is_nil {
-                        let defaulted = text.is_empty() && default_value.is_some();
-                        if let Some(default) = default_value.as_ref().filter(|_| text.is_empty()) {
-                            text = default.clone();
-                            changed |= !text.is_empty();
-                        }
-                        if let Some(normalized) = self.set.and_then(|set| {
-                            schema_normalized(info.normalized_value, &text, *type_key, set)
-                        }) {
-                            text = normalized;
-                            changed = true;
-                        }
-                        if defaulted {
-                            if let (Some(value), Some(set)) = (info.typed_value.as_ref(), self.set)
-                            {
-                                if let Some(written) =
-                                    self.element_default_written(value, &text, set)?
-                                {
-                                    text = written;
-                                    changed = true;
-                                }
+            _ => None,
+        };
+        let runtime = &mut self.runs[index].runtime;
+        if !text.is_empty() {
+            if whitespace::is_all_xml_whitespace(text) {
+                runtime.validate_whitespace(text);
+            } else {
+                runtime.validate_text(text);
+            }
+        }
+        if end {
+            let info = runtime.validate_end_element();
+            let typed = (index == 0).then(|| info.typed_value.clone()).flatten();
+            let outermost = (index == 0).then(|| {
+                (
+                    info.schema_type,
+                    info.content_type,
+                    info.validity == SchemaValidity::Valid && !info.is_nil,
+                )
+            });
+            if let (
+                true,
+                Some(View::Simple {
+                    type_key,
+                    default_value,
+                }),
+            ) = (simple, view)
+            {
+                if info.validity == SchemaValidity::Valid && !info.is_nil {
+                    let defaulted = text.is_empty() && default_value.is_some();
+                    if let Some(default) = default_value.as_ref().filter(|_| text.is_empty()) {
+                        *text = default.clone();
+                        *changed |= !text.is_empty();
+                    }
+                    if let Some(normalized) = self.set.and_then(|set| {
+                        schema_normalized(info.normalized_value, text, *type_key, set)
+                    }) {
+                        *text = normalized;
+                        *changed = true;
+                    }
+                    if defaulted {
+                        if let (Some(value), Some(set)) = (info.typed_value.as_ref(), self.set) {
+                            if let Some(written) = self.element_default_written(value, text, set)? {
+                                *text = written;
+                                *changed = true;
                             }
                         }
                     }
                 }
-                if let (Some((schema_type, content_type, valid)), Some(set)) = (outermost, self.set)
-                {
-                    if let Some(ending) = self.ending.as_mut().filter(|ending| ending.keep) {
-                        ending.kept = Some(match (valid, typed) {
-                            (false, _) => Kept::default(),
-                            (true, Some(value)) => kept_of_value(&value),
-                            (true, None) => match schema_type {
-                                Some(type_key @ TypeKey::Simple(_)) => {
-                                    kept_of_binding(type_key, &text, set)
-                                }
-                                Some(type_key) if content_type == Some(ContentType::TextOnly) => {
-                                    kept_by_type(&text, type_key, set)
-                                }
-                                _ => Kept::default(),
-                            },
-                        });
-                    }
+            }
+            if let (Some(xpath), true) = (xpath_root, info.validity == SchemaValidity::Valid) {
+                if !xpath.admits(text) {
+                    let message = format!("the value {text:?}: {}", xpath_rule(xpath));
+                    self.runs[index].extra.push(message);
                 }
             }
-            if matches!(view, Some(View::ElementOnly))
-                && !text.is_empty()
-                && whitespace::is_all_xml_whitespace(&text)
-            {
-                text.clear();
-                changed = true;
+            if let (Some((schema_type, content_type, valid)), Some(set)) = (outermost, self.set) {
+                if let Some(ending) = self.ending.as_mut().filter(|ending| ending.keep) {
+                    ending.kept = Some(match (valid, typed) {
+                        (false, _) => Kept::default(),
+                        (true, Some(value)) => kept_of_value(&value),
+                        (true, None) => match schema_type {
+                            Some(type_key @ TypeKey::Simple(_)) => {
+                                kept_of_binding(type_key, text, set)
+                            }
+                            Some(type_key) if content_type == Some(ContentType::TextOnly) => {
+                                kept_by_type(text, type_key, set)
+                            }
+                            _ => Kept::default(),
+                        },
+                    });
+                }
             }
         }
-        Ok((text, changed))
+        if matches!(view, Some(View::ElementOnly))
+            && !text.is_empty()
+            && whitespace::is_all_xml_whitespace(text)
+        {
+            text.clear();
+            *changed = true;
+        }
+        Ok(())
     }
 
     /// The text of an element that took its declaration's `default` / `fixed` value, when that is
@@ -1203,20 +1531,25 @@ impl<'v, 't> Validating<'v, 't> {
         lexical: &str,
         set: &SchemaSet,
     ) -> Result<Option<String>, XsltError> {
-        let Some(scope) = self.ending.as_ref().map(|ending| ending.scope.clone()) else {
+        let Some(ending) = self.ending.as_ref() else {
             return Ok(None);
         };
+        if ending.declare {
+            // The C89 workaround: the start tag is still held, and the runs outside this one have
+            // not seen it, so a prefix declared on it now is in every snapshot that reads the value.
+            return Ok(self
+                .qname_lexical(value, lexical, set, None)
+                .unwrap_or_default());
+        }
+        let scope = ending.scope.clone();
         self.qname_lexical(value, lexical, set, Some(&scope))
             .map_err(|uri| {
-                XsltError::not_implemented(
-                    format!(
-                        "the default or fixed value {lexical:?} of a constructed element, a QName \
-                         in the namespace {uri:?}, where no prefix is bound to that namespace: \
-                         writing it needs a namespace declaration on the element after its start \
-                         tag (upstream proposal C89)"
-                    ),
-                    "M4g",
-                )
+                XsltError::internal(format!(
+                    "the default or fixed value {lexical:?} of a constructed element, a QName in \
+                     the namespace {uri:?}, where no prefix is bound to that namespace, on an \
+                     element whose start tag was not held for it (the C89 workaround holds every \
+                     element a run gives such a value constraint)"
+                ))
             })
     }
 
@@ -1278,6 +1611,12 @@ impl<'v, 't> Validating<'v, 't> {
     /// if there was none), the comments and processing instructions in their order.
     fn settle(&mut self, held: Vec<Held>, views: &[View], end: bool) -> Result<(), XsltError> {
         let (value, changed) = self.through_runs(views, held_text(&held), end, end)?;
+        self.settled(held, value, changed)
+    }
+
+    /// Passes held content on once the runs made `value` of its text (`changed`: whether they
+    /// changed it): see [`settle`](Self::settle).
+    fn settled(&mut self, held: Vec<Held>, value: String, changed: bool) -> Result<(), XsltError> {
         if !changed {
             return self.replay(held);
         }
@@ -1327,10 +1666,97 @@ impl<'v, 't> Validating<'v, 't> {
         }
     }
 
+    /// The `xsi:type` the root of a [`RunMode::XPath`] run (the C72 workaround) is assessed with,
+    /// `value` being the one on the element:
+    ///
+    /// - none when it names the run's type itself (it changes nothing);
+    /// - for `xs:anyAtomicType`, whose base type is `xs:anySimpleType` (XDM 1.0 §2.6.2), so that
+    ///   `xs:anySimpleType` is not derived from it: `xs:anySimpleType` is an error of the run (the
+    ///   1.1 path's cvc-elt.4.2); another of the four XPath 2.0 types, all derived from
+    ///   `xs:anyAtomicType` (XDM 1.0 §2.6.2, §2.6.3) and in the in-scope schema types (§3.13), is
+    ///   handled as `[xsl:]type` naming it is: the run's root is assessed against that type
+    ///   ([`Run::root_xpath`]) and the run gets its stand-in (`xs:duration` written with the
+    ///   `xsi:type`'s own prefix; nothing for `xs:untypedAtomic`, whose stand-in is the run's) —
+    ///   subject to [`DurationPolicy`] like `[xsl:]type` (so the durations are refused in a 1.0
+    ///   set); any other type is the one given (the
+    ///   stand-in `xs:anySimpleType` checks the derivation, `start_in_run` that the type is
+    ///   atomic);
+    /// - for the other three, none, and the run is invalid — XML Schema Part 1 §3.3.4,
+    ///   Schema-Validity Assessment (Element) clause 1.2.1.2.4: an `xsi:type` replaces the
+    ///   processor-stipulated type only when "validly derived from that type definition", and no
+    ///   type of a schema set is derived from `xs:untypedAtomic` ("No predefined schema types are
+    ///   derived from xs:untypedAtomic", XPath 2.0 §2.5.1), nor, in an XML Schema 1.0 set, from
+    ///   the two durations, which it has no component for.
+    fn xpath_root_xsi_type<'x>(
+        &mut self,
+        index: usize,
+        xpath: XPathType,
+        value: &'x str,
+        set: &SchemaSet,
+    ) -> Result<Option<Cow<'x, str>>, XsltError> {
+        if self.names_xs_type(value, xpath.local_name()) {
+            return Ok(None);
+        }
+        if xpath == XPathType::AnyAtomicType {
+            if self.names_xs_type(value, "anySimpleType") {
+                self.runs[index].extra.push(format!(
+                    "xsi:type=\"{value}\" names xs:anySimpleType, the base type of \
+                     xs:anyAtomicType (XDM 1.0 §2.6.2: \"Its base type is xs:anySimpleType\"), \
+                     not a type derived from it (XML Schema Part 1 §3.3.4, Schema-Validity \
+                     Assessment (Element) clause 1.2.1.2.4)"
+                ));
+                return Ok(None);
+            }
+            let named = [
+                XPathType::UntypedAtomic,
+                XPathType::DayTimeDuration,
+                XPathType::YearMonthDuration,
+            ]
+            .into_iter()
+            .find(|named| !named.is_exact(set) && self.names_xs_type(value, named.local_name()));
+            let Some(named) = named else {
+                return Ok(Some(Cow::Borrowed(value)));
+            };
+            check_xpath_type_policy(named, set, "an xsi:type")?;
+            self.runs[index].root_xpath = Some(named);
+            return Ok(match named {
+                XPathType::UntypedAtomic | XPathType::AnyAtomicType => None,
+                XPathType::DayTimeDuration | XPathType::YearMonthDuration => {
+                    let value = whitespace::trim(value);
+                    Some(Cow::Owned(match value.split_once(':') {
+                        Some((prefix, _)) => format!("{prefix}:duration"),
+                        None => "duration".to_string(),
+                    }))
+                }
+            });
+        }
+        self.runs[index].extra.push(format!(
+            "xsi:type=\"{value}\" names no type validly derived from {xpath} (XML Schema Part 1 \
+             §3.3.4, Schema-Validity Assessment (Element) clause 1.2.1.2.4)"
+        ));
+        Ok(None)
+    }
+
+    /// Whether the QName `lexical` (an `xsi:type` value), read with the namespaces in scope at the
+    /// element whose start tag is held, is `xs:{local}`.
+    fn names_xs_type(&self, lexical: &str, local: &str) -> bool {
+        let lexical = whitespace::trim(lexical);
+        let scope = Scope::of(self.frames.iter().flat_map(|frame| frame.namespaces.iter()));
+        let (uri, name) = match lexical.split_once(':') {
+            Some((prefix, name)) => (scope.namespace_of(prefix), name),
+            None => (scope.default.as_deref(), lexical),
+        };
+        uri == Some(XSD_NS) && name == local
+    }
+
     /// How many namespace declarations the innermost container has so far (its own, then the
     /// fixup's) — the namespace snapshot changes exactly when this does.
     fn declared_here(&self) -> usize {
-        self.frames.last().map_or(0, |frame| frame.namespaces.len())
+        let frame = match self.tag_frame {
+            Some(frame) => self.frames.get(frame),
+            None => self.frames.last(),
+        };
+        frame.map_or(0, |frame| frame.namespaces.len())
     }
 
     /// The lexical form, in the scope of the element whose start tag is held (or of the element
@@ -1427,8 +1853,11 @@ impl<'v, 't> Validating<'v, 't> {
 
     /// A prefix bound to `uri` in the scope of the held start tag, or a new one declared on it.
     fn prefix_for(&mut self, uri: &str) -> String {
+        let target = self
+            .tag_frame
+            .unwrap_or_else(|| self.frames.len().saturating_sub(1));
         let mut bound: Vec<(&str, &str)> = Vec::new();
-        for frame in &self.frames {
+        for frame in &self.frames[..=target.min(self.frames.len().saturating_sub(1))] {
             for (prefix, ns) in &frame.namespaces {
                 if !prefix.is_empty() {
                     bound.retain(|(p, _)| p != prefix);
@@ -1443,7 +1872,7 @@ impl<'v, 't> Validating<'v, 't> {
             .map(|n| format!("ns_d{n}"))
             .find(|candidate| !bound.iter().any(|(p, _)| p == candidate))
             .expect("u32 is not exhausted by the prefixes of one element");
-        if let Some(frame) = self.frames.last_mut() {
+        if let Some(frame) = self.frames.get_mut(target) {
             frame.namespaces.push((prefix.clone(), uri.to_string()));
         }
         prefix
@@ -1451,20 +1880,31 @@ impl<'v, 't> Validating<'v, 't> {
 
     /// The held start tag, now complete: through every open run, innermost first — each run
     /// seeing the attribute values the runs inside it normalized and the attributes they
-    /// defaulted —, then on to the builder with the values the outermost run gave and the bindings
-    /// the decider gives.
+    /// defaulted ([`start_in_run`](Self::start_in_run)) —, then on to the builder with the values
+    /// the outermost run gave and the bindings the decider gives ([`emit_start`](Self::emit_start)).
+    ///
+    /// **The C89 workaround.** When a run's assessment gives the element a declaration with a
+    /// `default` / `fixed` value whose type may hold `xs:QName` / `xs:NOTATION` values
+    /// ([`may_take_a_namespace_sensitive_value`]), the element may end empty and take that value,
+    /// whose {value} names a namespace the element may bind no prefix to (XML Schema 1.1 Part 1
+    /// §3.3.1: an empty element "is treated as if {value constraint}.{lexical form} was used as the
+    /// content of the element"; Datatypes §3.3.18: the {value} is read with the schema's
+    /// bindings). Writing it then needs a namespace declaration on the element (the namespace
+    /// fixup Structures §3.4.5.1's Note leaves to the processor), in the tree and in the namespace
+    /// snapshot of every run outside the one that applies the value — and upstream offers no way
+    /// to add one to a start tag already built or to a snapshot already given (upstream proposal
+    /// C89). So the start tag goes no further than that run: the builder and the runs outside it
+    /// see it only when the element ends ([`Validating::end_deferred`]), with any prefix the value
+    /// needed declared, or when an element child shows that the element cannot take the value
+    /// ([`Validating::complete_deferred`]). Such an element has simple content, so what it holds
+    /// meanwhile is text, comments and processing instructions — held anyway for its simple
+    /// content ([`Frame::held`]).
     fn finish_start_tag(&mut self, start: StartTag) -> Result<(), XsltError> {
         let set = self.set.ok_or_else(|| {
             XsltError::internal("validation of a constructed element without a schema set")
         })?;
-        if let Some(frame) = self.frames.last_mut() {
-            frame.written_namespaces = frame.namespaces.len();
-        }
-        // Each run sees the element with the namespaces it has by then: those it was written
-        // with, and those the namespace fixup of the runs inside declared for their defaulted
-        // attributes (§19.2.1.3: the outer validation is of what the inner ones produced).
-        let mut snapshot = self.snapshot(set);
-        let mut snapshot_of = self.declared_here();
+        let frame = self.frames.len() - 1;
+        self.frames[frame].written_namespaces = self.frames[frame].namespaces.len();
         let xsi = |local: &str| {
             start
                 .attributes
@@ -1474,183 +1914,277 @@ impl<'v, 't> Validating<'v, 't> {
         };
         let (xsi_type, xsi_nil) = (xsi("type"), xsi("nil"));
         let runs = self.runs.len();
-        let mut slots: Vec<AttributeSlot> = start
-            .attributes
-            .into_iter()
-            .map(|(name, value, incoming)| AttributeSlot {
-                name,
-                value,
-                incoming,
-                infos: (0..runs).map(|_| None).collect(),
-                defaulted_by: None,
-            })
-            .collect();
-        let mut element_infos: Vec<Option<SchemaInfo>> = (0..runs).map(|_| None).collect();
         // §19.2.1.1, `lax`: a child of an element that is not validated is "validated, again with
         // lax validation" — validated against its top-level declaration if it has one (the lax
         // region ends there: below a declared element XML Schema's assessment decides), otherwise
         // not validated and in the region itself.
         let undeclared =
             self.runs.iter().any(Run::parent_in_lax_region) && self.declared(&start.name)?.is_err();
+        let mut tag = Tag {
+            slots: start
+                .attributes
+                .into_iter()
+                .map(|(name, value, incoming)| AttributeSlot {
+                    name,
+                    value,
+                    incoming,
+                    infos: (0..runs).map(|_| None).collect(),
+                    defaulted_by: None,
+                })
+                .collect(),
+            name: start.name,
+            binding: start.binding,
+            nilled: start.nilled,
+            xsi_type,
+            xsi_nil,
+            undeclared,
+            element_infos: (0..runs).map(|_| None).collect(),
+            snapshot: None,
+            seen_from: runs,
+        };
+        let mut hold = false;
         for index in (0..runs).rev() {
-            let run = &mut self.runs[index];
-            let in_region = undeclared && run.parent_in_lax_region();
-            run.lax_region.push(in_region);
-            // An element in the region is not validated: its `xsi:type` does not make it
-            // validated, its `xsi:nil` does not nil it (XML Schema 1.1 §3.3.1 nils only "with
-            // respect to some element declaration D"); both stay attributes of it, assessed as
-            // attributes are.
-            let (xsi_type, xsi_nil) = if in_region {
-                (None, None)
-            } else {
-                (xsi_type.as_deref(), xsi_nil.as_deref())
-            };
-            let declared = self.declared_here();
-            if declared != snapshot_of {
-                snapshot = self.snapshot(set);
-                snapshot_of = declared;
+            self.start_in_run(&mut tag, index, set)?;
+            if tag.element_infos[index]
+                .as_ref()
+                .is_some_and(|info| may_take_a_namespace_sensitive_value(info, set))
+            {
+                hold = true;
+                break;
             }
-            let run = &mut self.runs[index];
-            let mut info = run.runtime.validate_element(
-                &start.name.local,
-                &start.name.uri,
-                xsi_type,
-                xsi_nil,
-                &snapshot,
+        }
+        // What each run assessed the content as, for the values it gives the content (a run that
+        // has not seen the start tag yet: nothing, until it does).
+        let views: Vec<View> = tag
+            .element_infos
+            .iter()
+            .map(|info| view_of(info.as_ref(), set))
+            .collect();
+        if views.iter().any(|view| matches!(view, View::Simple { .. })) {
+            self.frames[frame].held = Some(Vec::new());
+        }
+        self.frames[frame].views = views;
+        if hold {
+            self.frames[frame].deferred = Some(tag);
+            return Ok(());
+        }
+        self.emit_start(tag, frame, set)
+    }
+
+    /// The run `index` sees the start tag `tag` of the element whose frame is the innermost (or
+    /// [`Validating::tag_frame`]): the element with the namespace snapshot it has by then — those
+    /// it was written with, and those the namespace fixup of the runs inside declared for their
+    /// defaulted attributes (§19.2.1.3: the outer validation is of what the inner ones produced) —,
+    /// its attributes as the runs inside made them, the end of the attributes, and the attributes
+    /// this run defaults, added to the tag.
+    fn start_in_run(
+        &mut self,
+        tag: &mut Tag,
+        index: usize,
+        set: &SchemaSet,
+    ) -> Result<(), XsltError> {
+        let runs = self.runs.len();
+        let run = &mut self.runs[index];
+        let in_region = tag.undeclared && run.parent_in_lax_region();
+        // The root of a run for an XPath 2.0 type the set cannot validate against (C72).
+        let xpath_root = match run.mode {
+            RunMode::XPath(xpath) if run.at_root(false) => Some(xpath),
+            _ => None,
+        };
+        run.lax_region.push(in_region);
+        // An element in the region is not validated: its `xsi:type` does not make it
+        // validated, its `xsi:nil` does not nil it (XML Schema 1.1 §3.3.1 nils only "with
+        // respect to some element declaration D"); both stay attributes of it, assessed as
+        // attributes are.
+        let (xsi_type, xsi_nil) = if in_region {
+            (None, None)
+        } else {
+            (tag.xsi_type.as_deref(), tag.xsi_nil.as_deref())
+        };
+        let xsi_type = match (xpath_root, xsi_type) {
+            (Some(xpath), Some(value)) => self.xpath_root_xsi_type(index, xpath, value, set)?,
+            (_, xsi_type) => xsi_type.map(Cow::Borrowed),
+        };
+        // Upstream proposal C92: an XML Schema 1.1 set has `xs:untypedAtomic` but no validator for
+        // it, so an `xsi:type` naming it would fail every assessment ("No validator for type code
+        // UntypedAtomic") whatever the derivation says — fenced rather than reported as the
+        // element's invalidity (`[xsl:]type` naming it goes through the C72 workaround instead).
+        if let Some(value) = xsi_type.as_deref() {
+            if XPathType::UntypedAtomic.is_exact(set)
+                && self.names_xs_type(value, XPathType::UntypedAtomic.local_name())
+            {
+                return Err(XsltError::not_implemented(
+                    format!(
+                        "xsi:type=\"{value}\" on the element {} validated with an XML Schema \
+                         1.1 schema set, which has no validator for xs:untypedAtomic",
+                        display(&tag.name)
+                    ),
+                    "upstream proposal C92",
+                ));
+            }
+        }
+        let xsi_type = xsi_type.as_deref();
+        let declared = self.declared_here();
+        if tag.snapshot.as_ref().is_none_or(|(_, of)| *of != declared) {
+            tag.snapshot = Some((self.snapshot(set), declared));
+        }
+        let snapshot = &tag.snapshot.as_ref().expect("taken just now").0;
+        let run = &mut self.runs[index];
+        let mut info = run.runtime.validate_element(
+            &tag.name.local,
+            &tag.name.uri,
+            xsi_type,
+            xsi_nil,
+            snapshot,
+        );
+        for slot in &mut tag.slots {
+            if slot.defaulted_by == Some(index) {
+                continue;
+            }
+            let info = self.runs[index].runtime.validate_attribute(
+                &slot.name.local,
+                &slot.name.uri,
+                &slot.value,
             );
-            for slot in &mut slots {
-                if slot.defaulted_by == Some(index) {
-                    continue;
-                }
-                let info = self.runs[index].runtime.validate_attribute(
-                    &slot.name.local,
-                    &slot.name.uri,
-                    &slot.value,
-                );
-                if info.validity == SchemaValidity::Valid {
-                    if let Some(type_key) = info.schema_type {
-                        if let Some(value) = schema_normalized(
-                            info.normalized_value.clone(),
-                            &slot.value,
-                            type_key,
-                            set,
-                        ) {
-                            slot.value = value;
-                        }
+            if info.validity == SchemaValidity::Valid {
+                if let Some(type_key) = info.schema_type {
+                    if let Some(value) =
+                        schema_normalized(info.normalized_value.clone(), &slot.value, type_key, set)
+                    {
+                        slot.value = value;
                     }
                 }
-                slot.infos[index] = Some(info);
             }
-            let after = self.runs[index].runtime.validate_end_of_attributes();
-            if after.schema_type.is_some() {
-                info.schema_type = after.schema_type;
-                info.content_type = after.content_type;
-            }
-            let _ = self.runs[index].runtime.take_deferred_attribute_results();
-            for default in self.runs[index].runtime.get_default_attributes() {
-                let local = set.name_table.resolve(default.local_name);
-                let uri = default
-                    .namespace
-                    .map(|ns| set.name_table.resolve(ns))
-                    .unwrap_or_default();
-                if slots
-                    .iter()
-                    .any(|slot| slot.name.local == local && slot.name.uri == uri)
-                {
-                    continue;
-                }
-                let prefix = if uri.is_empty() {
-                    String::new()
-                } else if uri == XML_NS {
-                    // Namespaces in XML 1.0 §3: "The prefix xml is by definition bound to the
-                    // namespace name http://www.w3.org/XML/1998/namespace … Other prefixes MUST
-                    // NOT be bound to this namespace name."
-                    "xml".to_string()
-                } else {
-                    self.prefix_for(&uri)
-                };
-                let type_key = default
-                    .type_key
-                    .unwrap_or_else(|| TypeKey::Simple(set.builtin_types().any_simple_type));
-                let mut infos: Vec<Option<SchemaInfo>> = (0..runs).map(|_| None).collect();
-                infos[index] = Some(SchemaInfo {
-                    schema_type: Some(type_key),
-                    attribute_decl: default.attribute_key,
-                    validity: SchemaValidity::Valid,
-                    is_default: true,
-                    // The {value} (read with the schema element's bindings): present for a type
-                    // whose values can be or hold QNames, and what a `strip` boundary reads is-id
-                    // and is-idrefs from.
-                    typed_value: default.typed_value.clone(),
-                    ..SchemaInfo::empty()
-                });
-                // XML Schema 1.1 §3.4.5.1 (Attribute Default Value): its [schema normalized value]
-                // is "The ·effective value constraint·'s {lexical form}", which §3.2.2.1 defines as
-                // "the ·normalized value· (with respect to the {type definition}) of the
-                // [attribute]" `default` / `fixed`. A run outside this one validates it like any
-                // other attribute.
-                let lexical = normalized(&default.value, type_key, set).unwrap_or(default.value);
-                // A QName / NOTATION in it is the schema's expanded name (the {value}, read with
-                // the schema element's bindings, Datatypes §3.3.18): written again with a prefix
-                // the element binds to its namespace, one declared on it where none is — the
-                // namespace fixup Structures §3.4.5.1's Note leaves to the processor, as upstream's
-                // typed build performs it. The outer runs see that declaration (the snapshot
-                // above), so they read the value as written.
-                let value = match default.typed_value.as_ref() {
-                    Some(typed) => match self.qname_lexical(typed, &lexical, set, None) {
-                        Ok(Some(written)) => written,
-                        _ => lexical,
-                    },
-                    None => lexical,
-                };
-                slots.push(AttributeSlot {
-                    name: Name::qualified(&prefix, &local, &uri),
-                    value,
-                    incoming: None,
-                    infos,
-                    defaulted_by: Some(index),
-                });
-            }
-            element_infos[index] = Some(info);
+            slot.infos[index] = Some(info);
         }
-
-        // What each run assessed the content as, for the values it gives the content.
-        let views: Vec<View> = element_infos
-            .iter()
-            .map(|info| match info {
-                Some(info) if !info.is_nil => match simple_content(info) {
-                    Some(type_key) => View::Simple {
-                        type_key,
-                        default_value: info.element_decl.and_then(|decl| {
-                            let decl = &set.arenas.elements[decl];
-                            decl.default_value
-                                .clone()
-                                .or_else(|| decl.fixed_value.clone())
-                        }),
-                    },
-                    None if element_only(info) => View::ElementOnly,
-                    None => View::Other,
+        let after = self.runs[index].runtime.validate_end_of_attributes();
+        if after.schema_type.is_some() {
+            info.schema_type = after.schema_type;
+            info.content_type = after.content_type;
+        }
+        // The root of a run for an XPath 2.0 type, assessed against its stand-in (no `xsi:type`
+        // replaced it): annotated with the stand-in unless the set has the type — said once per
+        // run and type (review R9: where a node is validated, not where the type is named).
+        if let (Some(_), Some(root), Some(governing)) =
+            (xpath_root, self.runs[index].root_xpath, info.schema_type)
+        {
+            if governing == root.stand_in(set) {
+                note_xpath_type(self.warnings, root, set, "an element");
+            }
+        }
+        // `xs:anyAtomicType` "includes all atomic values (and no values that are not atomic)"
+        // (XDM 1.0 §2.6.2): an `xsi:type` the stand-in `xs:anySimpleType` admits must also be
+        // atomic to be derived from it.
+        if let (Some(XPathType::AnyAtomicType), Some(governing)) = (xpath_root, info.schema_type) {
+            if governing != XPathType::AnyAtomicType.stand_in(set)
+                && !is_atomic_type(set, governing)
+            {
+                self.runs[index].extra.push(format!(
+                    "the xsi:type {} is not an atomic type, so it is not derived from \
+                     xs:anyAtomicType (XDM 1.0 §2.6.2: \"an atomic type that includes all \
+                     atomic values (and no values that are not atomic)\")",
+                    type_display(set, governing)
+                ));
+            }
+        }
+        let _ = self.runs[index].runtime.take_deferred_attribute_results();
+        for default in self.runs[index].runtime.get_default_attributes() {
+            let local = set.name_table.resolve(default.local_name);
+            let uri = default
+                .namespace
+                .map(|ns| set.name_table.resolve(ns))
+                .unwrap_or_default();
+            if tag
+                .slots
+                .iter()
+                .any(|slot| slot.name.local == local && slot.name.uri == uri)
+            {
+                continue;
+            }
+            let prefix = if uri.is_empty() {
+                String::new()
+            } else if uri == XML_NS {
+                // Namespaces in XML 1.0 §3: "The prefix xml is by definition bound to the
+                // namespace name http://www.w3.org/XML/1998/namespace … Other prefixes MUST
+                // NOT be bound to this namespace name."
+                "xml".to_string()
+            } else {
+                self.prefix_for(&uri)
+            };
+            let type_key = default
+                .type_key
+                .unwrap_or_else(|| TypeKey::Simple(set.builtin_types().any_simple_type));
+            let mut infos: Vec<Option<SchemaInfo>> = (0..runs).map(|_| None).collect();
+            infos[index] = Some(SchemaInfo {
+                schema_type: Some(type_key),
+                attribute_decl: default.attribute_key,
+                validity: SchemaValidity::Valid,
+                is_default: true,
+                // The {value} (read with the schema element's bindings): present for a type
+                // whose values can be or hold QNames, and what a `strip` boundary reads is-id
+                // and is-idrefs from.
+                typed_value: default.typed_value.clone(),
+                ..SchemaInfo::empty()
+            });
+            // XML Schema 1.1 §3.4.5.1 (Attribute Default Value): its [schema normalized value]
+            // is "The ·effective value constraint·'s {lexical form}", which §3.2.2.1 defines as
+            // "the ·normalized value· (with respect to the {type definition}) of the
+            // [attribute]" `default` / `fixed`. A run outside this one validates it like any
+            // other attribute.
+            let lexical = normalized(&default.value, type_key, set).unwrap_or(default.value);
+            // A QName / NOTATION in it is the schema's expanded name (the {value}, read with
+            // the schema element's bindings, Datatypes §3.3.18): written again with a prefix
+            // the element binds to its namespace, one declared on it where none is — the
+            // namespace fixup Structures §3.4.5.1's Note leaves to the processor, as upstream's
+            // typed build performs it. The outer runs see that declaration (the snapshot
+            // above), so they read the value as written.
+            let value = match default.typed_value.as_ref() {
+                Some(typed) => match self.qname_lexical(typed, &lexical, set, None) {
+                    Ok(Some(written)) => written,
+                    _ => lexical,
                 },
-                _ => View::Other,
-            })
-            .collect();
-        if let Some(frame) = self.frames.last_mut() {
-            if views.iter().any(|view| matches!(view, View::Simple { .. })) {
-                frame.held = Some(Vec::new());
-            }
-            frame.views = views;
+                None => lexical,
+            };
+            tag.slots.push(AttributeSlot {
+                name: Name::qualified(&prefix, &local, &uri),
+                value,
+                incoming: None,
+                infos,
+                defaulted_by: Some(index),
+            });
         }
+        tag.element_infos[index] = Some(info);
+        tag.seen_from = index;
+        Ok(())
+    }
 
-        let decider = self.decider();
+    /// The start tag `tag` of the element whose frame is `frame`, which every run has seen, on to
+    /// the builder: the element with the binding and nilled property its decider gives, its
+    /// namespace declarations (with the fixup's), its attributes with the values the outermost
+    /// run gave and the bindings the decider gives.
+    fn emit_start(&mut self, tag: Tag, frame: usize, set: &SchemaSet) -> Result<(), XsltError> {
+        let decider = self.frames[frame].decider;
         let (binding, nilled) = match decider {
             Decider::Strip => (None, false),
             Decider::Run(run) => {
-                let info = element_infos[run]
+                let info = tag.element_infos[run]
                     .as_ref()
                     .expect("every run saw the element");
                 let binding = match info.schema_type {
                     Some(type_key) => Some(NodeSchemaBinding {
-                        type_key,
+                        // The C72 workaround: the root of a run for an XPath 2.0 type, assessed
+                        // against its stand-in, is annotated with the type itself where the set
+                        // has it (`XPathType::annotation`; an `xsi:type` that replaced the
+                        // stand-in stays).
+                        type_key: match (self.runs[run].mode, self.runs[run].root_xpath) {
+                            (RunMode::XPath(_), Some(xpath))
+                                if self.runs[run].at_root(true)
+                                    && type_key == xpath.stand_in(set) =>
+                            {
+                                xpath.annotation(set)
+                            }
+                            _ => type_key,
+                        },
                         element_decl: info.element_decl,
                         attribute_decl: None,
                         content_type: info.content_type,
@@ -1663,24 +2197,19 @@ impl<'v, 't> Validating<'v, 't> {
             }
             // An element's own decider is never `Document` (its start converts it).
             Decider::Nothing | Decider::Document(_) => {
-                let own = self.frames.last().and_then(|frame| frame.boundary);
-                if own == Some(Boundary::Preserve) {
+                if self.frames[frame].boundary == Some(Boundary::Preserve) {
                     (self.any_type(), false)
                 } else {
-                    (start.binding, start.nilled)
+                    (tag.binding, tag.nilled)
                 }
             }
         };
-        self.out.start_element(&start.name, binding, nilled)?;
-        let namespaces = self
-            .frames
-            .last()
-            .map(|frame| frame.namespaces.clone())
-            .unwrap_or_default();
+        self.out.start_element(&tag.name, binding, nilled)?;
+        let namespaces = self.frames[frame].namespaces.clone();
         for (prefix, uri) in &namespaces {
             self.out.namespace(prefix, uri)?;
         }
-        for slot in slots {
+        for slot in tag.slots {
             let binding = match decider {
                 Decider::Strip => {
                     // is-id and is-idrefs as the node had them just before the strip: what the
@@ -1709,6 +2238,95 @@ impl<'v, 't> Validating<'v, 't> {
         self.out.end_start_tag()
     }
 
+    /// The C89 workaround, released early: an element child arrived in the content of the
+    /// element whose frame is `frame` and whose start tag is held ([`Frame::deferred`]), so the
+    /// element has content and takes no default or fixed value (XML Schema 1.1 Part 1 §3.3.4.3
+    /// clause 5.1: only when "E has neither element nor character [children]"). The runs that
+    /// have not seen the start tag see it now, innermost first, and the builder gets it — before
+    /// what the element held goes out ([`release_held`](Self::release_held)).
+    fn complete_deferred(&mut self, frame: usize) -> Result<(), XsltError> {
+        let Some(mut tag) = self.frames[frame].deferred.take() else {
+            return Ok(());
+        };
+        let set = self.set.ok_or_else(|| {
+            XsltError::internal("validation of a constructed element without a schema set")
+        })?;
+        self.tag_frame = Some(frame);
+        let started = (0..tag.seen_from).rev().try_for_each(|index| {
+            self.start_in_run(&mut tag, index, set)?;
+            self.frames[frame].views[index] = view_of(tag.element_infos[index].as_ref(), set);
+            Ok::<(), XsltError>(())
+        });
+        self.tag_frame = None;
+        started?;
+        if self.frames[frame]
+            .views
+            .iter()
+            .any(|view| matches!(view, View::Simple { .. }))
+            && self.frames[frame].held.is_none()
+        {
+            self.frames[frame].held = Some(Vec::new());
+        }
+        self.emit_start(tag, frame, set)
+    }
+
+    /// The C89 workaround at the end of an element whose start tag was held ([`Frame::deferred`];
+    /// the element is the innermost frame): its held content goes through every run, innermost
+    /// first, as at any element's end ([`run_text`](Self::run_text)) — except that a run that has
+    /// not seen the start tag sees it first ([`start_in_run`](Self::start_in_run)), with the
+    /// namespace declarations the element has by then: a run that gives the element its `default`
+    /// / `fixed` value writes a QName in it with a prefix declared on the element where none is
+    /// bound (`Ending::declare`), so every run after it reads the value it wrote. Then the start
+    /// tag, the content and the end go to the builder, and the runs rooted at the element end.
+    fn end_deferred(&mut self) -> Result<(), XsltError> {
+        let set = self.set.ok_or_else(|| {
+            XsltError::internal("validation of a constructed element without a schema set")
+        })?;
+        let frame = self.frames.len() - 1;
+        let mut tag = self.frames[frame]
+            .deferred
+            .take()
+            .expect("checked by the caller");
+        let held = self.frames[frame].held.take().unwrap_or_default();
+        let mut views = std::mem::take(&mut self.frames[frame].views);
+        self.ending = Some(Ending {
+            scope: Scope::default(),
+            keep: self.frames[frame].decider == Decider::Strip,
+            kept: None,
+            declare: true,
+        });
+        let mut text = held_text(&held);
+        let mut changed = false;
+        let mut through = || -> Result<(), XsltError> {
+            for index in (0..self.runs.len()).rev() {
+                if index < tag.seen_from {
+                    self.start_in_run(&mut tag, index, set)?;
+                    views[index] = view_of(tag.element_infos[index].as_ref(), set);
+                }
+                self.run_text(index, views.get(index), &mut text, &mut changed, true, true)?;
+            }
+            Ok(())
+        };
+        let through = through();
+        let ending = self.ending.take();
+        through?;
+        self.emit_start(tag, frame, set)?;
+        self.settled(held, text, changed)?;
+        // §19.2.1.1 under `strip`: "The values of the is-id and is-idrefs properties are
+        // unchanged" — those the outermost run inside the boundary gave the element.
+        if let Some(kept) = ending.and_then(|ending| ending.kept) {
+            self.out.keep_open_element(kept)?;
+        }
+        let frame = self.frames.pop().expect("an element is open");
+        for run in &mut self.runs {
+            run.lax_region.pop();
+        }
+        for _ in 0..frame.roots_runs {
+            self.end_run()?;
+        }
+        self.out.end_element()
+    }
+
     /// Ends the innermost run, rooted at the element that just ended.
     ///
     /// An element-level run: XTTE1510 for any error it reported but the two ID/IDREF ones
@@ -1726,6 +2344,8 @@ impl<'v, 't> Validating<'v, 't> {
         let failure = run.runtime.end_validation().err();
         let mut errors: Vec<ValidationError> = std::mem::take(&mut *run.errors.borrow_mut());
         errors.extend(failure);
+        // The C72 workaround's own findings (`RunMode::XPath`), after upstream's.
+        let extra = std::mem::take(&mut run.extra);
         let is_id = |error: &ValidationError| matches!(error.constraint, "cvc-id.1" | "cvc-id.2");
         let (id_errors, errors): (Vec<ValidationError>, Vec<ValidationError>) =
             errors.into_iter().partition(is_id);
@@ -1733,11 +2353,15 @@ impl<'v, 't> Validating<'v, 't> {
             1 => String::new(),
             n => format!(" (and {} more)", n - 1),
         };
-        let error = if let Some(first) = errors.first() {
+        let first = errors
+            .first()
+            .map(ToString::to_string)
+            .or_else(|| extra.first().cloned());
+        let error = if let Some(first) = first {
             // §19.2.1.3: "The validation rule "Validation Root Valid (ID/IDREF)" is not applied" to
             // element-level validation — and its errors are not the element's invalidity.
             let root = display(&run.root);
-            let more = count(errors.len());
+            let more = count(errors.len() + extra.len());
             match run.mode {
                 RunMode::Strict => XsltError::new(
                     codes::XTTE1510,
@@ -1768,6 +2392,13 @@ impl<'v, 't> Validating<'v, 't> {
                         ),
                     )
                 }
+                RunMode::XPath(xpath) => XsltError::new(
+                    codes::XTTE1540,
+                    format!(
+                        "type=\"{xpath}\": the element {root} is not valid against the type: \
+                         {first}{more}"
+                    ),
+                ),
             }
         } else {
             match (run.document, id_errors.first()) {
@@ -1849,9 +2480,12 @@ impl<'v, 't> Validating<'v, 't> {
                 "a validating boundary in a tree built without a validator",
             ));
         };
+        let set = self.set.ok_or_else(|| {
+            XsltError::internal("validation of a constructed element without a schema set")
+        })?;
         let errors = Rc::new(RefCell::new(Vec::new()));
         let mut runtime = validator.start_run(RunSink(Rc::clone(&errors)));
-        runtime.set_validation_root(mode.root());
+        runtime.set_validation_root(mode.root(set));
         self.runs.push(Run {
             runtime,
             errors,
@@ -1859,6 +2493,11 @@ impl<'v, 't> Validating<'v, 't> {
             document,
             mode,
             lax_region: Vec::new(),
+            extra: Vec::new(),
+            root_xpath: match mode {
+                RunMode::XPath(xpath) => Some(xpath),
+                _ => None,
+            },
         });
         Ok(self.runs.len() - 1)
     }
@@ -1958,6 +2597,70 @@ fn attribute_binding(info: &SchemaInfo) -> Option<NodeSchemaBinding> {
     })
 }
 
+/// What a run that said `info` about an element at its start assessed its content as
+/// ([`View`]); nothing for a run that has not seen the start (`None`) or nilled the element.
+fn view_of(info: Option<&SchemaInfo>, set: &SchemaSet) -> View {
+    match info {
+        Some(info) if !info.is_nil => match simple_content(info) {
+            Some(type_key) => View::Simple {
+                type_key,
+                default_value: info.element_decl.and_then(|decl| {
+                    let decl = &set.arenas.elements[decl];
+                    decl.default_value
+                        .clone()
+                        .or_else(|| decl.fixed_value.clone())
+                }),
+            },
+            None if element_only(info) => View::ElementOnly,
+            None => View::Other,
+        },
+        _ => View::Other,
+    }
+}
+
+/// Whether the element a run said `info` about at its start may take a `default` / `fixed` value
+/// that is or holds `xs:QName` / `xs:NOTATION` values (the C89 workaround holds its start tag): not
+/// nilled, governed by a declaration with a value constraint, simple content whose type may hold
+/// such values (`namespace_sensitive`; for a complex type with simple content its {content type}'s
+/// simple type definition, and when that is not known, conservatively yes).
+fn may_take_a_namespace_sensitive_value(info: &SchemaInfo, set: &SchemaSet) -> bool {
+    if info.is_nil {
+        return false;
+    }
+    let Some(decl) = info
+        .element_decl
+        .and_then(|decl| set.arenas.elements.get(decl))
+    else {
+        return false;
+    };
+    if decl.default_value.is_none() && decl.fixed_value.is_none() {
+        return false;
+    }
+    match simple_content(info) {
+        Some(type_key @ TypeKey::Simple(_)) => namespace_sensitive(set, type_key, 0),
+        Some(TypeKey::Complex(key)) => set
+            .arenas
+            .complex_types
+            .get(key)
+            .and_then(|def| def.resolved_simple_content_type)
+            .is_none_or(|content| namespace_sensitive(set, content, 0)),
+        None => false,
+    }
+}
+
+/// Whether `type_key` is an atomic simple type (not `xs:anySimpleType`, not a list or union).
+fn is_atomic_type(set: &SchemaSet, type_key: TypeKey) -> bool {
+    let TypeKey::Simple(key) = type_key else {
+        return false;
+    };
+    key != set.builtin_types().any_simple_type
+        && set
+            .arenas
+            .simple_types
+            .get(key)
+            .is_some_and(|def| def.variety == SimpleTypeVariety::Atomic)
+}
+
 /// Whether the type a run assessed an element with is complex with element-only or empty content —
 /// the elements whose whitespace text XDM 1.0 §6.7.4 makes no text node ([`View::ElementOnly`]).
 /// (The typed source build applied the same rule in this crate until upstream's typed build took
@@ -2041,6 +2744,7 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
             transparent,
             views: Vec::new(),
             held: None,
+            deferred: None,
         });
         self.out.start_document()
     }
@@ -2083,7 +2787,12 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
             // The element ends the text node before it; an element child of an element held for
             // its simple content makes it invalid, and what it held goes out as it came.
             match self.content_frame() {
-                Some(frame) if self.frames[frame].held.is_some() => self.release_held(frame)?,
+                Some(frame) if self.frames[frame].held.is_some() => {
+                    // A start tag held for the C89 workaround goes out first: the element has
+                    // content, so it takes no default or fixed value.
+                    self.complete_deferred(frame)?;
+                    self.release_held(frame)?
+                }
                 _ => self.flush_pending()?,
             }
         }
@@ -2109,7 +2818,7 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
             };
             let declared = match mode {
                 RunMode::Strict => self.declared(name)?,
-                RunMode::Lax | RunMode::Type(_) => Ok(()),
+                RunMode::Lax | RunMode::Type(_) | RunMode::XPath(_) => Ok(()),
             };
             match declared {
                 Ok(()) => {
@@ -2156,6 +2865,7 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
             transparent: false,
             views: Vec::new(),
             held: None,
+            deferred: None,
         });
         if self.runs.is_empty() {
             let (built, nilled) = match decider {
@@ -2347,6 +3057,13 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
             self.frames.pop().expect("an element is open");
             return self.out.end_element();
         }
+        if self
+            .frames
+            .last()
+            .is_some_and(|frame| frame.deferred.is_some())
+        {
+            return self.end_deferred();
+        }
         let scope = {
             let (frame, outer) = self.frames.split_last().expect("an element is open");
             Scope::of(
@@ -2361,6 +3078,7 @@ impl<'t> Receiver<'t> for Validating<'_, 't> {
             scope,
             keep: frame.decider == Decider::Strip,
             kept: None,
+            declare: false,
         });
         let content = match frame.held {
             Some(held) => self.settle(held, &frame.views, true),

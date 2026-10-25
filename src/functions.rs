@@ -1337,7 +1337,9 @@ impl TypeScope<'_> {
             }
             Self::Schema(set) => {
                 if namespace == crate::names::XSD_NS {
+                    // In an XML Schema 1.1 context, also the Part 2 1.1 types in scope (§3.13).
                     crate::schema::built_in_has_constructor(local)
+                        || crate::schema::xsd11_part_2_addition(set, local).is_some()
                 } else {
                     crate::schema::has_user_constructor(set, namespace, local)
                 }

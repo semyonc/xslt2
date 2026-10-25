@@ -515,34 +515,21 @@ fn a_document_element_that_is_not_a_stylesheet_is_xtse0150() {
     );
 }
 
+/// The stand-in is a UCA collation URI in a build without the `icu-collation` feature (M2k's
+/// fence, `tests/m2k_feature_off.rs`): the last `XSLT2-NOTIMPL` left. It was `xsl:type` naming an
+/// XPath 2.0 type an XML Schema 1.0 set has no definition of until M4g worked around upstream C72,
+/// `xsl:validation="lax"` until M4f implemented it, `xsl:validation="strict"` until M4d
+/// implemented it, a typed pattern until M4c implemented typed patterns, `xsl:import-schema` until
+/// M4a made it XTSE1650 for a basic processor, an extension instruction without `xsl:fallback`
+/// until M3e made it XTDE1450, `format-date()` until M3d implemented it, and `xsl:number` until
+/// M3c. With the feature, nothing this build reaches is unimplemented.
+#[cfg(not(feature = "icu-collation"))]
 #[test]
 fn a_not_implemented_construct_carries_the_internal_code_not_a_panic() {
-    // `xsl:type` naming an XPath 2.0 type an XML Schema 1.0 set has no
-    // definition of is M4g's, and only a schema-aware processor accepts
-    // `xsl:type` (§21.1: a basic one raises XTSE1660). The stand-in was
-    // `xsl:validation="lax"` until M4f implemented it,
-    // `xsl:validation="strict"` until M4d implemented it, a
-    // typed pattern until M4c implemented typed patterns,
-    // `xsl:import-schema` until M4a made it XTSE1650 for a basic processor, an
-    // extension instruction without `xsl:fallback` until M3e made it XTDE1450,
-    // `format-date()` until M3d implemented it, and `xsl:number` until M3c.
     let s = sheet(
-        r#"<xsl:template match="/"><out xsl:type="xs:dayTimeDuration">PT1H</out></xsl:template>"#,
+        r#"<xsl:template match="/"><out><xsl:for-each select="doc"><xsl:sort select="." collation="http://www.w3.org/2013/collation/UCA"/><xsl:value-of select="."/></xsl:for-each></out></xsl:template>"#,
     );
-    let functions = XsltFunctions::new();
-    let context = xslt2::SchemaContext::builder()
-        .stylesheet_str(&s, "urn:test:sheet.xsl", &functions)
-        .and_then(|b| b.build())
-        .expect("a stylesheet with no xsl:import-schema has an empty context");
-    let compiled = Compiler::schema_aware(&context, &functions)
-        .compile_str(&s, "urn:test:sheet.xsl")
-        .expect("a schema-aware processor compiles xsl:type");
-    let arena = Bump::new();
-    let e = compiled
-        .transformation(&arena, TransformOptions::default())
-        .transform_source("urn:test:in.xml", "<doc/>")
-        .map(|_| ())
-        .unwrap_err();
+    let e = transform(&s, "<doc/>").unwrap_err();
     assert!(e.is_not_implemented(), "{e}");
     assert_eq!(e.code, "XSLT2-NOTIMPL");
 }

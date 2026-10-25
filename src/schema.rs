@@ -27,8 +27,16 @@
 //!   compiler's [`Resolver`]; a document that cannot be read is no error ("it is not intrinsically an
 //!   error if no schema document can be located"), one that is not a valid schema is XTSE0220, and so
 //!   is one whose target namespace is not the declaration's (the synthetic `xs:import` names it,
-//!   src-import); a location of the XML or XLink namespace that cannot be read falls back to the
-//!   copy of its schema this processor knows (below);
+//!   src-import) — unless the set already holds a schema document of the declared namespace (a
+//!   host schema's, or an earlier import's): the location is then a hint that did not lead to the
+//!   namespace's schema and is passed over, `found()` false (M4g, decision D-g11; XML Schema 1.1
+//!   Part 1 §4.2.6.2: "it is open to applications to ignore all but the first `<import>` for a given
+//!   namespace, regardless of the ·actual value· of schemaLocation"). The pass-over is
+//!   order-dependent — an earlier import counts only when it was loaded first — and a document an
+//!   earlier import's own `xs:import` brings in does not count (directives are resolved after every
+//!   declaration is loaded); each location passed over, and each that cannot be read, is a
+//!   [`SchemaContext::warnings`] entry. A location of the XML or XLink namespace that cannot be read
+//!   falls back to the copy of its schema this processor knows (below);
 //! * by namespace only — the XML namespace's schema (`xml.xsd`) and XLink's, which `xsd-schema`
 //!   embeds; the XML Schema instance namespace's built-in attribute declarations; any other
 //!   namespace is found when a host schema (or a document one of the set's directives loaded) has it
@@ -43,7 +51,14 @@
 //!
 //! Every component of the set is in scope for the whole stylesheet (D-7: lenient — the engine has no
 //! namespace filter, §3.13 allows implementation-defined additions); XTSE1520 and `type-available` read
-//! the same set.
+//! the same set. So the transitive-import rule of §3.14 ("These rules do not cause names to be
+//! imported transitively … The stylesheet must import all the namespaces containing names that it
+//! actually references") is not enforced: a name a schema document of the set defines is usable
+//! although no `xsl:import-schema` names its namespace — an implementation-defined addition to the
+//! in-scope schema components (§3.13), documented, never an error a conforming stylesheet meets.
+//!
+//! **XML Schema version** (M4g, D-3): 1.0 unless [`SchemaContextBuilder::xsd_version`] asks for 1.1,
+//! for every schema document of the context alike.
 //!
 //! **Locations.** `xsd-schema`'s resolver treats a `file:` base URI as a plain path (WAVE_B C15a), so a
 //! `file:` URI is handed to it as the file-system path it names, and `ResolverLoader` turns a path
@@ -66,7 +81,7 @@ use xsd_schema::parser::SourceLocation;
 use xsd_schema::{
     get_embedded_schema, has_embedded_schema, parse_schema_only, process_loaded_schemas,
     DocumentId, EmbeddedLoader, ResolverConfig, SchemaError, SchemaLoader, SchemaResolver,
-    SchemaResult, SchemaSet, TypeKey,
+    SchemaResult, SchemaSet, TypeKey, XsdVersion,
 };
 
 use crate::error::{codes, Location, XsltError};
@@ -128,6 +143,8 @@ pub struct SchemaContext {
     imports: Vec<SchemaImport>,
     /// The locations of the host schemas, in the order they were given.
     hosts: Vec<String>,
+    /// See [`SchemaContext::warnings`].
+    warnings: Vec<String>,
 }
 
 impl std::fmt::Debug for SchemaContext {
@@ -149,10 +166,17 @@ impl SchemaContext {
     /// supports: All other built-in types defined in \[XML Schema Part 2\]"), XSD 1.0 (M4 plan D-3).
     /// Enough for a stylesheet without `xsl:import-schema`.
     pub fn new() -> Self {
+        Self::with_version(XsdVersion::V1_0)
+    }
+
+    /// A context with the built-in types of XML Schema `version` only — see
+    /// [`SchemaContextBuilder::xsd_version`] for what XML Schema 1.1 changes.
+    pub fn with_version(version: XsdVersion) -> Self {
         Self {
-            set: SchemaSet::new(),
+            set: SchemaSet::with_version(version),
             imports: Vec::new(),
             hosts: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -162,7 +186,14 @@ impl SchemaContext {
             resolver: Arc::new(FileResolver),
             plans: Vec::new(),
             hosts: Vec::new(),
+            version: XsdVersion::V1_0,
         }
+    }
+
+    /// The version of XML Schema the context's set implements: 1.0 unless the builder was asked for
+    /// 1.1 ([`SchemaContextBuilder::xsd_version`]).
+    pub fn xsd_version(&self) -> XsdVersion {
+        self.set.xsd_version
     }
 
     /// The compiled schema set.
@@ -187,6 +218,17 @@ impl SchemaContext {
     /// import precedence (§3.14), in the order of the module graph's precedence levels.
     pub fn imports(&self) -> &[SchemaImport] {
         &self.imports
+    }
+
+    /// What building the context did on its own that the host may want to know, in the order it
+    /// happened: each `schema-location` it did not load from — one that could not be read (§3.14:
+    /// "it is not intrinsically an error if no schema document can be located"), and one passed
+    /// over because the set already held a schema document of the declared namespace and the
+    /// document at the location has another target namespace (decision D-g11; Structures 1.1
+    /// §4.2.6.2 permits ignoring such a hint, "but such a strategy risks missing useful information
+    /// when new schemaLocations are offered"). The import's [`SchemaImport::found`] is then false.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// Whether the context satisfies `planned`: it loaded an identical import (same namespace, same
@@ -214,6 +256,44 @@ impl SchemaContext {
     /// Whether a schema document with the target namespace `namespace` is loaded in the set.
     fn holds_loaded_namespace(&self, namespace: Option<&str>) -> bool {
         has_document_of(&self.set, namespace)
+    }
+}
+
+/// The `targetNamespace` of the schema document `text` (`Some(None)`: none), read off its document
+/// element without loading it into a set; `None` when it does not parse.
+fn target_namespace_of(text: &str) -> Option<Option<String>> {
+    let arena = Bump::new();
+    let names = NameTable::new();
+    let doc =
+        xsd_schema::document::BufferDocument::from_reader_default(text.as_bytes(), &arena, &names)
+            .ok()?;
+    let mut nav = doc.create_navigator();
+    if !nav.move_to_first_child() {
+        return None;
+    }
+    while nav.node_type() != DomNodeType::Element {
+        if !nav.move_to_next_sibling() {
+            return None;
+        }
+    }
+    if nav.move_to_first_attribute() {
+        loop {
+            if nav.local_name() == "targetNamespace" && nav.namespace_uri().is_empty() {
+                return Some(Some(nav.value()).filter(|ns| !ns.is_empty()));
+            }
+            if !nav.move_to_next_attribute() {
+                break;
+            }
+        }
+    }
+    Some(None)
+}
+
+/// ` at <module>:<line>:<column>` for a warning about the declaration at `at`.
+fn declared_at(at: &Location) -> String {
+    match &at.module_uri {
+        Some(module) => format!(" at {module}:{}:{}", at.line, at.column),
+        None => String::new(),
     }
 }
 
@@ -294,6 +374,7 @@ pub struct SchemaContextBuilder {
     resolver: Arc<dyn Resolver>,
     plans: Vec<PlannedImport>,
     hosts: Vec<HostSchema>,
+    version: XsdVersion,
 }
 
 /// A schema document the host adds to the context (§3.13's implementation-defined mechanism).
@@ -317,6 +398,7 @@ impl std::fmt::Debug for SchemaContextBuilder {
         f.debug_struct("SchemaContextBuilder")
             .field("imports", &self.plans.len())
             .field("host_schemas", &self.hosts.len())
+            .field("xsd_version", &self.version)
             .finish_non_exhaustive()
     }
 }
@@ -326,6 +408,34 @@ impl SchemaContextBuilder {
     /// will be compiled with (default: [`FileResolver`]).
     pub fn with_resolver(mut self, resolver: Arc<dyn Resolver>) -> Self {
         self.resolver = resolver;
+        self
+    }
+
+    /// The version of XML Schema the context's one set implements (M4 plan D-3: one version per
+    /// context; default [`XsdVersion::V1_0`]).
+    ///
+    /// XSLT 2.0 refers to XML Schema 1.0 — its normative references name "XML Schema Part 1:
+    /// Structures Second Edition" and "XML Schema Part 2: Datatypes Second Edition" —, so 1.0 is the
+    /// default. [`XsdVersion::V1_1`] is an implementation-defined extension, one of the mechanisms
+    /// §3.13 allows ("An implementation may define mechanisms that allow additional schema
+    /// components to be added to the in-scope schema components for the stylesheet"): the set is
+    /// built as an XML Schema 1.1 set (`SchemaSet::xsd11()`), so
+    ///
+    /// - every schema document the context loads — imported by location, by namespace, inline, or
+    ///   a host schema — is read as an XML Schema 1.1 document (`xs:assert`, `xs:alternative`,
+    ///   `xs:openContent`, … are accepted), and a 1.0 document as 1.1 reads it;
+    /// - validation, of source documents (`TransformOptions::source_validation`) and of constructed
+    ///   nodes (`[xsl:]validation`, `[xsl:]type`), is XML Schema 1.1 assessment, assertions
+    ///   included (`ValidationFlags::PROCESS_ASSERTIONS`);
+    /// - the built-in types are XML Schema 1.1's, which define the XPath 2.0 types of §3.13
+    ///   (`xs:anyAtomicType`, `xs:dayTimeDuration`, `xs:yearMonthDuration`; and `xs:untypedAtomic`,
+    ///   which this crate validates itself, upstream lacking a validator for it: proposal C92) and add
+    ///   `xs:dateTimeStamp`, so `[xsl:]type` naming one of them needs no workaround (in a 1.0 set
+    ///   it does: upstream proposal C72, see `Transformation::take_warnings`).
+    ///
+    /// The XPath engine is the same in both versions.
+    pub fn xsd_version(mut self, version: XsdVersion) -> Self {
+        self.version = version;
         self
     }
 
@@ -408,14 +518,15 @@ impl SchemaContextBuilder {
         Ok(self)
     }
 
-    /// Loads the imports into one schema set (XSD 1.0, D-3) and compiles it.
+    /// Loads the imports into one schema set (XSD 1.0 unless [`xsd_version`](Self::xsd_version)
+    /// says otherwise, D-3) and compiles it.
     ///
     /// > \[ERR XTSE0220\] It is a static error if the synthetic schema document does not satisfy the
     /// > constraints described in \[XML Schema Part 1\] (section 5.1, Errors in Schema Construction
     /// > and Structure). This includes, without loss of generality, conflicts such as multiple
     /// > definitions of the same name.
     pub fn build(self) -> Result<SchemaContext, XsltError> {
-        Loading::new(Arc::clone(&self.resolver)).run(self.hosts, self.plans)
+        Loading::new(Arc::clone(&self.resolver), self.version).run(self.hosts, self.plans)
     }
 }
 
@@ -941,6 +1052,8 @@ struct Loading {
     /// loaded under (what a schema error's location names), with the declaration that loaded each
     /// (`None` for a host schema).
     loaded: HashMap<String, (DocumentId, Option<Location>)>,
+    /// [`SchemaContext::warnings`].
+    warnings: Vec<String>,
 }
 
 /// How a line of an inline slice maps back to its module.
@@ -976,12 +1089,13 @@ impl InlineMap {
 }
 
 impl Loading {
-    fn new(resolver: Arc<dyn Resolver>) -> Self {
+    fn new(resolver: Arc<dyn Resolver>, version: XsdVersion) -> Self {
         Self {
             resolver,
-            set: SchemaSet::new(),
+            set: SchemaSet::with_version(version),
             inline: Vec::new(),
             loaded: HashMap::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -1079,6 +1193,7 @@ impl Loading {
             set: self.set,
             imports,
             hosts: host_locations,
+            warnings: self.warnings,
         };
         for index in 0..context.imports.len() {
             let import = &context.imports[index];
@@ -1157,9 +1272,53 @@ impl Loading {
                         return self.load_namespace(namespace, at, pending);
                     }
                     // §3.14: "it is not intrinsically an error if no schema document can be located
-                    // for a namespace identified in an xsl:import-schema declaration".
-                    Err(_) => return Ok(false),
+                    // for a namespace identified in an xsl:import-schema declaration" — said, though.
+                    Err(why) => {
+                        self.warnings.push(format!(
+                            "xsl:import-schema{}: the schema document at {uri} could not be read \
+                             ({why}), so nothing was loaded from it",
+                            declared_at(at)
+                        ));
+                        return Ok(false);
+                    }
                 };
+                // A hint that does not lead to the namespace's schema (M4g, decision D-g11): when the
+                // set already holds a schema document of the declared namespace — a host schema's
+                // (§3.13's mechanism, loaded first), or an earlier import's — a document of another
+                // target namespace at the location is passed over (`found()` false), not XTSE0220.
+                // §3.14: "The schema-location attribute is a URI Reference that gives a hint
+                // indicating where a schema document … may be found"; XML Schema 1.1 Part 1
+                // §4.2.6.2: "It is not an error for the application schema component reference
+                // strategy to fail", and "Given that the schemaLocation [attribute] is only a
+                // hint, it is open to applications to ignore all but the first <import> for a
+                // given namespace, regardless of the ·actual value· of schemaLocation". Where
+                // nothing else supplies the namespace the document is the import's referent, and
+                // its other target namespace stays XTSE0220 (clause 3.1, below).
+                //
+                // What this leaves out (documented, R8): the rule is order-dependent — an earlier
+                // import counts only when it was loaded first —, and a document an earlier import's
+                // own `xs:import` brings in does not count (the directives are resolved after every
+                // declaration is loaded). The pass-over is said in a warning.
+                if has_document_of(&self.set, namespace.as_deref()) {
+                    if let Some(found) = target_namespace_of(&text) {
+                        if found != *namespace {
+                            let describe = |ns: &Option<String>| match ns {
+                                Some(ns) => format!("the namespace {ns:?}"),
+                                None => "no namespace".to_string(),
+                            };
+                            self.warnings.push(format!(
+                                "xsl:import-schema{}: the document at {uri} has {} as its target \
+                                 namespace, but the declaration names {}, of which the schema set \
+                                 already holds a schema document; the location was passed over, \
+                                 and nothing was loaded from it",
+                                declared_at(at),
+                                describe(&found),
+                                describe(namespace)
+                            ));
+                            return Ok(false);
+                        }
+                    }
+                }
                 let id = parse_schema_only(text.as_bytes(), &location, &mut self.set)
                     .map_err(|e| self.xtse0220(&e, Some(at)))?;
                 self.set.mark_loaded(location.clone(), id);
@@ -1346,17 +1505,44 @@ pub(crate) fn built_in_has_constructor(local: &str) -> bool {
         )
 }
 
+/// The built-in types XML Schema 1.1 Part 2 defines beyond XSLT 2.0's list ([`built_in_type`]):
+/// Datatypes 1.1 §3.4.28 `dateTimeStamp` (its other additions — `anyAtomicType`, `dayTimeDuration`,
+/// `yearMonthDuration` — are XPath 2.0's types, on the list already). `xs:error` is not one: it is
+/// a Structures type (Structures 1.1 §3.16.7.3: "A Simple Type Definition for ·xs:error· is present
+/// in every schema by definition"), and §3.13 adds only "All other built-in types defined in \[XML
+/// Schema Part 2\]".
+const XSD11_PART_2_ADDITIONS: [&str; 1] = ["dateTimeStamp"];
+
 /// The type the expanded name `{uri}local` denotes in the in-scope schema types of a schema-aware
 /// stylesheet compiled against `set`: a built-in one, or one of the set (D-7: the whole set).
+///
+/// §3.13: "A schema-aware XSLT processor additionally supports: All other built-in types defined in
+/// \[XML Schema Part 2\]" — in an XML Schema 1.1 context (M4g, an implementation-defined mechanism
+/// of the same section) that Part 2 is 1.1's, whose built-in types the set has: `xs:dateTimeStamp`
+/// beyond XSLT 2.0's list ([`XSD11_PART_2_ADDITIONS`]; not `xs:error`, a Structures type).
 pub(crate) fn in_scope_type(set: &SchemaSet, uri: &str, local: &str) -> Option<TypeKind> {
     if uri == XSD_NS {
-        return built_in_type(local);
+        return built_in_type(local).or_else(|| {
+            xsd11_part_2_addition(set, local)?;
+            Some(TypeKind::Simple)
+        });
     }
     let key = lookup_type(set, uri, local)?;
     Some(match key {
         TypeKey::Simple(_) => TypeKind::Simple,
         TypeKey::Complex(_) => TypeKind::Complex,
     })
+}
+
+/// The built-in type `xs:{local}` of an XML Schema 1.1 `set` that Part 2 1.1 adds to XSLT 2.0's
+/// list ([`XSD11_PART_2_ADDITIONS`]): all are atomic and instantiable, so each has a constructor
+/// function (XPath 2.0 §3.10.4).
+pub(crate) fn xsd11_part_2_addition(set: &SchemaSet, local: &str) -> Option<TypeKey> {
+    if !set.is_xsd11() || !XSD11_PART_2_ADDITIONS.contains(&local) {
+        return None;
+    }
+    let names = &set.name_table;
+    set.get_built_in_type_by_qname(names.get(XSD_NS), names.get(local)?)
 }
 
 /// Whether `{uri}local` names an atomic type of `set` outside the XML Schema namespace — one with a

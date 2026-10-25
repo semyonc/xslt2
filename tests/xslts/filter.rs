@@ -135,6 +135,20 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     ("regex-classes-036", X_REGEX_CLASSES_UNICODE), // Zs
     // ── decl/character-map: XSLT 3.0 serialization in a stylesheet labelled XSLT20+ ──
     ("character-map-026", "a version=\"3.0\" stylesheet labelled XSLT20+: xsl:output method=\"adaptive\" is XTSE1570 in XSLT 2.0 (§20: an unprefixed method \"must be one of xml, html, xhtml, or text\"), the template is named xsl:initial-template (XTSE0080: \"It is a static error to use a reserved namespace in the name of a named template\"), and map { … } is an XPath 3.1 map constructor, absent from the XPath 2.0 grammar; the expected adaptive serialization cannot arise from an XSLT 2.0 processor"),
+    // ── M4g: schema-aware cases whose expected result is XSLT 3.0's, pins an implementation-dependent choice, or (attribute-1506, -1507) is wrong in both versions — XSLT 3.0 §25.4.1 also says "the transformation fails [see ERR XTTE1510], [see ERR XTTE1512]" (user decision pending, one entry each) ──
+    ("attribute-1506", X_XSI_TYPE_IS_NO_DECLARATION),
+    ("attribute-1507", X_XSI_TYPE_IS_NO_DECLARATION),
+    ("import-schema-087", X_XTTE1535),
+    ("import-schema-088", X_XTTE1535),
+    ("import-schema-137", "two type errors arise — XTTE1512 for z:familyname, whose xsl:validation=\"strict\" finds no top-level declaration, and XTTE1510 for the z:person that contains it — and the case accepts only XTTE1510; §2.9: \"If more than one error arises, an implementation is not required to signal any errors other than the first one that it detects. It is implementation-dependent which of the several errors is signaled\" (this processor reports the inner one first, §19.2.1.1: \"the validation requested for a child element or attribute node is applied before the validation requested for its parent element\"; M4 plan D-10)"),
+    ("match-287", "version=\"2.0\" stylesheet that evaluates $content || 'TM': XPath 2.0 has no `||` operator (A.1 EBNF), so the attribute does not match the production Expr — XPST0003, a static error (XSLT 2.0 §5.3: \"it is a static error if the value of such an attribute … does not match the XPath production Expr\")"),
+    ("type-functions-0401", "the stylesheet writes two <xslt:text>&#xA;</xslt:text> newlines inside <out>, which §11.4.2 keeps (\"A text node that is an immediate child of an xsl:text instruction will not be stripped from the stylesheet tree, even if it consists entirely of whitespace\"); the expected assert-xml <out><e1>…</e1><e2>…</e2></out> has neither, and assert-xml compares canonical forms, whitespace text included (catalog schema), so no conformant processor produces it"),
+    ("validation-0214", X_ITEM_SEPARATOR),
+    ("validation-0215", X_ITEM_SEPARATOR),
+    ("validation-1603", X_IMPLICIT_RESULT_STRIP),
+    ("validation-1604", X_IMPLICIT_RESULT_STRIP),
+    ("validation-1605", X_IMPLICIT_RESULT_STRIP),
+    ("strip-space-009", "XSD_1.1: the case expects the whitespace text of <p> kept because an ancestor's type has an xs:assert, but <p> lies under a skip wildcard (untyped) and the stylesheet says <xsl:strip-space elements=\"p\"/>; XSLT 2.0 §4.4 keeps whitespace only when \"The element name of the parent of the text node is in the set of whitespace-preserving element names\" or under xml:space=\"preserve\", and for elements whose \"type annotation … is a simple type or a complex type with simple content\" — \"Otherwise, the whitespace text node is stripped\" (XSLT 3.0 §4.4.2 has the same rules; neither mentions assertions)"),
     // ── misc/unicode-90: the sixteen version="3.0" cases (the other 1,444 are 2.0) ──
     ("unicode90-001", X_UNICODE90),
     ("unicode90-002", X_UNICODE90),
@@ -160,6 +174,10 @@ const X_OUTPUT_30: &str = "xsl:output html-version / suppress-indentation are no
 const X_EQNAME_OUTPUT: &str = "<xsl:output name=\"Q{…}format2\"> in a version=\"2.0\" stylesheet: §5.1 \"A QName is always written in the form (NCName \":\")? NCName\", so the EQName is XTSE0020 (§2.2: not one of the permitted values)";
 const X_STYLESHEET_WHITESPACE: &str = "the expected assert-xml keeps whitespace-only text that can only come from the stylesheet, which §4.2 removes (\"Any whitespace text node that satisfies both the following conditions is removed from the tree\"); assert-xml compares canonical forms byte for byte (catalog schema), so no conformant processor produces it";
 const X_COPY_WITHOUT_FOCUS: &str = "xsl:copy in the body of a stylesheet function (copy903err.xsl), where §10.3 says \"Within the body of a stylesheet function, the focus is initially undefined; this means that any attempt to reference the context item, context position, or context size is a non-recoverable dynamic error. [XPDY0002]\" — and xsl:copy copies the context item (§11.9.1: \"The xsl:copy instruction provides a way of copying the context item\"). The expected XTTE0945 is an XSLT 3.0 code: it occurs nowhere in the XSLT 2.0 Recommendation, Appendix E (Summary of Error Conditions) included";
+const X_XSI_TYPE_IS_NO_DECLARATION: &str = "xsl:document validation=\"strict\" over <doc xsi:type=\"xs:anyType\">, which has no top-level declaration; the case expects XTTE1555 (the duplicate ID / dangling IDREF of the document), which needs <doc> validated through its xsi:type. XSLT 2.0 §19.2.2: \"The single element node child is validated … as described in 19.2.1\"; §19.2.1.1, strict: \"If there is no matching element declaration, or if the element is not considered valid, the transformation fails [see ERR XTTE1510], [see ERR XTTE1512]\", and its Note: \"the presence of an xsi:type attribute will not of itself cause an element to be validated: if validation against a named type is required, as distinct from validation against a top-level element declaration, then it must be requested using the XSLT [xsl:]type attribute\" — so XTTE1512 (M4e decision D-e2)";
+const X_XTTE1535: &str = "an attribute copied with a type naming a complex type: the case expects XTTE1535, an XSLT 3.0 code that occurs nowhere in the XSLT 2.0 Recommendation (Appendix E included); XSLT 2.0 §19.2.1.2 validates an attribute with \"String Valid\", defined for simple type definitions, so the attribute is not valid — [ERR XTTE1540] (M4f decision D-f4)";
+const X_ITEM_SEPARATOR: &str = "xsl:output item-separator is not an XSLT 2.0 attribute: in this version=\"2.0\" stylesheet it is XTSE0090 (§3.3: \"It is a static error for an element from the XSLT namespace to have an attribute whose namespace is either null (that is, an attribute with an unprefixed name) or the XSLT namespace, other than attributes defined for the element in this document\"); the expected result needs XSLT 3.0's item-separator";
+const X_IMPLICIT_RESULT_STRIP: &str = "the principal module says default-validation=\"strip\", which XSLT 2.0 §3.6 applies to the implicit final result tree (\"It also determines the validation applied to the implicit final result tree created in the absence of an xsl:result-document instruction\"), and §19.2.2: with validation=\"strip\" \"elements within the tree have their type annotation set to xs:untyped\" — the case expects the result element typed (not(/* instance of element(*,xs:untyped))), the behaviour W3C bug 30211 proposes for XSLT 3.0 (erratum E15: the implicit result tree keeps type annotations), which the case's description names";
 const X_UNICODE90: &str = "version=\"3.0\" stylesheet (unicode90-001.xsl / -002.xsl): the entry point is a template named xsl:initial-template (XTSE0080 under XSLT 2.0), the regex arrives as a static parameter (3.0), and the select uses the XPath 3.0 simple-map operator `!` (absent from the XPath 2.0 grammar)";
 
 /// The text both `regex-classes` justifications share (a macro, so that the second can extend
@@ -213,11 +231,6 @@ pub fn applicability(set: &TestSet, case: &TestCase, policy: &Policy) -> Applica
     if let Some(spec) = effective_spec(set, case) {
         if !APPLICABLE_SPECS.contains(&spec) {
             return Applicability::NotXslt20(spec.to_string());
-        }
-    }
-    if !policy.run_excluded {
-        if let Some((_, reason)) = EXCLUDED.iter().find(|(n, _)| *n == case.name) {
-            return Applicability::Excluded(reason);
         }
     }
     // Test shapes that only exist in XSLT 3.0, whatever the spec dependency says.
@@ -278,6 +291,14 @@ pub fn applicability(set: &TestSet, case: &TestCase, policy: &Policy) -> Applica
                 ))
             }
             _ => {}
+        }
+    }
+    // An exclusion is a verdict on the expected result of a case this processor would run, so it
+    // is decided last: a case whose dependencies the configuration does not satisfy stays not run
+    // (a schema-aware case excluded since M4g is "not run" in a basic run, as before).
+    if !policy.run_excluded {
+        if let Some((_, reason)) = EXCLUDED.iter().find(|(n, _)| *n == case.name) {
+            return Applicability::Excluded(reason);
         }
     }
     Applicability::Run
