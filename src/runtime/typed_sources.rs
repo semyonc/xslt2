@@ -124,7 +124,8 @@ impl<'a, 't> Transformation<'a, 't> {
     pub(super) fn validator(&self, set: &'a SchemaSet) -> &SchemaValidator<'a> {
         self.validator.get_or_init(|| {
             // Identity constraints are part of schema validity assessment (XML Schema 1.1 Part 1
-            // §3.11.4): enforced for a source document.
+            // §3.11.4): enforced for a source document — always, upstream (its
+            // `PROCESS_IDENTITY_CONSTRAINTS` bit is deprecated and has no effect).
             //
             // The PSVI typed values the runtime can keep on each `SchemaInfo`
             // (`BUILD_PSVI_TYPED_VALUES`) are not read here: the typed builder stores bindings, and
@@ -137,9 +138,7 @@ impl<'a, 't> Transformation<'a, 't> {
             // Satisfied"; §3.13's implementation-defined 1.1 mode): upstream evaluates them only
             // when asked (B9, `PROCESS_ASSERTIONS`, by buffering each asserted element's subtree),
             // for sources and constructed trees alike — this validator serves both.
-            let mut flags = (ValidationFlags::default()
-                | ValidationFlags::PROCESS_IDENTITY_CONSTRAINTS)
-                - ValidationFlags::BUILD_PSVI_TYPED_VALUES;
+            let mut flags = ValidationFlags::default() - ValidationFlags::BUILD_PSVI_TYPED_VALUES;
             if set.is_xsd11() {
                 flags |= ValidationFlags::PROCESS_ASSERTIONS;
             }

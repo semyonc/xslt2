@@ -910,8 +910,8 @@ fn display(name: &Name) -> String {
 /// (`validate_element`, `validate_attribute` …, `validate_end_of_attributes`, `validate_text` /
 /// `validate_whitespace`, `validate_end_element`). "The validation rule "Validation Root Valid
 /// (ID/IDREF)" is not applied" (§19.2.1.3) — `cvc-id.1` / `cvc-id.2` are dropped (upstream's
-/// optional C38 would make that a flag) — while "Identity-constraint Satisfied" is
-/// (`PROCESS_IDENTITY_CONSTRAINTS`). When the root ends the run ends (`end_validation`), and any
+/// optional C38 would make that a flag) — while "Identity-constraint Satisfied" is (upstream
+/// always enforces it). When the root ends the run ends (`end_validation`), and any
 /// error left is XTTE1510 — an inner run ends before an outer one, so the innermost failure is the
 /// one reported (D-10).
 ///
