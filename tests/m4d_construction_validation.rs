@@ -740,19 +740,18 @@ fn xml_namespace_attributes_validate_strictly() {
 /// What part 1 fenced runs now. (Element validation, part 2, and `lax` on `xsl:attribute`,
 /// decision D-d1, were fenced until part 2; copies and document nodes, M4e's, until M4e —
 /// `tests/m4e_copies_documents.rs`; `lax` and `type` on elements, M4f's, until M4f —
-/// `tests/m4f_type_lax.rs`.) An XPath 2.0 duration type an XML Schema 1.0 set has no definition of
-/// stays fenced, now naming upstream proposal C72 instead of M4g (decision D-g2 as the user revised
-/// it: the stand-in `xs:duration` would give an unordered typed value), the message pointing to the
-/// XML Schema 1.1 option, which has the type (`tests/m4g_xsd11_residue.rs`).
+/// `tests/m4f_type_lax.rs`.) An XPath 2.0 duration type an XML Schema 1.0 set had no definition of
+/// was fenced, naming M4g and then upstream proposal C72, until the Wave B follow-up: upstream's
+/// `SchemaSet::xpath_type` has it in every set (`tests/wave_b_followup.rs`), so the attribute is
+/// validated against it and annotated with it.
 #[test]
 fn what_part_1_did_not_implement_runs() {
-    let e = error(
-        "",
-        r#"<xsl:attribute name="n" type="xs:dayTimeDuration">PT1H</xsl:attribute>"#,
-    );
-    assert!(
-        e.is_not_implemented() && e.message.contains("upstream proposal C72"),
-        "{e}"
+    assert_eq!(
+        out(
+            r#"<xsl:variable name="a" as="attribute()"><xsl:attribute name="n" type="xs:dayTimeDuration">PT1H</xsl:attribute></xsl:variable>"#,
+            "$a instance of attribute(*, xs:dayTimeDuration), data($a) lt xs:dayTimeDuration('PT2H')"
+        ),
+        "true true"
     );
     // `default-validation="preserve"` gives `xsl:copy-of` the value `preserve` (§3.6), which runs
     // since M4e: the copy keeps its annotation, here in the implicit final result tree, which the

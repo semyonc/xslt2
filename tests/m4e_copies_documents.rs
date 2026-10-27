@@ -788,8 +788,9 @@ fn a_tree_typed_against_another_set_is_copied_untyped() {
 /// `lax` and `type` on copies and document nodes were M4f's fence (M4_PLAN §4 M4f) and run since M4f
 /// (`tests/m4f_type_lax.rs` checks what they do): valid copies and documents are built, an
 /// invalid one is XTTE1515 (`lax`: the copied `e:doc` element has no `row`). An XPath 2.0 duration
-/// type an XML Schema 1.0 set has no definition of stays fenced, now naming upstream proposal C72
-/// (decision D-g2 as the user revised it; `tests/m4g_xsd11_residue.rs`).
+/// type an XML Schema 1.0 set had no definition of was fenced (upstream proposal C72) until the Wave
+/// B follow-up; now the copy is validated against it, and an element with element children is not
+/// valid against a simple type: XTTE1540 (`tests/wave_b_followup.rs`).
 #[test]
 fn lax_and_type_on_copies_and_documents_run_since_m4f() {
     for body in [
@@ -811,10 +812,10 @@ fn lax_and_type_on_copies_and_documents_run_since_m4f() {
         codes::XTTE1515,
         "an empty lax copy of e:doc",
     );
-    let e = error(r#"<out><xsl:copy-of select="/e:doc/e:row" type="xs:yearMonthDuration"/></out>"#);
-    assert!(
-        e.is_not_implemented() && e.message.contains("upstream proposal C72"),
-        "{e}"
+    assert_code(
+        &error(r#"<out><xsl:copy-of select="/e:doc/e:row" type="xs:yearMonthDuration"/></out>"#),
+        codes::XTTE1540,
+        "a copy of e:row against xs:yearMonthDuration",
     );
 }
 

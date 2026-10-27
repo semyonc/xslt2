@@ -26,10 +26,12 @@
 use std::cmp::Ordering;
 use std::rc::Rc;
 
+use xsd_schema::types::TimezoneOffset;
 use xsd_schema::types::{PrimitiveTypeCode, XmlTypeCode, XmlValue, XmlValueKind};
+use xsd_schema::xpath::ast::BinaryOpKind;
 use xsd_schema::xpath::cast::cast_to;
 use xsd_schema::xpath::functions::{atomize_sequence, XPathValue};
-use xsd_schema::xpath::operators::value_lt;
+use xsd_schema::xpath::operators::eval_binary_with_timezone;
 use xsd_schema::xpath::XmlItem;
 
 use super::context::XsltContext;
@@ -157,6 +159,9 @@ impl<'a, 't> Transformation<'a, 't> {
             return Ok(Vec::new());
         }
 
+        // A date or time without a timezone is compared with the transformation's implicit
+        // timezone, as the expressions' `lt` compares it (F&O 1.0 §10.4).
+        let timezone = self.implicit_timezone();
         // columns[k][i]: the k-th sort key of the i-th row.
         let mut columns: Vec<Vec<ColumnKey>> = Vec::with_capacity(keys.len());
         for (key, rule) in keys.iter().zip(&rules) {
@@ -168,7 +173,7 @@ impl<'a, 't> Transformation<'a, 't> {
                     .map_err(|e| e.or_location(&key.loc))?;
                 values.push(value);
             }
-            let column = column_keys(values)
+            let column = column_keys(values, timezone)
                 .map_err(|(a, b)| incomparable(&a, &b).with_location(key.loc.clone()))?;
             columns.push(column);
         }
@@ -184,7 +189,7 @@ impl<'a, 't> Transformation<'a, 't> {
         // or reversed, so the lexicographic combination is one too.
         order.sort_by(|&a, &b| {
             for (column, rule) in columns.iter().zip(&rules) {
-                let ordering = compare_keys(&column[a], &column[b], &rule.collation);
+                let ordering = compare_keys(&column[a], &column[b], &rule.collation, timezone);
                 let ordering = match rule.order {
                     SortOrder::Ascending => ordering,
                     SortOrder::Descending => ordering.reverse(),
@@ -662,7 +667,10 @@ impl PartialOrd for DecimalKey {
 /// So a numeric column holding an `xs:double` becomes `xs:double` keys
 /// throughout, one holding an `xs:float` (and no double) `xs:float` keys, and
 /// one of decimals and integers only exact [`DecimalKey`]s.
-fn column_keys(values: Vec<Option<XmlValue>>) -> Result<Vec<ColumnKey>, (XmlValue, XmlValue)> {
+fn column_keys(
+    values: Vec<Option<XmlValue>>,
+    timezone: TimezoneOffset,
+) -> Result<Vec<ColumnKey>, (XmlValue, XmlValue)> {
     let values: Vec<Option<XmlValue>> = values.into_iter().map(|v| v.map(unwrap_union)).collect();
     let mut first: Option<(&XmlValue, LtClass)> = None;
     let mut width = NumericWidth::Decimal;
@@ -673,7 +681,7 @@ fn column_keys(values: Vec<Option<XmlValue>>) -> Result<Vec<ColumnKey>, (XmlValu
             Some((head, head_class)) => {
                 if class != head_class
                     || class == LtClass::Unordered
-                    || (class.uses_value_lt() && value_lt(head, value).is_err())
+                    || (class.uses_value_lt() && value_lt(head, value, timezone).is_err())
                 {
                     return Err((head.clone(), value.clone()));
                 }
@@ -706,6 +714,17 @@ fn column_keys(values: Vec<Option<XmlValue>>) -> Result<Vec<ColumnKey>, (XmlValu
             }
         })
         .collect())
+}
+
+/// The engine's `lt` on two values (XPath 2.0 §B.2), a date or time without a timezone read with
+/// `timezone`, the transformation's implicit timezone (`eval_binary_with_timezone`, upstream C94).
+fn value_lt(
+    left: &XmlValue,
+    right: &XmlValue,
+    timezone: TimezoneOffset,
+) -> Result<bool, xsd_schema::xpath::XPathError> {
+    eval_binary_with_timezone(BinaryOpKind::ValueLt, left, right, timezone)
+        .map(|result| result.as_boolean().unwrap_or(false))
 }
 
 /// The member value of a union-typed value; any other value as it is.
@@ -756,7 +775,12 @@ fn to_float(value: &XmlValue) -> f64 {
 /// `lt` on dates, times and durations, which [`column_keys`] has checked
 /// succeeds for the column. A pair of different variants never occurs within a
 /// column; it is ordered by variant so that even it cannot break totality.
-fn compare_keys(a: &ColumnKey, b: &ColumnKey, collation: &KeyCollation) -> Ordering {
+fn compare_keys(
+    a: &ColumnKey,
+    b: &ColumnKey,
+    collation: &KeyCollation,
+    timezone: TimezoneOffset,
+) -> Ordering {
     match (a, b) {
         (ColumnKey::Empty, ColumnKey::Empty) => Ordering::Equal,
         (ColumnKey::Empty, _) => Ordering::Less,
@@ -771,9 +795,9 @@ fn compare_keys(a: &ColumnKey, b: &ColumnKey, collation: &KeyCollation) -> Order
         (ColumnKey::Decimal(x), ColumnKey::Decimal(y)) => x.cmp(y),
         (ColumnKey::Boolean(x), ColumnKey::Boolean(y)) => x.cmp(y),
         (ColumnKey::Other(x), ColumnKey::Other(y)) => {
-            if value_lt(x, y).unwrap_or(false) {
+            if value_lt(x, y, timezone).unwrap_or(false) {
                 Ordering::Less
-            } else if value_lt(y, x).unwrap_or(false) {
+            } else if value_lt(y, x, timezone).unwrap_or(false) {
                 Ordering::Greater
             } else {
                 Ordering::Equal

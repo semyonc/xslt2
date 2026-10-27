@@ -120,32 +120,41 @@ fn has_simple_content(nav: &Nav<'_>) -> bool {
 }
 
 impl<'a, 't> Transformation<'a, 't> {
-    /// The validator of this run, made on first use (D-12).
+    /// The validator of this run's source documents, made on first use (D-12; the constructed
+    /// trees have their own, `Transformation::construction_validator`).
     pub(super) fn validator(&self, set: &'a SchemaSet) -> &SchemaValidator<'a> {
-        self.validator.get_or_init(|| {
-            // Identity constraints are part of schema validity assessment (XML Schema 1.1 Part 1
-            // §3.11.4): enforced for a source document — always, upstream (its
-            // `PROCESS_IDENTITY_CONSTRAINTS` bit is deprecated and has no effect).
-            //
-            // The PSVI typed values the runtime can keep on each `SchemaInfo`
-            // (`BUILD_PSVI_TYPED_VALUES`) are not read here: the typed builder stores bindings, and
-            // the navigator computes a typed value from the binding and the string value when one
-            // is asked for. The runtime still computes every value validity needs (facets, ID /
-            // IDREF, identity constraints), so dropping the flag changes no result (review F9).
-            //
-            // In an XML Schema 1.1 context (`SchemaContextBuilder::xsd_version`, M4g) assertions
-            // are part of the assessment too (XML Schema 1.1 Part 1 §3.4.4.2 clause 6, "Assertion
-            // Satisfied"; §3.13's implementation-defined 1.1 mode): upstream evaluates them only
-            // when asked (B9, `PROCESS_ASSERTIONS`, by buffering each asserted element's subtree),
-            // for sources and constructed trees alike — this validator serves both.
-            let mut flags = ValidationFlags::default() - ValidationFlags::BUILD_PSVI_TYPED_VALUES;
-            if set.is_xsd11() {
-                flags |= ValidationFlags::PROCESS_ASSERTIONS;
-            }
-            SchemaValidator::new(set, flags)
-        })
+        self.validator
+            .get_or_init(|| SchemaValidator::new(set, validation_flags(set)))
     }
+}
 
+/// The flags of the run's validators: the source validator's, and with `XPATH_TYPES` the
+/// validator of constructed trees (`Transformation::construction_validator`).
+///
+/// Identity constraints are part of schema validity assessment (XML Schema 1.1 Part 1 §3.11.4):
+/// enforced for a source document — always, upstream (its `PROCESS_IDENTITY_CONSTRAINTS` bit is
+/// deprecated and has no effect).
+///
+/// The PSVI typed values the runtime can keep on each `SchemaInfo` (`BUILD_PSVI_TYPED_VALUES`)
+/// are not read here: the typed builder stores bindings, and the navigator computes a typed value
+/// from the binding and the string value when one is asked for. The runtime still computes every
+/// value validity needs (facets, ID / IDREF, identity constraints), so dropping the flag changes no
+/// result (review F9).
+///
+/// In an XML Schema 1.1 context (`SchemaContextBuilder::xsd_version`, M4g) assertions are part of
+/// the assessment too (XML Schema 1.1 Part 1 §3.4.4.2 clause 6, "Assertion Satisfied"; §3.13's
+/// implementation-defined 1.1 mode): upstream evaluates them only when asked (B9,
+/// `PROCESS_ASSERTIONS`, by buffering each asserted element's subtree), for sources and
+/// constructed trees alike.
+pub(super) fn validation_flags(set: &SchemaSet) -> ValidationFlags {
+    let mut flags = ValidationFlags::default() - ValidationFlags::BUILD_PSVI_TYPED_VALUES;
+    if set.is_xsd11() {
+        flags |= ValidationFlags::PROCESS_ASSERTIONS;
+    }
+    flags
+}
+
+impl<'a, 't> Transformation<'a, 't> {
     /// Parses and validates `xml` against the stylesheet's schema set (`validation` is `Strict` or
     /// `Lax`), into the arena, unregistered — the typed counterpart of `DocumentStore::parse`.
     pub(super) fn parse_validated(

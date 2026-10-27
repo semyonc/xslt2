@@ -185,6 +185,27 @@ pub struct TransformOptions {
     /// not an instance of the schema set is an error (FODC0002); exempt one with
     /// `set_source_validation(uri, SourceValidation::Skip)`.
     pub source_validation: SourceValidation,
+    /// The implicit timezone of the run (XPath 2.0 §C.2's dynamic-context component, upstream
+    /// C94): what `implicit-timezone()` returns, the timezone of `current-dateTime()`, and the
+    /// timezone a date or time without one is compared and subtracted with — F&O 1.0 §10.4: "If
+    /// either operand to a comparison function on date or time values does not have an
+    /// (explicit) timezone then, for the purpose of the operation, an implicit timezone,
+    /// provided by the dynamic context …, is assumed to be present as part of the value". The
+    /// processor's own comparisons use it too: sort keys (`lt`), key values and grouping keys
+    /// (`eq`).
+    ///
+    /// §5.4.3.2: "The implicit timezone is implementation-defined"; `None` (the default) is the
+    /// host's local offset, read once, when the run first needs the clock. Either way it is one
+    /// value for the whole transformation — §5.4.3: "the following components defined in Section
+    /// 2.1.2 Dynamic Context must be stable: function implementations, current dateTime, implicit
+    /// timezone, …" —, in every expression, template, stylesheet function and
+    /// `xsl:result-document`.
+    ///
+    /// A timezone is within -14:00 and +14:00 (XML Schema 1.1 Part 2 §3.3.7); a run given one
+    /// outside that range fails with FODT0003. Not affected: the XPath expressions upstream
+    /// evaluates during schema validation — XML Schema 1.1 assertions and type alternatives on
+    /// validated sources and constructed trees — which read the host's offset (upstream C103).
+    pub implicit_timezone: Option<TimezoneOffset>,
 }
 
 /// Whether, and how, a source document is validated against the stylesheet's schema set when it
@@ -225,6 +246,7 @@ impl Default for TransformOptions {
             base_uri: None,
             base_output_uri: None,
             source_validation: SourceValidation::Skip,
+            implicit_timezone: None,
         }
     }
 }
@@ -529,6 +551,11 @@ pub struct Transformation<'a, 't> {
     /// The validator source documents are validated with, made on first use
     /// (M4b, D-12: one per transformation).
     validator: std::cell::OnceCell<xsd_schema::validation::SchemaValidator<'a>>,
+    /// The validator constructed trees are validated with, made on first use: the source
+    /// validator's flags and `ValidationFlags::XPATH_TYPES` (`construction_validator`).
+    construction_validator: std::cell::OnceCell<xsd_schema::validation::SchemaValidator<'a>>,
+    /// The value constraints the validation of constructed trees reads, kept for the run.
+    value_constraints: validate::ValueConstraints,
     /// The validation modes `register_source_with` recorded, by URI (D-4).
     source_modes: RefCell<HashMap<String, SourceValidation>>,
     /// See [`Transformation::take_warnings`].
@@ -575,6 +602,8 @@ impl<'a> CompiledStylesheet<'a> {
             primary_written: std::cell::Cell::new(false),
             schema_set: self.schema,
             validator: std::cell::OnceCell::new(),
+            construction_validator: std::cell::OnceCell::new(),
+            value_constraints: validate::ValueConstraints::default(),
             source_modes: RefCell::new(HashMap::new()),
             warnings: RefCell::new(Vec::new()),
         }
@@ -716,6 +745,21 @@ impl<'a, 't> Transformation<'a, 't> {
         // Q33: everything the run evaluates happens below this frame, so the
         // stack it uses is measured from here.
         let _stack = self.stack_scope(stack_position());
+        // The implicit timezone the host fixed is a timezone: XML Schema 1.1 Part 2 §3.3.7
+        // (`timezoneFrag`) limits an offset to -14:00 … +14:00. F&O 1.0 gives a value outside that
+        // range FODT0003, "Invalid timezone value" (`adjust-dateTime-to-timezone`).
+        if let Some(timezone) = self.options.implicit_timezone {
+            if timezone.0.abs() > 14 * 60 {
+                return Err(XsltError::new(
+                    "FODT0003",
+                    format!(
+                        "TransformOptions::implicit_timezone is {} minutes from UTC: a timezone is \
+                         within -14:00 and +14:00",
+                        timezone.0
+                    ),
+                ));
+            }
+        }
         // §21.1 XTDE1665, before anything can observe a typed node: "the input
         // to the processor" is the tree containing the initial context node and
         // every tree passed as a stylesheet parameter. The first was admitted by

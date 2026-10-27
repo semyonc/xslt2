@@ -63,7 +63,6 @@ impl<'a, 't> Transformation<'a, 't> {
         };
         let item = cx.item.clone();
         let (position, size) = (cx.position, cx.size);
-        let clock = self.clock(ctx).clone();
         let result = compiled
             .expr
             .evaluator(ctx)
@@ -75,10 +74,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 dynamic.context_item = item;
                 dynamic.context_position = position;
                 dynamic.context_size = size;
-                if let Some((now, timezone)) = clock {
-                    dynamic.current_datetime = Some(now);
-                    dynamic.implicit_timezone = Some(timezone);
-                }
+                self.set_clock(dynamic);
                 dynamic.set_function_evaluator(Some(&evaluator));
                 // Compiled regular expressions outlive this evaluation.
                 dynamic.set_regex_cache(Some(&self.xpath_regexes));
@@ -91,19 +87,25 @@ impl<'a, 't> Transformation<'a, 't> {
     /// §5.4.3.2: "The current date and time represents an
     /// implementation-dependent point in time during processing of the
     /// transformation; it does not change during the course of the
-    /// transformation. The implicit timezone is implementation-defined." §16
+    /// transformation. The implicit timezone is implementation-defined." §5.4.3
     /// adds that "function implementations, current dateTime, implicit
     /// timezone, … must be stable" for the duration of the transformation.
     ///
     /// The engine fixes `current-dateTime()` only for one evaluation (its
     /// dynamic context caches it), so the transformation takes the value once,
     /// from the engine's own `current-dateTime()`, and hands it — and its
-    /// timezone, the host's local offset, as the implicit timezone — to every
-    /// dynamic context it builds. `None` only if the engine stops returning an
-    /// `xs:dateTime`, in which case every evaluation keeps its own clock.
-    fn clock(&self, ctx: &XPathContext<'_>) -> &Option<(DateTimeValue, TimezoneOffset)> {
+    /// timezone as the implicit timezone — to every dynamic context it builds
+    /// ([`set_clock`](Self::set_clock)). The implicit timezone is
+    /// [`TransformOptions::implicit_timezone`](super::TransformOptions::implicit_timezone)
+    /// when the host set it — the engine then gives the current instant in that
+    /// timezone (upstream C94) —, else the host's local offset at that instant.
+    /// `None` only if the engine stops returning an `xs:dateTime`, in which
+    /// case every evaluation keeps its own clock.
+    fn clock(&self) -> &Option<(DateTimeValue, TimezoneOffset)> {
         self.clock.get_or_init(|| {
-            let mut dynamic = DynamicContext::<Nav<'t>>::new(ctx, 0);
+            let ctx = XPathContext::new(self.sheet.names());
+            let mut dynamic = DynamicContext::<Nav<'t>>::new(&ctx, 0);
+            dynamic.implicit_timezone = self.options.implicit_timezone;
             let value = current_datetime(&mut dynamic, Vec::new()).ok()?;
             match value.into_vec().into_iter().next()? {
                 XmlItem::Atomic(XmlValue {
@@ -116,6 +118,30 @@ impl<'a, 't> Transformation<'a, 't> {
                 _ => None,
             }
         })
+    }
+
+    /// Gives `dynamic`, a dynamic context this transformation evaluates an
+    /// expression in, the transformation's current dateTime and implicit
+    /// timezone ([`clock`](Self::clock)).
+    pub(super) fn set_clock(&self, dynamic: &mut DynamicContext<'_, Nav<'t>>) {
+        if let Some((now, timezone)) = self.clock() {
+            dynamic.current_datetime = Some(now.clone());
+            dynamic.implicit_timezone = Some(*timezone);
+        }
+    }
+
+    /// The implicit timezone of this transformation ([`clock`](Self::clock)) —
+    /// what the comparisons the processor makes itself use for a date or time
+    /// without a timezone (sort keys, key values, grouping keys), so that they
+    /// agree with the expressions' `lt` and `eq`.
+    pub(super) fn implicit_timezone(&self) -> TimezoneOffset {
+        match self.clock() {
+            Some((_, timezone)) => *timezone,
+            None => self
+                .options
+                .implicit_timezone
+                .unwrap_or(TimezoneOffset::UTC),
+        }
     }
 
     /// Turns an `XPathError` back into an `XsltError`: the error the evaluator

@@ -895,20 +895,14 @@ fn a_non_strip_validation_runs_when_evaluated() {
             Err(code) => assert_eq!(failure(result), (Stage::Run, code.to_string()), "{body}"),
         }
     }
-    // An XPath 2.0 duration type an XML Schema 1.0 set has no definition of (§3.13 puts it in
-    // scope) stays fenced, now naming upstream proposal C72 (decision D-g2 as the user revised it;
-    // `tests/m4g_xsd11_residue.rs`); `xs:untypedAtomic` runs since M4g.
+    // The XPath 2.0 types §3.13 puts in scope run in an XML Schema 1.0 context too: a duration
+    // type (fenced as upstream proposal C72 from M4g until the Wave B follow-up, which uses
+    // upstream's `SchemaSet::xpath_type`; `tests/wave_b_followup.rs`) and `xs:untypedAtomic`.
     let main = sheet(&format!(
         "{IMPORT_HATS}{}",
         root_template(r#"<e xsl:type="xs:dayTimeDuration">PT1H</e>"#)
     ));
-    match run_sa(&main, &hat_files()) {
-        Err((Stage::Run, e)) => assert!(
-            e.is_not_implemented() && e.message.contains("upstream proposal C72"),
-            "{e}"
-        ),
-        other => panic!("expected the C72 fence, got {other:?}"),
-    }
+    assert_eq!(run_sa(&main, &hat_files()).unwrap(), "<e>PT1H</e>");
     let main = sheet(&format!(
         "{IMPORT_HATS}{}",
         root_template(r#"<e xsl:type="xs:untypedAtomic">PT1H</e>"#)

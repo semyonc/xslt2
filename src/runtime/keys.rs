@@ -57,7 +57,7 @@ use xsd_schema::types::{
 };
 use xsd_schema::xpath::ast::BinaryOpKind;
 use xsd_schema::xpath::functions::{atomize_sequence, XPathValue};
-use xsd_schema::xpath::operators::{eval_binary, value_eq};
+use xsd_schema::xpath::operators::eval_binary_with_timezone;
 use xsd_schema::xpath::XmlItem;
 
 use super::context::{CapturedSubstrings, CurrentGroup, XsltContext};
@@ -256,11 +256,10 @@ pub(super) enum Slot {
     /// `xs:hexBinary` or `xs:base64Binary` (with the type code: `eq` is not
     /// defined between the two): the octets.
     Binary(XmlTypeCode, Vec<u8>),
-    /// A type `eq` compares as two values of the same type code with the same
-    /// components (the five `xs:g*` types): the type code and a hash of the
-    /// components. (Upstream `eq` compares these structurally, timezone
-    /// included, without the implicit timezone; should it ever normalize
-    /// them, this slot must hash the normalized form instead.)
+    /// One of the five `xs:g*` types, which `eq` compares by starting instant
+    /// with the implicit timezone (upstream since `wave-b` `be5fe3d`): the type
+    /// code, and `0` — every value of the type shares the slot, the candidates
+    /// confirmed by `eq` ([`placement_of`]).
     Components(XmlTypeCode, u64),
     /// A value for which none of the above could be computed (a list value, a
     /// failed conversion): compared with every sought value — see
@@ -397,17 +396,20 @@ impl<'a, 't> Transformation<'a, 't> {
         let index = self.key_index(key, root, caller)?;
         let definition = self.sheet.key(key);
         let collation = self.key_collation(definition)?;
+        let timezone = self.implicit_timezone();
         let mut hits: Vec<u32> = Vec::new();
         for value in sought {
             let value = self.key_value(value, definition.compat);
-            let Some(placement) = placement_of(&value, &collation) else {
+            let Some(placement) = placement_of(&value, &collation, timezone) else {
                 continue;
             };
             let mut confirm = |bucket: &Vec<(XmlValue, u32)>| {
                 hits.extend(
                     bucket
                         .iter()
-                        .filter(|(stored, _)| key_values_equal(stored, &value, &collation))
+                        .filter(|(stored, _)| {
+                            key_values_equal(stored, &value, &collation, timezone)
+                        })
                         .map(|(_, node)| *node),
                 );
             };
@@ -548,6 +550,7 @@ impl<'a, 't> Transformation<'a, 't> {
     ) -> Result<KeyIndex<'t>, XsltError> {
         let definition = self.sheet.key(key);
         let collation = self.key_collation(definition)?;
+        let timezone = self.implicit_timezone();
         let mut index = KeyIndex::default();
         for_each_node(root, |node| {
             let mut position: Option<u32> = None;
@@ -559,7 +562,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 }
                 for value in self.key_specifier_values(declaration, node, caller)? {
                     let value = self.key_value(value, definition.compat);
-                    let Some(placement) = placement_of(&value, &collation) else {
+                    let Some(placement) = placement_of(&value, &collation, timezone) else {
                         continue;
                     };
                     let at = *position.get_or_insert_with(|| {
@@ -708,7 +711,14 @@ fn unwrapped(value: &XmlValue) -> &XmlValue {
 /// is hashed on exactly the form `eq` compares it by, and anything this
 /// function cannot hash on that form is [`Slot::Unhashed`] rather than
 /// guessed.
-pub(super) fn placement_of(value: &XmlValue, collation: &KeyCollation) -> Option<Placement> {
+///
+/// `timezone` is the transformation's implicit timezone (`Transformation::implicit_timezone`), which
+/// `eq` reads a date or time without a timezone with.
+pub(super) fn placement_of(
+    value: &XmlValue,
+    collation: &KeyCollation,
+    timezone: TimezoneOffset,
+) -> Option<Placement> {
     let value = unwrapped(value);
     if is_string_like(value) {
         let text = value.to_string_value();
@@ -744,6 +754,7 @@ pub(super) fn placement_of(value: &XmlValue, collation: &KeyCollation) -> Option
                 value,
                 Temporal::DateTime,
                 v.timezone.is_some(),
+                timezone,
             ));
         }
         (XmlTypeCode::Date, XmlAtomicValue::Date(v)) => {
@@ -751,6 +762,7 @@ pub(super) fn placement_of(value: &XmlValue, collation: &KeyCollation) -> Option
                 value,
                 Temporal::Date,
                 v.timezone.is_some(),
+                timezone,
             ));
         }
         (XmlTypeCode::Time, XmlAtomicValue::Time(v)) => {
@@ -758,6 +770,7 @@ pub(super) fn placement_of(value: &XmlValue, collation: &KeyCollation) -> Option
                 value,
                 Temporal::Time,
                 v.timezone.is_some(),
+                timezone,
             ));
         }
         (
@@ -779,22 +792,22 @@ pub(super) fn placement_of(value: &XmlValue, collation: &KeyCollation) -> Option
             Slot::Binary(code, octets.clone())
         }
         // The `xs:g*` types: `eq` compares two values of the same type code by
-        // their components, timezone included.
-        (XmlTypeCode::GYearMonth, XmlAtomicValue::GYearMonth(v)) => {
-            Slot::Components(code, hash_of(&(v.year, v.month, v.timezone.map(|t| t.0))))
-        }
-        (XmlTypeCode::GYear, XmlAtomicValue::GYear(v)) => {
-            Slot::Components(code, hash_of(&(v.year, v.timezone.map(|t| t.0))))
-        }
-        (XmlTypeCode::GMonthDay, XmlAtomicValue::GMonthDay(v)) => {
-            Slot::Components(code, hash_of(&(v.month, v.day, v.timezone.map(|t| t.0))))
-        }
-        (XmlTypeCode::GDay, XmlAtomicValue::GDay(v)) => {
-            Slot::Components(code, hash_of(&(v.day, v.timezone.map(|t| t.0))))
-        }
-        (XmlTypeCode::GMonth, XmlAtomicValue::GMonth(v)) => {
-            Slot::Components(code, hash_of(&(v.month, v.timezone.map(|t| t.0))))
-        }
+        // their starting instants, a value without a timezone at the implicit
+        // timezone (F&O 1.0 §10.4.15 – §10.4.19: "Returns true if and only if
+        // the xs:dateTimes representing the starting instants of $arg1 and
+        // $arg2 compare equal"; upstream since `wave-b` `be5fe3d`, C5) — so
+        // `---25-14:00` equals `---26+10:00`, and `2000` equals `2000Z` under
+        // UTC. The components do not decide it; the values of one type share a
+        // slot, each candidate confirmed by `eq` (a linear scan within the
+        // type, for these rarely indexed types).
+        (
+            XmlTypeCode::GYearMonth
+            | XmlTypeCode::GYear
+            | XmlTypeCode::GMonthDay
+            | XmlTypeCode::GDay
+            | XmlTypeCode::GMonth,
+            _,
+        ) => Slot::Components(code, 0),
         _ => Slot::Unhashed,
     };
     Some(Placement::home(slot))
@@ -807,9 +820,9 @@ pub(super) fn placement_of(value: &XmlValue, collation: &KeyCollation) -> Option
 /// a value without a timezone being normalized with the implicit timezone —
 /// §2.1.2: "the timezone to be used when a date, time, or dateTime value that
 /// does not have a timezone is used in a comparison or arithmetic operation";
-/// upstream `eq` takes the host's current offset, read again on every
-/// comparison. The index must not depend on that offset, so the key is a
-/// **difference computed by the upstream subtraction itself**, which
+/// the transformation's (`timezone`, `Transformation::implicit_timezone`, which
+/// the confirming `eq` reads too). The index does not depend on it, so the key
+/// is a **difference computed by the upstream subtraction itself**, which
 /// normalizes both operands exactly as `eq` does:
 ///
 /// * a value with a timezone is keyed by `value − E` with `E` the epoch
@@ -827,11 +840,15 @@ pub(super) fn placement_of(value: &XmlValue, collation: &KeyCollation) -> Option
 /// normalized with the current implicit timezone — the key a timezone-less
 /// value equal to `x` has — and `x − E` for a value without one is its
 /// normalized instant, the key of an equal value with a timezone. Both
-/// subtractions read the implicit timezone at the moment of the lookup, as the
-/// confirming `eq` does.
-fn temporal_placement(value: &XmlValue, family: Temporal, zoned: bool) -> Placement {
-    let with_zone = temporal_distance(value, family, true);
-    let without_zone = temporal_distance(value, family, false);
+/// subtractions use the implicit timezone the confirming `eq` uses.
+fn temporal_placement(
+    value: &XmlValue,
+    family: Temporal,
+    zoned: bool,
+    timezone: TimezoneOffset,
+) -> Placement {
+    let with_zone = temporal_distance(value, family, true, timezone);
+    let without_zone = temporal_distance(value, family, false, timezone);
     match (with_zone, without_zone) {
         (Some(with_zone), Some(without_zone)) => {
             let (zoned_slot, local_slot) = (
@@ -857,9 +874,15 @@ fn temporal_placement(value: &XmlValue, family: Temporal, zoned: bool) -> Placem
 }
 
 /// `value − epoch` by the upstream subtraction (`op:subtract-dateTimes`,
-/// `op:subtract-dates`, `op:subtract-times`), as [`Seconds`]; `None` if the
-/// subtraction fails (an instant out of range).
-fn temporal_distance(value: &XmlValue, family: Temporal, zoned_epoch: bool) -> Option<Seconds> {
+/// `op:subtract-dates`, `op:subtract-times`) with the implicit timezone
+/// `implicit`, as [`Seconds`]; `None` if the subtraction fails (an instant out
+/// of range).
+fn temporal_distance(
+    value: &XmlValue,
+    family: Temporal,
+    zoned_epoch: bool,
+    implicit: TimezoneOffset,
+) -> Option<Seconds> {
     let timezone = zoned_epoch.then_some(TimezoneOffset::UTC);
     let (code, epoch) = match family {
         Temporal::DateTime => (
@@ -894,7 +917,7 @@ fn temporal_distance(value: &XmlValue, family: Temporal, zoned_epoch: bool) -> O
         ),
     };
     let epoch = XmlValue::new(code, XmlValueKind::Atomic(epoch));
-    let difference = eval_binary(BinaryOpKind::Sub, value, &epoch).ok()?;
+    let difference = eval_binary_with_timezone(BinaryOpKind::Sub, value, &epoch, implicit).ok()?;
     match &difference.value {
         XmlValueKind::Atomic(atom @ XmlAtomicValue::DayTimeDuration(_)) => {
             duration_parts(atom).map(|(_, seconds)| seconds)
@@ -963,12 +986,21 @@ fn hash_of<T: Hash + ?Sized>(value: &T) -> u64 {
 /// declaration when comparing strings. No error is reported if two values are
 /// encountered that are not comparable; they are regarded for the purposes of
 /// this function as being not equal."
-pub(super) fn key_values_equal(a: &XmlValue, b: &XmlValue, collation: &KeyCollation) -> bool {
+///
+/// `timezone` is the transformation's implicit timezone, which `eq` reads a date or time without a
+/// timezone with (F&O 1.0 §10.4).
+pub(super) fn key_values_equal(
+    a: &XmlValue,
+    b: &XmlValue,
+    collation: &KeyCollation,
+    timezone: TimezoneOffset,
+) -> bool {
     let (a, b) = (unwrapped(a), unwrapped(b));
     if is_string_like(a) && is_string_like(b) {
         return collation.equals(&a.to_string_value(), &b.to_string_value());
     }
-    value_eq(a, b).unwrap_or(false)
+    eval_binary_with_timezone(BinaryOpKind::ValueEq, a, b, timezone)
+        .is_ok_and(|equal| equal.as_boolean() == Some(true))
 }
 
 /// Whether `top` is `node` or one of its ancestors.

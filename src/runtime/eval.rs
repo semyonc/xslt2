@@ -248,6 +248,10 @@ impl<'a, 't> Transformation<'a, 't> {
                 let boundary = self.element_boundary(validation, "a literal result element")?;
                 out.validation_boundary(boundary)?;
                 out.start_element(name, None, false)?;
+                // §11.1: "The base URI of the new element is copied from the base URI of the
+                // literal result element in the stylesheet" — kept where the element ends up
+                // parentless (`Receiver::element_base_uri`); in content the parent decides.
+                out.element_base_uri(&self.sheet.static_contexts.get(instruction.ctx).base_uri)?;
                 if !*inherit_namespaces {
                     out.no_inherit_namespaces()?;
                 }
@@ -301,6 +305,9 @@ impl<'a, 't> Transformation<'a, 't> {
                 let prefix = if uri.is_empty() { "" } else { prefix };
                 out.validation_boundary(boundary)?;
                 out.start_element(&Name::qualified(prefix, local, &uri), None, false)?;
+                // §11.2: "The base URI of the new element is copied from the base URI of the
+                // xsl:element instruction in the stylesheet" (parentless only, as above).
+                out.element_base_uri(&self.sheet.static_contexts.get(instruction.ctx).base_uri)?;
                 if !*inherit_namespaces {
                     out.no_inherit_namespaces()?;
                 }
@@ -632,7 +639,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 // "inherits its base URI from its parent node".
                 let base = match attr_ns(&nav, XML_NS, "base") {
                     Some(xml_base) => crate::resolver::resolve_uri(instruction_base, &xml_base),
-                    None => node_base_uri(&nav, instruction_base),
+                    None => crate::stylesheet::node_base_uri(&nav, instruction_base),
                 };
                 out.element_base_uri(&base)?;
                 if !namespaces.inherit {
@@ -847,24 +854,6 @@ fn copy_scope(copy_namespaces: bool) -> CopyNamespaces {
     } else {
         CopyNamespaces::FixupOnly
     }
-}
-
-/// The base URI of an element node — the XDM `base-uri` accessor, as
-/// `fn:base-uri` computes it: the `xml:base` values of its ancestor-or-self
-/// elements, resolved outermost first against the base URI of the document
-/// the node lives in, which itself resolves against `fallback` (the static
-/// base URI; it is the whole answer when the document has none).
-///
-/// Not `DomNavigator::base_uri`: upstream's `BufferDocNavigator` answers that
-/// with the **raw** value of the nearest `xml:base` (or the document's base
-/// URI when there is none), so a relative `xml:base` on an ancestor would be
-/// reported unresolved (review R1).
-fn node_base_uri(nav: &Nav<'_>, fallback: &str) -> String {
-    let document = match nav.document().document_base_uri() {
-        Some(uri) if !uri.is_empty() => crate::resolver::resolve_uri(fallback, uri),
-        _ => fallback.to_string(),
-    };
-    crate::stylesheet::base_uri_of(nav, &document)
 }
 
 /// §11.8: "In the generated comment node, the processor must insert a space

@@ -16,6 +16,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
+use xsd_schema::types::TimezoneOffset;
 use xsd_schema::types::{XmlValue, XmlValueKind};
 use xsd_schema::xpath::functions::atomize_sequence;
 use xsd_schema::xpath::XmlItem;
@@ -102,12 +103,13 @@ impl GroupIndex {
         placement: &Placement,
         probe: Option<&Collated>,
         collation: &KeyCollation,
+        timezone: TimezoneOffset,
     ) -> Option<usize> {
         let equal = |&g: &usize| {
             groups[g]
                 .key
                 .as_ref()
-                .is_some_and(|k| key_values_equal(k, key, collation))
+                .is_some_and(|k| key_values_equal(k, key, collation, timezone))
         };
         if placement.home == Slot::Unhashed {
             // No hash for the sought key: every group is a candidate.
@@ -396,13 +398,15 @@ impl<'a, 't> Transformation<'a, 't> {
         cx: &XsltContext<'t>,
     ) -> Result<Vec<Group<'t>>, XsltError> {
         let size = population.len();
+        // `eq` reads a date or time without a timezone with the implicit timezone (§14.3).
+        let timezone = self.implicit_timezone();
         let mut groups: Vec<Group<'t>> = Vec::new();
         let mut index = GroupIndex::default();
         for (position, item) in population.iter().enumerate() {
             for key in self.grouping_keys(expr, item, position + 1, size, frame, cx)? {
                 // `placement_of` has no slot for exactly one value, NaN, which
                 // `eq` makes equal to nothing and grouping to itself.
-                let Some(placement) = placement_of(&key, collation) else {
+                let Some(placement) = placement_of(&key, collation, timezone) else {
                     match index.nan {
                         Some(g) => groups[g].add(item, position),
                         None => {
@@ -413,7 +417,14 @@ impl<'a, 't> Transformation<'a, 't> {
                     continue;
                 };
                 let probe = GroupIndex::probe(&placement, collation);
-                match index.find(&groups, &key, &placement, probe.as_ref(), collation) {
+                match index.find(
+                    &groups,
+                    &key,
+                    &placement,
+                    probe.as_ref(),
+                    collation,
+                    timezone,
+                ) {
                     Some(g) => groups[g].add(item, position),
                     None => {
                         index.insert(groups.len(), placement, probe);
@@ -446,6 +457,7 @@ impl<'a, 't> Transformation<'a, 't> {
         cx: &XsltContext<'t>,
     ) -> Result<Vec<Group<'t>>, XsltError> {
         let size = population.len();
+        let timezone = self.implicit_timezone();
         let mut groups: Vec<Group<'t>> = Vec::new();
         let mut previous: Option<XmlValue> = None;
         for (position, item) in population.iter().enumerate() {
@@ -462,7 +474,9 @@ impl<'a, 't> Transformation<'a, 't> {
             }
             let key = keys.pop().expect("exactly one key");
             match (previous.as_ref(), groups.last_mut()) {
-                (Some(before), Some(group)) if grouping_keys_equal(before, &key, collation) => {
+                (Some(before), Some(group))
+                    if grouping_keys_equal(before, &key, collation, timezone) =>
+                {
                     group.add(item, position);
                 }
                 _ => groups.push(Group::new(item, Some(key.clone()), position)),
@@ -570,8 +584,13 @@ fn group_context<'t>(
 /// Whether two grouping keys are the same (§14.3): `eq`, strings under the
 /// grouping collation, incomparable values unequal — and NaN equal to NaN: "For
 /// the purposes of grouping, the value NaN is considered equal to itself."
-fn grouping_keys_equal(a: &XmlValue, b: &XmlValue, collation: &KeyCollation) -> bool {
-    (is_nan(a) && is_nan(b)) || key_values_equal(a, b, collation)
+fn grouping_keys_equal(
+    a: &XmlValue,
+    b: &XmlValue,
+    collation: &KeyCollation,
+    timezone: TimezoneOffset,
+) -> bool {
+    (is_nan(a) && is_nan(b)) || key_values_equal(a, b, collation, timezone)
 }
 
 /// Whether `value` is a NaN of `xs:float` or `xs:double` (the two are one

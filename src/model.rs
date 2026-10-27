@@ -31,10 +31,11 @@ use crate::stylesheet::{CompatMode, ModuleId, StaticContextId, StaticContexts};
 /// The static rules (XTSE1505, XTSE1520, XTSE1530, XTSE0020; XTSE1660 for a
 /// basic processor) are the checker's (`compile/checks.rs`). Every value is
 /// evaluated on every node constructor since M4f (`runtime/validate.rs`); a
-/// `type` naming an XPath 2.0 type an XML Schema 1.0 set has no definition of
+/// `type` naming one of the XPath 2.0 types §3.13 puts in scope
 /// (`xs:untypedAtomic`, `xs:anyAtomicType`, `xs:dayTimeDuration`,
-/// `xs:yearMonthDuration`) since M4g, through a workaround for upstream
-/// proposal C72 (`receiver::XPathType`).
+/// `xs:yearMonthDuration`) in either XML Schema version — upstream's
+/// `SchemaSet::xpath_type` (C72 / C92; M4g's workaround, `receiver::XPathType`,
+/// went in the Wave B follow-up).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Validation {
     /// The new node and the nodes it contains are untyped (§19.2.1.1).

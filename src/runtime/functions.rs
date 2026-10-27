@@ -137,8 +137,14 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                 // in the first argument." Otherwise a string argument resolves
                 // against the base URI from the static context, and a *node*
                 // argument against the base URI of the node that contained it.
+                // A node's base URI is XDM's `base-uri` accessor — its `xml:base`
+                // chain resolved against its document's base URI
+                // (`stylesheet::node_base_uri`); `DomNavigator::base_uri` is the
+                // unresolved `xml:base` in scope (upstream C7's contract).
+                let node_base =
+                    |nav: &Nav<'t>| crate::stylesheet::node_base_uri(nav, self.static_base_uri());
                 let explicit_base = args.get(1).and_then(|value| match value.first() {
-                    Some(XmlItem::Node(nav)) => Some(nav.base_uri().to_string()),
+                    Some(XmlItem::Node(nav)) => Some(node_base(nav)),
                     _ => None,
                 });
                 let items = match args.first() {
@@ -149,7 +155,7 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                 for item in items {
                     let (uri, item_base) = match &item {
                         XmlItem::Atomic(value) => (value.to_string_value(), None),
-                        XmlItem::Node(nav) => (nav.value(), Some(nav.base_uri().to_string())),
+                        XmlItem::Node(nav) => (nav.value(), Some(node_base(nav))),
                     };
                     let base = explicit_base
                         .clone()

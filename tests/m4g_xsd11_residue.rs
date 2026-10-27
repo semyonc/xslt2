@@ -9,13 +9,17 @@
 //!   components"). In a 1.1 context schema documents are XML Schema 1.1 documents (`xs:assert`,
 //!   `xs:alternative`), assertions are evaluated on validated sources and constructed trees, and
 //!   the XPath 2.0 types XML Schema 1.1 defines are the set's own.
-//! - **Upstream C72** (workaround): the XPath 2.0 types §3.13 puts in scope that an XML Schema 1.0
-//!   set has no definition of — `xs:untypedAtomic`, `xs:anyAtomicType`, `xs:dayTimeDuration`,
-//!   `xs:yearMonthDuration` — named by `[xsl:]type` are validated by this crate against their
-//!   definitions (XDM 1.0 §2.6.2), and annotated with the nearest type of the set, with a warning.
-//! - **Upstream C89** (workaround): an element's `default` / `fixed` value of type `xs:QName` /
+//! - **Upstream C72** (a workaround in M4g, gone since the Wave B follow-up): the XPath 2.0 types
+//!   §3.13 puts in scope — `xs:untypedAtomic`, `xs:anyAtomicType`, `xs:dayTimeDuration`,
+//!   `xs:yearMonthDuration` — named by `[xsl:]type` were validated by this crate against their
+//!   definitions (XDM 1.0 §2.6.2) and annotated with the nearest type of an XML Schema 1.0 set, with
+//!   a warning, the durations fenced. Upstream now has them in every set (`SchemaSet::xpath_type`):
+//!   the tests below check the exact annotations in both versions (also `tests/wave_b_followup.rs`).
+//! - **Upstream C89**: an element's `default` / `fixed` value of type `xs:QName` /
 //!   `xs:NOTATION` whose namespace no prefix in scope binds is written with a prefix declared on
-//!   the element, which every validation outside the one that supplied it reads.
+//!   the element, which every validation outside the one that supplied it reads (M4g held every
+//!   start tag that might need it; since the Wave B follow-up only those whose value does, read
+//!   with upstream's `element_value_constraint_for_type`).
 //!
 //! Every test goes through the public API and cites the rule it checks.
 
@@ -457,20 +461,19 @@ fn xpath_types_are_the_sets_own_in_1_1() {
     );
 }
 
-// ══ Upstream C72, worked around: XPath 2.0 types in an XML Schema 1.0 set ═════════════════════
+// ══ Upstream C72: XPath 2.0 types in an XML Schema 1.0 set (the set's own since Wave B) ════════
 
 /// `xs:untypedAtomic` on an element in a 1.0 set (`validation-0108`, `-0109`). XDM 1.0 §2.6.2:
 /// "The datatype xs:untypedAtomic denotes untyped atomic data, such as text that has not been
 /// assigned a more specific type"; every string is a value of it (§2.6.4: "When xs:untypedAtomic
 /// is specified as the type, no validation takes place"). As a simple type it admits no element
 /// children and no attributes but `xsi:*` (XML Schema 1.0 Part 1 §3.3.4, Element Locally Valid
-/// (Type) clause 3.1): those are XTTE1540. A 1.0 set has no component for it, so the element is
-/// annotated `xs:anySimpleType`, its nearest type there: its typed value is its string value as
-/// `xs:untypedAtomic` (XDM 1.0 §3.3.1.2: "If T is xs:anySimpleType or xs:anyAtomicType, the typed
-/// value is the [schema normalized value] as an instance of xs:untypedAtomic"), it is no
-/// `xs:untyped` element, and it is an `xs:anySimpleType` one; what is still wrong — `instance of
-/// element(*, xs:untypedAtomic)` and `element(*, xs:anyAtomicType)` are false — is pinned, and
-/// the run says so in a warning naming C72.
+/// (Type) clause 3.1): those are XTTE1540. The element is annotated `xs:untypedAtomic` (upstream's
+/// component of the 1.0 set, `SchemaSet::xpath_type`; M4g's workaround annotated it
+/// `xs:anySimpleType`, with a warning): its typed value is its string value as `xs:untypedAtomic`,
+/// it is no `xs:untyped` element, and it is an `xs:untypedAtomic`, `xs:anyAtomicType` and
+/// `xs:anySimpleType` one (XDM 1.0 §2.6.2: "xs:untypedAtomic" is derived from `xs:anyAtomicType`,
+/// whose "base type is xs:anySimpleType"). No warning.
 #[test]
 fn untyped_atomic_on_an_element_in_1_0() {
     let main = sheet(
@@ -489,14 +492,9 @@ fn untyped_atomic_on_an_element_in_1_0() {
     let ran = run_with(v10(), &main, "<src/>", SourceValidation::Skip);
     assert_eq!(
         inner(&ran.result.expect("valid")),
-        "true true false true [ ab  cd ] false false"
+        "true true false true [ ab  cd ] true true"
     );
-    assert_eq!(ran.warnings.len(), 1, "{:?}", ran.warnings);
-    assert!(
-        ran.warnings[0].contains("xs:untypedAtomic") && ran.warnings[0].contains("C72"),
-        "{:?}",
-        ran.warnings
-    );
+    assert!(ran.warnings.is_empty(), "{:?}", ran.warnings);
     assert_codes(
         v10(),
         &[
@@ -516,16 +514,15 @@ fn untyped_atomic_on_an_element_in_1_0() {
     );
 }
 
-/// `xs:dayTimeDuration` / `xs:yearMonthDuration` in a 1.0 context: `XSLT2-NOTIMPL` naming upstream
-/// proposal C72 (decision D-g2 as the user revised it, review R3). A 1.0 set has no definition of
-/// either type, and the nearest type it has, `xs:duration`, would give a typed value that is not
-/// ordered: XPath 2.0 B.2 defines only `eq` / `ne` for it, so ordering, arithmetic, `sum` / `max` and
-/// `xsl:sort` would raise type errors a conforming stylesheet does not cause. Raised where the type
-/// is resolved, for every construct (element, attribute, copy, document, and an `xsi:type` naming
-/// one under `xs:anyAtomicType`), the message pointing to the XML Schema 1.1 option, which has both
-/// types natively (`durations_are_native_in_1_1`).
+/// `xs:dayTimeDuration` / `xs:yearMonthDuration` in a 1.0 context. M4g fenced them (`XSLT2-NOTIMPL`
+/// naming upstream proposal C72; decision D-g2 as the user revised it, review R3): a 1.0 set had no
+/// definition of either type, and the nearest one, `xs:duration`, would have given an unordered
+/// typed value. Upstream's 1.0 set has both now (`SchemaSet::xpath_type`), so every construct the
+/// fence covered — element, attribute, copy, document, and an `xsi:type` naming one under
+/// `xs:anyAtomicType` — validates against the type itself; the typed values answer as XPath defines
+/// them (`tests/wave_b_followup.rs`, `durations_answer_as_xpath_defines_them_in_1_0`).
 #[test]
-fn durations_are_fenced_in_1_0_naming_c72() {
+fn durations_are_the_sets_own_in_1_0() {
     let ns = r#"<xsl:namespace name="s">http://www.w3.org/2001/XMLSchema</xsl:namespace>"#;
     let src = r#"<xsl:variable name="s"><z>PT1H</z><w t="PT1H"/></xsl:variable>"#;
     let cases = [
@@ -552,24 +549,13 @@ fn durations_are_fenced_in_1_0_naming_c72() {
             false,
             &format!(r#"<xsl:template match="/">{content}</xsl:template>"#),
         );
-        match run_with(v10(), &main, "<src/>", SourceValidation::Skip).result {
-            Err(e)
-                if e.is_not_implemented()
-                    && e.message.contains("C72")
-                    && e.message.contains("SchemaContextBuilder::xsd_version")
-                    && !e.message.contains("(M4") => {}
-            other => wrong.push(format!("{content}\n    got {other:?}")),
+        let ran = run_with(v10(), &main, "<src/>", SourceValidation::Skip);
+        match ran.result {
+            Ok(_) if ran.warnings.is_empty() => {}
+            other => wrong.push(format!("{content}\n    got {other:?}, {:?}", ran.warnings)),
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-    // An instruction that is not evaluated raises nothing (the fence is where the type is resolved).
-    assert_eq!(
-        result(
-            v10(),
-            r#"<out><xsl:if test="false()"><z xsl:type="xs:dayTimeDuration">PT1H</z></xsl:if></out>"#
-        ),
-        "<out/>"
-    );
 }
 
 /// The working path for the two durations: an XML Schema 1.1 context, whose set has both types
@@ -648,8 +634,9 @@ fn durations_are_native_in_1_1() {
 /// `xs:anyAtomicType` in a 1.0 set. XDM 1.0 §2.6.2: "an atomic type that includes all atomic
 /// values (and no values that are not atomic)"; XML Schema 1.1 Part 2 §3.2.2.2: its lexical space
 /// is every string of XML characters. Every string is valid, an element child or an attribute is
-/// not (a simple type); annotated `xs:anySimpleType` (pinned: `instance of element(*,
-/// xs:anyAtomicType)` is false), typed value `xs:untypedAtomic` (XDM 1.0 §3.3.1.2). An `xsi:type`
+/// not (a simple type); annotated `xs:anyAtomicType` (upstream's component of the 1.0 set; M4g
+/// annotated its stand-in `xs:anySimpleType`, from which it derives, so the `xs:anySimpleType` tests
+/// below are true either way), typed value `xs:untypedAtomic` (XDM 1.0 §3.3.1.2). An `xsi:type`
 /// naming an atomic type is honoured (Structures clause 1.2.1.2.4: an `xsi:type` validly derived
 /// from the stipulated type replaces it), one naming a list type is XTTE1540. (`s` is bound by
 /// `xsl:namespace`, as in the next test.)
@@ -686,7 +673,8 @@ fn any_atomic_type_in_1_0() {
     );
 }
 
-/// An `xsi:type` on an element validated against `xs:untypedAtomic` in a 1.0 set: Structures
+/// An `xsi:type` on an element validated against `xs:untypedAtomic` in a 1.0 set (upstream's
+/// component since the Wave B follow-up, M4g's stand-in before): Structures
 /// clause 1.2.1.2.4 lets it replace the stipulated type only when "validly derived from that type
 /// definition"; no type is derived from `xs:untypedAtomic` ("No predefined schema types are derived
 /// from xs:untypedAtomic", XPath 2.0 §2.5.1), so any other `xsi:type` is XTTE1540, while one naming
@@ -718,9 +706,10 @@ fn xsi_type_under_an_xpath_type_in_1_0() {
     );
 }
 
-/// One warning per transformation and type: the workaround is never silent.
+/// M4g's workaround warned once per transformation and type where it annotated a stand-in; the
+/// annotations are exact now (upstream `SchemaSet::xpath_type`), so there is nothing to say.
 #[test]
-fn the_approximation_is_reported_once_per_type() {
+fn the_xpath_types_give_no_warning() {
     let main = sheet(
         false,
         r#"<xsl:template match="/"><out>
@@ -730,15 +719,10 @@ fn the_approximation_is_reported_once_per_type() {
     );
     let ran = run_with(v10(), &main, "<src/>", SourceValidation::Skip);
     ran.result.expect("valid");
-    assert_eq!(ran.warnings.len(), 2, "{:?}", ran.warnings);
-    assert!(
-        ran.warnings.iter().all(|w| w.contains("C72")),
-        "{:?}",
-        ran.warnings
-    );
+    assert!(ran.warnings.is_empty(), "{:?}", ran.warnings);
 }
 
-// ══ Upstream C89, worked around: QName defaults that need a namespace declaration ═════════════
+// ══ Upstream C89: QName defaults that need a namespace declaration (held start tags) ═══════════
 
 /// XML Schema 1.1 Part 1 §3.3.1: "if the element being ·validated· is empty, then for purposes of
 /// calculating the [schema normalized value] and other contributions to the
@@ -989,11 +973,10 @@ fn a_mismatched_location_is_passed_over_when_a_host_schema_has_the_namespace() {
 /// from it (XTTE1540, both versions), while `xs:untypedAtomic`, `xs:dayTimeDuration` and
 /// `xs:yearMonthDuration` are (XPath 2.0 §2.5.1: "All primitive atomic types … have
 /// xs:anyAtomicType as their base type"; the durations restrict `xs:duration`) and replace it
-/// (Structures clause 1.2.1.2.4), validated by their own rules: the durations in a 1.1 context (in
-/// a 1.0 one they are fenced, `durations_are_fenced_in_1_0_naming_c72`), `xs:untypedAtomic` in a
-/// 1.0 one through its stand-in, as `[xsl:]type` naming it (in a 1.1 one it is C92,
-/// `xsi_type_naming_untyped_atomic_in_a_1_1_context_names_c92`). (`s` is bound by
-/// `xsl:namespace`, as in `xsi_type_under_an_xpath_type_in_1_0`.)
+/// (Structures clause 1.2.1.2.4), validated by their own rules — in both versions since the Wave B
+/// follow-up (`tests/wave_b_followup.rs`, `an_xsi_type_under_any_atomic_type_in_both_versions`;
+/// M4g fenced the durations in a 1.0 context and gave `xs:untypedAtomic` its stand-in there).
+/// (`s` is bound by `xsl:namespace`, as in `xsi_type_under_an_xpath_type_in_1_0`.)
 #[test]
 fn an_xsi_type_under_any_atomic_type_follows_the_xpath_hierarchy() {
     let ns = r#"<xsl:namespace name="s">http://www.w3.org/2001/XMLSchema</xsl:namespace>"#;
@@ -1036,7 +1019,7 @@ fn an_xsi_type_under_any_atomic_type_follows_the_xpath_hierarchy() {
         );
     }
     // `xs:untypedAtomic` under `xs:anyAtomicType` in a 1.0 set: valid for every string, annotated
-    // with its stand-in, as `[xsl:]type="xs:untypedAtomic"` is.
+    // `xs:untypedAtomic` (derived from `xs:anySimpleType`), as `[xsl:]type="xs:untypedAtomic"` is.
     let top = format!(
         r#"<xsl:variable name="u" as="element()"><z xsl:type="xs:anyAtomicType" xsi:type="s:untypedAtomic">{ns} a b </z></xsl:variable>"#
     );
@@ -1050,25 +1033,24 @@ fn an_xsi_type_under_any_atomic_type_follows_the_xpath_hierarchy() {
     );
 }
 
-/// Upstream C92 (`xs:untypedAtomic` in a 1.1 set has no validator) also meets an `xsi:type` naming
-/// it (review R5). An `xsi:type` cannot be validated host-side by a substitute: a stand-in
-/// `xs:anySimpleType` would fail the derivation check against the element's type (it is not derived
-/// from `xs:anyAtomicType`), so the processor says what it cannot do — `XSLT2-NOTIMPL` naming C92 —
-/// rather than report a type error of the stylesheet.
+/// An `xsi:type` naming `xs:untypedAtomic` in a 1.1 context (review R5). M4g fenced it
+/// (`XSLT2-NOTIMPL` naming upstream proposal C92: a 1.1 set had no validator for the type). Upstream
+/// has one now, and the validator of constructed trees resolves the XPath 2.0 types in an
+/// `xsi:type` (`ValidationFlags::XPATH_TYPES`): `xs:untypedAtomic` is derived from
+/// `xs:anyAtomicType` (XDM 1.0 §2.6.2) and governs the element.
 #[test]
-fn xsi_type_naming_untyped_atomic_in_a_1_1_context_names_c92() {
+fn xsi_type_naming_untyped_atomic_in_a_1_1_context_is_valid() {
     let ns = r#"<xsl:namespace name="s">http://www.w3.org/2001/XMLSchema</xsl:namespace>"#;
-    let main = sheet(
-        true,
-        &format!(
-            r#"<xsl:template match="/"><out><z xsl:type="xs:anyAtomicType" xsi:type="s:untypedAtomic">{ns}x</z></out></xsl:template>"#
+    assert_eq!(
+        answers(
+            v11(),
+            &format!(
+                r#"<xsl:variable name="u" as="element()"><z xsl:type="xs:anyAtomicType" xsi:type="s:untypedAtomic">{ns}x</z></xsl:variable>"#
+            ),
+            "$u instance of element(*, xs:untypedAtomic), data($u) instance of xs:untypedAtomic"
         ),
+        "true true"
     );
-    let e = run_with(v11(), &main, "<src/>", SourceValidation::Skip)
-        .result
-        .expect_err("C92");
-    assert!(e.is_not_implemented(), "{e}");
-    assert!(e.message.contains("C92"), "{e}");
 }
 
 /// The 1.1 built-in types in scope (review R6, R7). XPath 2.0 §3.10.4: "For every atomic type in the
@@ -1109,9 +1091,9 @@ fn xsd11_built_ins_have_constructors_and_xs_error_is_no_part_2_type() {
     assert_eq!(e.code, codes::XTSE1520, "{e}");
 }
 
-/// No C72 warning where the annotation is exact (review R9): an attribute copied with
-/// `type="xs:untypedAtomic"` is exactly an unvalidated one, as with `xsl:attribute`; nor for a
-/// `copy-of` that copies only atomic values.
+/// No warning where the annotation is exact (review R9 — and since the Wave B follow-up there is no
+/// C72 warning at all): an attribute copied with `type="xs:untypedAtomic"` is exactly an unvalidated
+/// one, as with `xsl:attribute`; nor for a `copy-of` that copies only atomic values.
 #[test]
 fn an_exact_xpath_type_annotation_gives_no_warning() {
     let main = sheet(

@@ -281,10 +281,6 @@ pub enum CopyValidation {
     /// of `strip`, on a document node document-level validation whose element
     /// child is untyped.
     Untyped,
-    /// `type` naming an XPath 2.0 type the schema set cannot validate against
-    /// itself ([`XPathType`]; the workaround for upstream proposal C72): as
-    /// `type`, with [`Boundary::XPathType`].
-    XPathType(XPathType),
 }
 
 impl CopyValidation {
@@ -293,10 +289,7 @@ impl CopyValidation {
     pub fn validates(self) -> bool {
         matches!(
             self,
-            CopyValidation::Strict
-                | CopyValidation::Lax
-                | CopyValidation::Type(_)
-                | CopyValidation::XPathType(_)
+            CopyValidation::Strict | CopyValidation::Lax | CopyValidation::Type(_)
         )
     }
 
@@ -309,7 +302,6 @@ impl CopyValidation {
             CopyValidation::Lax => Some(Boundary::Lax),
             CopyValidation::Type(type_key) => Some(Boundary::Type(type_key)),
             CopyValidation::Untyped => Some(Boundary::Untyped),
-            CopyValidation::XPathType(xpath) => Some(Boundary::XPathType(xpath)),
         }
     }
 }
@@ -379,7 +371,11 @@ pub enum Boundary {
     Lax,
     /// `[xsl:]type` (§19.2.1.2): the element is assessed with this type as
     /// the "processor-stipulated type definition", whatever its name; on a
-    /// document node, document-level validation whose element child is.
+    /// document node, document-level validation whose element child is. Any
+    /// in-scope type (§3.13), the XPath 2.0 types `xs:untypedAtomic`,
+    /// `xs:anyAtomicType`, `xs:dayTimeDuration` and `xs:yearMonthDuration`
+    /// included: upstream has them as components of every schema set
+    /// (`SchemaSet::xpath_type`).
     Type(TypeKey),
     /// `[xsl:]type="xs:untyped"`: XDM 1.0 §2.6.2, "the dynamic type of an
     /// element node that has not been validated, or has been validated in skip
@@ -387,131 +383,6 @@ pub enum Boundary {
     /// `strip`; on a document node, document-level validation (§19.2.2 "when a
     /// type attribute is present": XTTE1550) whose element child is untyped.
     Untyped,
-    /// `[xsl:]type` naming an XPath 2.0 type (§3.13) the schema set cannot
-    /// validate against itself — **a workaround for upstream proposal C72**
-    /// ([`XPathType`]): the element is assessed as [`Boundary::Type`] assesses
-    /// it, against the type's nearest definition in the set
-    /// ([`XPathType::stand_in`]) plus the rule that definition lacks
-    /// ([`XPathType::admits`]), and annotated with the type itself when the set
-    /// has a component for it, otherwise with that nearest definition.
-    XPathType(XPathType),
-}
-
-/// A type XPath 2.0 adds to the XML Schema namespace (XDM 1.0 §2.6.2: "the data
-/// model defines five additional types: xs:anyAtomicType, xs:untyped,
-/// xs:untypedAtomic, xs:dayTimeDuration, and xs:yearMonthDuration"), which
-/// §3.13 puts in the in-scope schema components of every XSLT 2.0 processor
-/// — and which an `[xsl:]type` attribute may therefore name (§19.2.1.2) — but
-/// which `xsd-schema` cannot validate against: an XML Schema 1.0 set has no
-/// component for any of them, and an XML Schema 1.1 set none that validates
-/// `xs:untypedAtomic` (`xs:untyped` is [`Boundary::Untyped`] instead).
-///
-/// **Workaround** for upstream proposals C72 (`xslt_doc/WAVE_B_PLAN.md`), which
-/// would give an XML Schema 1.0 set these components, and C92, a validator for
-/// a 1.1 set's `xs:untypedAtomic`: this crate validates
-/// against the type's definition itself and annotates with the nearest type
-/// the set has, saying so (`Transformation::take_warnings`). Where the set
-/// has the type, the annotation is exact. The two durations never come here
-/// from a 1.0 set: they are `XSLT2-NOTIMPL` naming C72 there (their stand-in's
-/// typed value, an `xs:duration`, is not ordered; `runtime::validate`'s
-/// `DurationPolicy`), and a 1.1 set has them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum XPathType {
-    /// `xs:untypedAtomic`: every string ("When xs:untypedAtomic is specified
-    /// as the type, no validation takes place", XDM 1.0 §2.6.4); stand-in
-    /// `xs:anySimpleType`.
-    UntypedAtomic,
-    /// `xs:anyAtomicType`: every string (its lexical space is "the set of all
-    /// finite-length sequences of zero or more characters", XML Schema 1.1
-    /// Part 2 §3.2.2.2); stand-in `xs:anySimpleType`.
-    AnyAtomicType,
-    /// `xs:dayTimeDuration`: `xs:duration` restricted by the pattern
-    /// `[^YM]*[DT].*` (XDM 1.0 §2.6.2); stand-in `xs:duration`.
-    DayTimeDuration,
-    /// `xs:yearMonthDuration`: `xs:duration` restricted by the pattern
-    /// `[^DT]*` (XDM 1.0 §2.6.2); stand-in `xs:duration`.
-    YearMonthDuration,
-}
-
-impl XPathType {
-    /// The type `xs:{local}` names, if it is one of these.
-    pub fn of_local_name(local: &str) -> Option<XPathType> {
-        Some(match local {
-            "untypedAtomic" => XPathType::UntypedAtomic,
-            "anyAtomicType" => XPathType::AnyAtomicType,
-            "dayTimeDuration" => XPathType::DayTimeDuration,
-            "yearMonthDuration" => XPathType::YearMonthDuration,
-            _ => return None,
-        })
-    }
-
-    /// The local name of the type in the XML Schema namespace.
-    pub fn local_name(self) -> &'static str {
-        match self {
-            XPathType::UntypedAtomic => "untypedAtomic",
-            XPathType::AnyAtomicType => "anyAtomicType",
-            XPathType::DayTimeDuration => "dayTimeDuration",
-            XPathType::YearMonthDuration => "yearMonthDuration",
-        }
-    }
-
-    /// The nearest type of every schema set, which the element or attribute is
-    /// validated against (with [`admits`](Self::admits)): `xs:anySimpleType`
-    /// (every string, simple content) for `xs:untypedAtomic` and
-    /// `xs:anyAtomicType`, `xs:duration` for the two durations.
-    pub fn stand_in(self, set: &SchemaSet) -> TypeKey {
-        let builtins = set.builtin_types();
-        TypeKey::Simple(match self {
-            XPathType::UntypedAtomic | XPathType::AnyAtomicType => builtins.any_simple_type,
-            XPathType::DayTimeDuration | XPathType::YearMonthDuration => builtins.duration,
-        })
-    }
-
-    /// The set's own component for the type, when it has one (an XML Schema 1.1
-    /// set has all four).
-    pub fn native(self, set: &SchemaSet) -> Option<TypeKey> {
-        let builtins = set.builtin_types();
-        match self {
-            XPathType::UntypedAtomic => builtins.untyped_atomic,
-            XPathType::AnyAtomicType => builtins.any_atomic_type,
-            XPathType::DayTimeDuration => builtins.day_time_duration,
-            XPathType::YearMonthDuration => builtins.year_month_duration,
-        }
-        .map(TypeKey::Simple)
-    }
-
-    /// The annotation a node valid against the type gets: the set's own
-    /// component, else the stand-in.
-    pub fn annotation(self, set: &SchemaSet) -> TypeKey {
-        self.native(set).unwrap_or_else(|| self.stand_in(set))
-    }
-
-    /// Whether the annotation is the type itself.
-    pub fn is_exact(self, set: &SchemaSet) -> bool {
-        self.native(set).is_some()
-    }
-
-    /// The rule the stand-in lacks, on the [schema normalized value] a value of
-    /// the stand-in has (XDM 1.0 §2.6.2's patterns, implicitly anchored as an
-    /// XML Schema pattern is): `[^YM]*[DT].*` — a `D` or `T` before which there
-    /// is no `Y` or `M` — for `xs:dayTimeDuration`, `[^DT]*` for
-    /// `xs:yearMonthDuration`; nothing for the other two.
-    pub fn admits(self, normalized: &str) -> bool {
-        match self {
-            XPathType::UntypedAtomic | XPathType::AnyAtomicType => true,
-            XPathType::DayTimeDuration => match normalized.find(['D', 'T']) {
-                Some(at) => !normalized[..at].contains(['Y', 'M']),
-                None => false,
-            },
-            XPathType::YearMonthDuration => !normalized.contains(['D', 'T']),
-        }
-    }
-}
-
-impl std::fmt::Display for XPathType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "xs:{}", self.local_name())
-    }
 }
 
 impl Boundary {
@@ -577,7 +448,8 @@ pub trait Receiver<'t> {
 
     /// The base URI of an element just opened with
     /// [`start_element`](Receiver::start_element), for the case where the
-    /// element ends up **parentless** (§11.9.1, `xsl:copy`).
+    /// element ends up **parentless** (§11.9.1, `xsl:copy`; §11.1 and §11.2,
+    /// literal result elements and `xsl:element`: the instruction's base URI).
     ///
     /// > The base URI of a node is copied … If the copied node is subsequently
     /// > attached as a child to a new element or document node, the final copy
@@ -2853,9 +2725,9 @@ pub struct SequenceCollector<'s, 't> {
     /// The validator a `strict` boundary in a group validates with
     /// ([`with_validator`](Self::with_validator)).
     validator: Option<&'s SchemaValidator<'s>>,
-    /// Where the groups' validation says what the run's warnings say
-    /// ([`with_warnings`](Self::with_warnings)).
-    warnings: Option<&'s RefCell<Vec<String>>>,
+    /// The transformation's value constraints, which the groups' validation reads
+    /// ([`with_value_constraints`](Self::with_value_constraints)).
+    constraints: Option<&'s crate::runtime::validate::ValueConstraints>,
     /// What the open group will produce.
     group: GroupKind,
     /// The base URI the open `GroupKind::Document` group takes (§11.5).
@@ -2900,7 +2772,7 @@ impl<'s, 't> SequenceCollector<'s, 't> {
             zero_length_texts: 0,
             pending_boundary: None,
             validator: None,
-            warnings: None,
+            constraints: None,
         }
     }
 
@@ -2912,11 +2784,13 @@ impl<'s, 't> SequenceCollector<'s, 't> {
         self
     }
 
-    /// The collector of a transformation whose warnings are `warnings`: the
-    /// validation of its groups adds the C72 workaround's there
-    /// (`Validating::with_warnings`).
-    pub(crate) fn with_warnings(mut self, warnings: Option<&'s RefCell<Vec<String>>>) -> Self {
-        self.warnings = warnings;
+    /// The collector of a transformation, whose value constraints the
+    /// validation of its groups reads and keeps.
+    pub(crate) fn with_value_constraints(
+        mut self,
+        constraints: Option<&'s crate::runtime::validate::ValueConstraints>,
+    ) -> Self {
+        self.constraints = constraints;
         self
     }
 
@@ -2927,7 +2801,8 @@ impl<'s, 't> SequenceCollector<'s, 't> {
         builder: ResultBuilder<'t>,
         schema_set: Option<&'t SchemaSet>,
     ) -> Validating<'s, 't> {
-        Validating::new(builder, schema_set, self.validator).with_warnings(self.warnings)
+        Validating::new(builder, schema_set, self.validator)
+            .with_value_constraints(self.constraints)
     }
 
     /// How many items of the sequence were zero-length text nodes, which
@@ -3062,11 +2937,30 @@ impl<'s, 't> SequenceCollector<'s, 't> {
         ) -> Result<(), XsltError>,
         locate: Locate,
     ) -> Result<(), XsltError> {
+        self.push_parentless_with_base(build, locate, None)
+    }
+
+    /// [`push_parentless`](Self::push_parentless), the hidden document taking
+    /// `base` as its base URI — the base URI of a parentless element built
+    /// in it that has no `xml:base` of its own (the navigator reports it
+    /// there; `stylesheet::node_base_uri` reads it).
+    fn push_parentless_with_base(
+        &mut self,
+        build: impl FnOnce(
+            &mut ComplexContentNormalizer<'t, Validating<'s, 't>>,
+        ) -> Result<(), XsltError>,
+        locate: Locate,
+        base: Option<String>,
+    ) -> Result<(), XsltError> {
         let builder = self.new_builder(GroupKind::Element)?;
         let schema_set = self.store.borrow().schema_set();
         let mut pipeline = ComplexContentNormalizer::new(self.validating(builder, schema_set));
         build(&mut pipeline)?;
-        self.push_holder(pipeline.into_inner().into_inner().finish()?, locate)
+        let mut doc = pipeline.into_inner().into_inner().finish()?;
+        if let Some(base) = base.filter(|base| !base.is_empty()) {
+            doc.set_document_base_uri(Some(self.store.borrow().intern_uri(&base)));
+        }
+        self.push_holder(doc, locate)
     }
 
     /// A parentless namespace node (§11.7, §6.3).
@@ -3133,6 +3027,18 @@ impl<'s, 't> SequenceCollector<'s, 't> {
     /// is not the node it was copied from — which is the whole difference
     /// between `xsl:copy-of` and `xsl:sequence` when the result lands in a
     /// sequence rather than in element content.
+    ///
+    /// §11.9.2: "The base URI of a node is copied, except in the case of an
+    /// element node having an xml:base attribute, in which case the base URI
+    /// of the new node is taken as the value of the xml:base attribute,
+    /// resolved if it is relative against the base URI of the xsl:copy-of
+    /// instruction." The copy of a document node, and of an element without
+    /// an `xml:base` of its own, takes the original's base URI
+    /// (`stylesheet::node_base_uri`: its `xml:base` chain resolved) as the base
+    /// URI of its hidden document. An element with one carries it: its base
+    /// URI is that `xml:base` resolved — upstream's `fn:base-uri` resolves it
+    /// against the static base URI of the expression that asks, not of the
+    /// instruction (noticed; a proposed upstream row).
     fn push_copy(
         &mut self,
         nav: &Nav<'t>,
@@ -3153,7 +3059,11 @@ impl<'s, 't> SequenceCollector<'s, 't> {
                 pipeline.start_document()?;
                 pipeline.copy_selected(nav, namespaces, validation)?;
                 pipeline.end_document()?;
-                let doc = pipeline.into_inner().into_inner().finish()?;
+                let mut doc = pipeline.into_inner().into_inner().finish()?;
+                let base = crate::stylesheet::node_base_uri(nav, "");
+                if !base.is_empty() {
+                    doc.set_document_base_uri(Some(self.store.borrow().intern_uri(&base)));
+                }
                 let id = self.store.borrow_mut().insert(doc, None);
                 let root = self.store.borrow().navigator(id);
                 self.items.push(XmlItem::Node(root));
@@ -3191,7 +3101,10 @@ impl<'s, 't> SequenceCollector<'s, 't> {
             }
             _ => {
                 let source = nav.clone();
-                self.push_parentless(
+                let base = (nav.node_type() == DomNodeType::Element
+                    && crate::stylesheet::attr_ns(nav, crate::names::XML_NS, "base").is_none())
+                .then(|| crate::stylesheet::node_base_uri(nav, ""));
+                self.push_parentless_with_base(
                     move |out| {
                         out.start_element(&Name::local(HOLDER), None, false)?;
                         out.copy_selected(&source, namespaces, validation)?;
@@ -3199,6 +3112,7 @@ impl<'s, 't> SequenceCollector<'s, 't> {
                         out.end_element()
                     },
                     Locate::Child,
+                    base,
                 )
             }
         }

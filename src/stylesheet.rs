@@ -1144,6 +1144,37 @@ pub fn base_uri_of(nav: &Nav<'_>, module_uri: &str) -> String {
     uri
 }
 
+/// The base URI of a node of a tree — the XDM `base-uri` accessor, as `fn:base-uri` computes it:
+/// the `xml:base` values of its ancestor-or-self elements (an attribute, text, comment or processing
+/// instruction takes its parent element's), resolved outermost first against the base URI of the
+/// document the node lives in, which itself resolves against `fallback` (the static base URI; it is
+/// the whole answer when the document has none).
+///
+/// A parentless element lives in a hidden document whose base URI is the element's own
+/// (`SequenceCollector`). When it carries an `xml:base` of its own, that document base is not used
+/// and the chain resolves against `fallback`, as upstream's `fn:base-uri` does (it reads the
+/// parentless element's `xml:base` where the document's base URI would be, `DomNavigator::base_uri`)
+/// — so that `document()` resolves a relative URI in such a node against exactly what `base-uri()`
+/// reports, and the element's `xml:base`, already in a base URI recorded for it (`xsl:copy`), is not
+/// applied twice.
+///
+/// Not `DomNavigator::base_uri`, which is **unresolved** (upstream's written contract, `wave-b`
+/// batch (x), C7): `BufferDocNavigator` answers it with the raw value of the nearest `xml:base`, or
+/// the document's base URI when there is none — "the consumer resolves" (M4 review R1).
+pub(crate) fn node_base_uri(nav: &Nav<'_>, fallback: &str) -> String {
+    let mut top = nav.clone();
+    while top.move_to_parent() {}
+    let own_base_on_a_parentless_element =
+        top.node_type() == DomNodeType::Element && attr_ns(&top, XML_NS, "base").is_some();
+    let document = match nav.document().document_base_uri() {
+        Some(uri) if !uri.is_empty() && !own_base_on_a_parentless_element => {
+            resolver::resolve_uri(fallback, uri)
+        }
+        _ => fallback.to_string(),
+    };
+    base_uri_of(nav, &document)
+}
+
 /// The in-scope namespace bindings of an element, prefix → URI, sorted.
 ///
 /// The `xml` prefix is left out: it is implicit everywhere and never declared.

@@ -214,7 +214,9 @@ impl<'a, 't> Transformation<'a, 't> {
             .evaluator(ctx)
             .run_with_node_and_setup::<Nav<'t>, _>(None, |ev| {
                 ev.set_variable(0, value);
-                ev.context().set_regex_cache(Some(&self.xpath_regexes));
+                let dynamic = ev.context();
+                self.set_clock(dynamic);
+                dynamic.set_regex_cache(Some(&self.xpath_regexes));
             })
             .map_err(|e| self.xpath_error(e))
     }

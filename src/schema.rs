@@ -60,14 +60,15 @@
 //! **XML Schema version** (M4g, D-3): 1.0 unless [`SchemaContextBuilder::xsd_version`] asks for 1.1,
 //! for every schema document of the context alike.
 //!
-//! **Locations.** `xsd-schema`'s resolver treats a `file:` base URI as a plain path (WAVE_B C15a), so a
-//! `file:` URI is handed to it as the file-system path it names, and `ResolverLoader` turns a path
-//! back into a `file:` URI before asking the compiler's resolver — C15a is avoided for `file:` URIs
-//! only. Under any other base `xsd-schema` keeps the dot segments of a resolved directive
-//! (`http://h/s/../x.xsd`); `ResolverLoader` removes them before asking the resolver, and a relative
-//! location (a stylesheet named by a relative URI) is passed on relative. What stays upstream (C15a):
-//! `xsd-schema` identifies a document by its own spelling of the location, so one non-`file:`
-//! document reached under two spellings (`s/../x.xsd` and `x.xsd`) is loaded twice.
+//! **Locations.** A `file:` URI is handed to `xsd-schema` as the file-system path it names
+//! (`schema_location`), so that every location the context reports — in a schema error, a warning,
+//! an inline schema's `<base URI>#schema-N` — is spelled one way, as a path; `ResolverLoader` turns a
+//! path back into a `file:` URI before asking the compiler's resolver. Since `wave-b` `98ab11a`
+//! (C15a) `xsd-schema` resolves every directive by RFC 3986 and identifies a document however its
+//! location is spelled (`s/../x.xsd` and `x.xsd` are one document); it reads `file:` URIs too, so the
+//! path form is a choice of spelling, no longer a workaround. A location with a scheme reaches
+//! `ResolverLoader` resolved and normalized, and a relative one (a stylesheet named by a relative
+//! URI) relative.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -427,11 +428,11 @@ impl SchemaContextBuilder {
     /// - validation, of source documents (`TransformOptions::source_validation`) and of constructed
     ///   nodes (`[xsl:]validation`, `[xsl:]type`), is XML Schema 1.1 assessment, assertions
     ///   included (`ValidationFlags::PROCESS_ASSERTIONS`);
-    /// - the built-in types are XML Schema 1.1's, which define the XPath 2.0 types of §3.13
-    ///   (`xs:anyAtomicType`, `xs:dayTimeDuration`, `xs:yearMonthDuration`; and `xs:untypedAtomic`,
-    ///   which this crate validates itself, upstream lacking a validator for it: proposal C92) and add
-    ///   `xs:dateTimeStamp`, so `[xsl:]type` naming one of them needs no workaround (in a 1.0 set
-    ///   it does: upstream proposal C72, see `Transformation::take_warnings`).
+    /// - the built-in types are XML Schema 1.1's, which define three of the XPath 2.0 types of
+    ///   §3.13 (`xs:anyAtomicType`, `xs:dayTimeDuration`, `xs:yearMonthDuration`) and add
+    ///   `xs:dateTimeStamp`. (`[xsl:]type` may name all four XPath 2.0 types in either version:
+    ///   upstream has them, `xs:untypedAtomic` included, as components of every set —
+    ///   `SchemaSet::xpath_type`.)
     ///
     /// The XPath engine is the same in both versions.
     pub fn xsd_version(mut self, version: XsdVersion) -> Self {
@@ -976,8 +977,10 @@ pub(crate) fn check_coverage(
 
 // ── Loading ──────────────────────────────────────────────────────────────
 
-/// The location `xsd-schema` loads a URI under: the path a `file:` URI names (WAVE_B C15a), the URI
-/// itself otherwise.
+/// The location `xsd-schema` loads a URI under: the path a `file:` URI names, the URI itself
+/// otherwise — the one spelling of the context's locations in its diagnostics (see the module
+/// docs; until `wave-b` `98ab11a` it also kept `xsd-schema` from treating a `file:` base as a
+/// path, C15a).
 fn schema_location(uri: &str) -> String {
     let is_file = uri.starts_with("file:") || !resolver::has_scheme(uri);
     match resolver::uri_to_path(uri).filter(|_| is_file) {
@@ -1004,20 +1007,21 @@ impl ResolverLoader {
     /// The URI to ask the resolver for, for a location `xsd-schema` resolved a directive to.
     ///
     /// The [`Resolver`] contract: "`uri` is always absolute: \[`resolve_uri`\] has already been
-    /// applied". `xsd-schema` resolves a directive against its document's location itself
-    /// (`resolve_relative_uri`), which is RFC 3986 for none of the three forms it can produce (review
-    /// R3; WAVE_B C15a):
+    /// applied". `xsd-schema` resolves a directive against its document's location itself, by RFC
+    /// 3986 §5.2 since `wave-b` `98ab11a` (C15a; review R3 of M4a found it was not), in one of three
+    /// forms:
     ///
-    /// * a URI with a scheme (an `http:` base, or any other non-`file:` one): its dot segments are
-    ///   kept (`http://h/s/../x.xsd`) — removed here, RFC 3986 §5.2.4, as `resolve_uri` removes them;
-    /// * an absolute path (a `file:` base, which this module hands `xsd-schema` as the path it names):
-    ///   lexically normalized already — turned back into its `file:` URI;
+    /// * a URI with a scheme (an `http:` base, or any other non-`file:` one): resolved and
+    ///   normalized (§5.2.4's dot segments removed, §6.2.2 / §6.2.3) — passed on as it is (until
+    ///   the Wave B follow-up this crate removed the dot segments itself);
+    /// * an absolute path (a `file:` base, which this module hands `xsd-schema` as the path it names,
+    ///   [`schema_location`]): lexically normalized — turned back into its `file:` URI;
     /// * a relative path (a stylesheet named by a relative URI, `resolve_uri`'s "base that is itself
-    ///   relative"): already merged and normalized as `resolve_uri` would merge it — passed on as it
-    ///   is, never made absolute against the process's working directory.
+    ///   relative"): merged and normalized as `resolve_uri` would merge it — passed on as it is
+    ///   (`xsd-schema` no longer makes it absolute against the process's working directory either).
     fn request(location: &str) -> String {
         if resolver::has_scheme(location) {
-            resolver::normalize_uri(location)
+            location.to_string()
         } else if Path::new(location).is_absolute() {
             resolver::path_to_uri(Path::new(location))
         } else {

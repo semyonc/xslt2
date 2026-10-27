@@ -200,13 +200,17 @@ fn suite_version(root: &std::path::Path) -> String {
 
 fn main() {
     // The implicit timezone (review R12). XSLT 2.0 §5.4.3.2: "The implicit timezone is
-    // implementation-defined"; this processor's is the host's local offset, so a run's results
-    // would depend on where and when it runs (`date-012` fails under CEST, +02:00, and passes
-    // under CET). The harness pins UTC, the value the catalog assumes ("we currently assume that
-    // an absent timezone means UTC", `date-012` … `date-018`, `date-042`), through the process's
-    // `TZ`: upstream compares a value without a timezone by the host's local offset, not by the
-    // dynamic context's implicit timezone, so `TZ` is the one setting every path reads.
-    // `--host-timezone` keeps the host's. Set here, before the worker thread starts.
+    // implementation-defined"; this processor's default is the host's local offset, so a run's
+    // results would depend on where and when it runs (`date-012` fails under CEST, +02:00, and
+    // passes under CET). The harness pins UTC, the value the catalog assumes ("we currently assume
+    // that an absent timezone means UTC", `date-012` … `date-018`, `date-042`): every case's
+    // transformation gets it as `TransformOptions::implicit_timezone` (`engine::implicit_timezone`,
+    // since the Wave B follow-up), and the process's `TZ` is still set to UTC here, as a guard for
+    // the XPath the option does not reach, which reads the host's offset: the harness's own
+    // `assert` evaluation and catalog parameters (the XPath engine, outside any transformation),
+    // XML Schema 1.1 assertions and type alternatives evaluated during validation (upstream C103),
+    // and `use-when` (evaluated at compile time). `--host-timezone` keeps the host's for both. Set
+    // here, before the worker thread starts.
     if !std::env::args().any(|arg| arg == "--host-timezone") {
         std::env::set_var("TZ", "UTC");
     }

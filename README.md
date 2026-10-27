@@ -132,7 +132,7 @@ element against the top-level declaration of its name, through `xsd-schema`'s st
 built (§19.2.1.1): no such declaration is XTTE1512, an invalid element XTTE1510 (with nested validations, the innermost
 failure is the one reported); the validation annotates the element and everything in it, creates defaulted attributes
 and an empty element's default value (a QName in one is written with a prefix the element binds to its namespace,
-declared on it where none is — for an element's own default by a workaround for upstream proposal C89, below), sets
+declared on it where none is — for an element's own default, below), sets
 nilled, makes the text of a valid simple-content element and the value of
 a valid attribute their normalized values, drops whitespace text in element-only content, and checks identity
 constraints but not ID uniqueness or dangling IDREFs (§19.2.1.3). Nested validations run innermost first, each
@@ -184,9 +184,8 @@ laxly — an undeclared child is not validated either, whatever its `xsi:type` s
 against its declaration; anything invalid is XTTE1515. On a document node `lax` and `type` are document-level validation (XTTE1550,
 XTTE1555 as for `strict`). Both use `xsd-schema`'s validation-root modes (C36, `ValidationRoot::{Type, Lax}`).
 `SourceValidation::Lax` for a source whose root has no declaration now runs too (lax wildcard validation; the root is
-unbound in the typed tree). Two of the XPath 2.0 types an XML Schema 1.0 set lacks go through a workaround, and the two
-durations are refused there as not implemented (upstream C72, below); `fn:idref` (C54), elements typed `xs:ID` in the id index (C62) and a union's member type (C79) are fixed on
-`wave-b` `d5f2a8e`.
+unbound in the typed tree). The XPath 2.0 types of §3.13 work in an XML Schema 1.0 context too (below); `fn:idref`
+(C54), elements typed `xs:ID` in the id index (C62) and a union's member type (C79) are fixed on `wave-b` `d5f2a8e`.
 
 **XML Schema 1.1** (M4g). XSLT 2.0 refers to XML Schema 1.0, and a context is 1.0 unless asked otherwise:
 `SchemaContextBuilder::xsd_version(XsdVersion::V1_1)` builds its one schema set as an XML Schema 1.1 set — an
@@ -199,34 +198,32 @@ B9), and the set's built-in types include the XPath 2.0 types of §3.13 (`xs:any
 other built-in types defined in [XML Schema Part 2]"; `xs:error` is a type of XML Schema 1.1 Part 1, not Part 2, and is
 not in scope). One version per context (M4 plan D-3); the XPath engine is the same.
 
-**Workarounds for upstream gaps** (M4g; each is replaced when its upstream item lands, `../../xslt_doc/WAVE_B_PLAN.md`):
+**The XPath 2.0 types in `[xsl:]type`.** `xs:untypedAtomic`, `xs:anyAtomicType`, `xs:dayTimeDuration` and
+`xs:yearMonthDuration` are in scope for every XSLT 2.0 processor (§3.13). `xsd-schema` has them as components of every
+schema set, of an XML Schema 1.0 set too (`SchemaSet::xpath_type`; its schema documents still cannot name them), so an
+element, document or attribute given one is validated against the type and annotated with it in either version:
+`element(*, xs:untypedAtomic)`, `data()`, `lt`, arithmetic, `sum` / `avg` / `min` / `max`, `xsl:sort` and typed
+patterns answer as XPath defines them. An attribute typed `xs:untypedAtomic` is exactly an unvalidated one. In a
+constructed tree an `xsi:type` may name them too (validation with `ValidationFlags::XPATH_TYPES`): under
+`xs:anyAtomicType` the other three replace it, `xs:anySimpleType` (its base type) does not (XTTE1540). A source
+document is validated as XML Schema validates it: there `xsi:type="xs:untypedAtomic"` does not resolve. (From M4g
+until the Wave B follow-up this crate worked around the missing components — stand-in types, a warning, the durations
+refused in a 1.0 context.)
 
-- **C72 — XPath 2.0 types in `[xsl:]type`.** `xs:untypedAtomic`, `xs:anyAtomicType`, `xs:dayTimeDuration` and
-  `xs:yearMonthDuration` are in scope for every XSLT 2.0 processor (§3.13), but an XML Schema 1.0 set has no
-  definition of them (and an XML Schema 1.1 set none that validates `xs:untypedAtomic`: upstream C92). An element,
-  document or attribute given one of the first two is validated here against the type's definition (XDM 1.0 §2.6.2:
-  every string; simple content, so element children or attributes are XTTE1540) and annotated with the set's own
-  component where there is one, otherwise with `xs:anySimpleType`, the nearest type the set has, and the run says so in
-  a warning (`Transformation::take_warnings`), once per type, where a node is annotated so: its typed value is
-  `xs:untypedAtomic`, as it should be, but `element(*, xs:untypedAtomic)` / `element(*, xs:anyAtomicType)` /
-  `attribute(*, xs:anyAtomicType)` and their typed patterns are false. An attribute typed `xs:untypedAtomic` is
-  exactly an unvalidated one. An `xsi:type` on such an element may name the type itself; under `xs:anyAtomicType` it
-  may also name an atomic type of the set or `xs:untypedAtomic`, but not `xs:anySimpleType`, its base type (XTTE1540).
-  **The two durations in an XML Schema 1.0 context are not implemented** (`XSLT2-NOTIMPL` naming C72, wherever the
-  type is named — element, attribute, copy, document, or an `xsi:type` under `xs:anyAtomicType`): the nearest type
-  the set has, `xs:duration`, is not ordered, so a stand-in would make `lt` / `gt`, arithmetic, `sum` / `max` and
-  `xsl:sort` raise type errors. Use the XML Schema 1.1 option (`SchemaContextBuilder::xsd_version`), whose set has
-  both types: there they work as XPath defines them, as the other two do with exact annotations.
-- **C92 — `xsi:type="xs:untypedAtomic"` in an XML Schema 1.1 context.** The 1.1 set has the type but no validator for
-  it, and an `xsi:type` cannot be validated by a substitute (`xs:anySimpleType` is not derived from
-  `xs:anyAtomicType`), so an `xsi:type` naming it on a constructed element is reported as not implemented, naming C92.
-- **C89 — an element default that needs a namespace declaration.** When the `default` or `fixed` value an empty
-  element takes is a QName (or NOTATION, or a list or union holding one) whose namespace no prefix in scope binds, the
-  prefix must be declared on the element, in the tree and for every validation outside the one that supplied the value
-  — and upstream offers no way to add a declaration to a start tag or a validation already under way. So the start tag
-  of every element a validation gives such a declaration is held until the element ends (its content is text,
-  comments and processing instructions; an element child releases it), and the outer validations and the tree see it
-  only then, with the prefix (`ns_dN`) declared.
+**An element default that needs a namespace declaration.** When the `default` or `fixed` value an empty element takes
+is a QName (or NOTATION, or a list or union holding one) whose namespace no prefix in scope binds, the prefix (`ns_dN`)
+is declared on the element, in the tree and for every validation outside the one that supplied the value. The value is
+known before the content (`xsd-schema`'s `element_value_constraint_for_type`), but whether the element takes it only at
+its end — and a namespace declaration on an element that then gets content would be a namespace node §5.7.3 does not
+allow ("a namespace node must not be added to the tree unless the namespace node is necessary"). So the start tag of
+exactly such an element is held until the element ends (its content is text, comments and processing instructions; an
+element child releases it); every other start tag goes on at once.
+
+**The implicit timezone** (`TransformOptions::implicit_timezone`): the timezone of `implicit-timezone()`,
+`current-dateTime()`, and of every comparison and subtraction of a date or time without one — in expressions and in the
+processor's own sorting, keys and grouping. Unset, it is the host's local offset, read once per transformation (§5.4.3:
+"current dateTime, implicit timezone … must be stable"). XML Schema 1.1 assertions evaluated during validation do not
+see it (they read the host's offset; upstream C103).
 
 **Deep recursion.** Recursive templates and stylesheet functions use the native stack. A run checks
 how much stack it has used and stops with a depth error instead of overflowing. On a thread
@@ -296,13 +293,13 @@ taken with the harness's implicit timezone pinned to UTC; before, under the host
 
 **Schema-aware run** (`--schema-aware`: the 584 cases that need a schema-aware processor become runnable and the 16
 that need a basic one are not run; every case is compiled schema-aware, against the stylesheet's imports and the
-environment's schemas, and every source is validated as the catalog says): 6,310 of 6,343 runnable pass, the
-schema-aware profile 566 of 567 — the one left is `validation-0108`, which needs `xs:untypedAtomic` as a type of an
-XML Schema 1.0 set (upstream C72) — (M4g on `xsd-schema` `wave-b` `7608d3a`, 2026-10-25; 12 schema-aware cases are
-excluded with citations in `tests/xslts/filter.rs`, pending the user's decision; 562 after M4g part 1, 561 after the
-batch (t) follow-up, 537 after M4f, 420 after M4e, 377 after M4d, 274 after M4c, 217 after M4b, 120 after M4a, 51
-before), and every basic case keeps its status; the 2 not implemented are M2k's. With `--xsd11` (every schema
-context XML Schema 1.1, the `XSD_1.1` cases runnable): 6,310 of 6,342, the profile 569 of 569. An exclusion applies
+environment's schemas, and every source is validated as the catalog says): 6,313 of 6,343 runnable pass, the
+schema-aware profile 567 of 567 — `validation-0108`, which needs `xs:untypedAtomic` as a type of an XML Schema 1.0 set,
+passes since the Wave B follow-up (upstream C72; on `xsd-schema` `wave-b` `9b2be85`, 2026-10-27; 566 after M4g, 12
+schema-aware cases excluded with citations in `tests/xslts/filter.rs`, pending the user's decision; 562 after M4g
+part 1, 561 after the batch (t) follow-up, 537 after M4f, 420 after M4e, 377 after M4d, 274 after M4c, 217 after M4b,
+120 after M4a, 51 before), and every basic case keeps its status; the 2 not implemented are M2k's. With `--xsd11`
+(every schema context XML Schema 1.1, the `XSD_1.1` cases runnable): 6,312 of 6,342, the profile 569 of 569. An exclusion applies
 only to a case the configuration runs, so the default run is unchanged by them. An `assert` over a primary result tree that carries type annotations is evaluated on the tree
 itself (the catalog: "with the document node of the result document as the context item"; a re-parse of the
 serialization would be untyped), every other one over the re-parse.
@@ -383,10 +380,12 @@ cargo test --test xslts --release -- -l                 # list test-sets and cou
 cargo test --test xslts --release -- --self-test        # the harness's own checks
 ```
 
-The harness runs with the implicit timezone pinned to UTC (it sets `TZ=UTC` for its process; `--host-timezone` keeps
-the host's), the value the catalog assumes ("we currently assume that an absent timezone means UTC"): without the pin a
-case such as `date-012`, which compares an `xs:dateTime` without a timezone with one at `+02:00`, would pass or fail
-by where and when the suite runs.
+The harness runs with the implicit timezone pinned to UTC, the value the catalog assumes ("we currently assume that an
+absent timezone means UTC"): every case's transformation gets `TransformOptions::implicit_timezone` UTC, and the
+harness also sets `TZ=UTC` for its process, as a guard for the XPath evaluated outside a transformation (the harness's
+own `assert`s, XML Schema 1.1 assertions during validation, `use-when`); `--host-timezone` keeps the host's for both.
+Without the pin a case such as `date-012`, which compares an `xs:dateTime` without a timezone with one at `+02:00`,
+would pass or fail by where and when the suite runs.
 
 `unicode-90` is left out of the figures above with `--skip unicode-90`. Its 1,444 XSLT 2.0 cases check a
 Unicode general category against every code point: `$validrange[not(. = $c)]` compares each of the

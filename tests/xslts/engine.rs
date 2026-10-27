@@ -16,11 +16,22 @@ use xsd_schema::xpath::{XPathContext, XPathExpr};
 
 use xslt2::{
     Compiler, MemoryResolver, ModeKey, QName, Resolver, SchemaContext, SourceValidation,
-    TransformOptions, XsdVersion, XsltError, XsltFunctions,
+    TimezoneOffset, TransformOptions, XsdVersion, XsltError, XsltFunctions,
 };
 
 use crate::catalog::QName as CatalogQName;
 use crate::runner::{Engine, ResultDocument, RunOutput, TestRun};
+
+/// The implicit timezone of every case's transformation (`TransformOptions::implicit_timezone`):
+/// UTC, the value the catalog assumes ("we currently assume that an absent timezone means UTC",
+/// `date-012` … `date-018`, `date-042`); with `--host-timezone`, `None` — the host's local offset.
+/// `driver::main` also pins the process's `TZ` to UTC, as a guard for what the option does not
+/// reach (see there).
+pub fn implicit_timezone() -> Option<TimezoneOffset> {
+    static HOST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let host = *HOST.get_or_init(|| std::env::args().any(|arg| arg == "--host-timezone"));
+    (!host).then_some(TimezoneOffset::UTC)
+}
 
 /// The XSLT 2.0 processor under test.
 pub struct XsltEngine;
@@ -372,6 +383,7 @@ impl Job {
             initial_mode: self.initial_mode.clone().unwrap_or(ModeKey::Default),
             strict_recoverable: self.strict_recoverable,
             base_output_uri: Some(self.base_output_uri.clone()),
+            implicit_timezone: implicit_timezone(),
             ..Default::default()
         };
         let mut transformation = compiled
@@ -1368,11 +1380,12 @@ pub fn self_test() -> usize {
         "satisfied=\"false\" of an unsupported range is runnable",
     );
 
-    // The implicit timezone the harness pins (`driver::main`, review R12): UTC, the value the
+    // The implicit timezone the harness pins (review R12; the Wave B follow-up): UTC, the value the
     // catalog assumes ("we currently assume that an absent timezone means UTC", `date-012` …
     // `date-018`, `date-042`) — for `implicit-timezone()`, for `current-dateTime()`, and for comparing a
-    // value without a timezone with one that has one (upstream reads the host's local offset
-    // there, so only the process's `TZ` pins it).
+    // value without a timezone with one that has one. Twice: through the option every case's
+    // transformation gets (`implicit_timezone`), and without it, which reads the host's offset —
+    // UTC only because `driver::main` pins the process's `TZ` (the guard).
     let sheet = r#"<xsl:stylesheet version="2.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
           xmlns:xs="http://www.w3.org/2001/XMLSchema">
         <xsl:output method="text"/>
@@ -1384,17 +1397,26 @@ pub fn self_test() -> usize {
     let compiled = Compiler::new(&names, &functions)
         .compile_str(sheet, "urn:harness-timezone-probe")
         .expect("the timezone probe compiles");
-    let arena = Bump::new();
-    let outcome = compiled
-        .transformation(&arena, TransformOptions::default())
-        .transform_source("urn:harness-timezone-probe-source", "<in/>")
-        .expect("the timezone probe runs");
-    let text = compiled
-        .serialize_primary(&outcome)
-        .expect("the timezone probe serializes");
-    check(
-        text == "PT0S PT0S false true",
-        &format!("the implicit timezone is UTC (the timezone probe wrote {text:?})"),
-    );
+    for (implicit_timezone, how) in [
+        (implicit_timezone(), "the option the cases get"),
+        (None, "the host's offset under the TZ pin"),
+    ] {
+        let arena = Bump::new();
+        let options = TransformOptions {
+            implicit_timezone,
+            ..Default::default()
+        };
+        let outcome = compiled
+            .transformation(&arena, options)
+            .transform_source("urn:harness-timezone-probe-source", "<in/>")
+            .expect("the timezone probe runs");
+        let text = compiled
+            .serialize_primary(&outcome)
+            .expect("the timezone probe serializes");
+        check(
+            text == "PT0S PT0S false true",
+            &format!("the implicit timezone is UTC by {how} (the timezone probe wrote {text:?})"),
+        );
+    }
     checks
 }

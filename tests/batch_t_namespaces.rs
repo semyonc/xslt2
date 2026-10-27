@@ -18,8 +18,9 @@
 //!    default as an attribute of the element (§19.2.1.3's serialize–parse–validate), with the
 //!    prefix it was written with in scope. An element's `default` / `fixed` text likewise, where a
 //!    prefix for its namespace is in scope; where none is, the prefix is declared on the element —
-//!    since M4g, whose workaround for upstream proposal C89 holds the element's start tag until
-//!    it ends (until then `XSLT2-NOTIMPL`).
+//!    since M4g, which holds the element's start tag until it ends (until then `XSLT2-NOTIMPL`;
+//!    since the Wave B follow-up only an element whose value needs a new prefix is held, upstream
+//!    C89's `element_value_constraint_for_type` giving the value before the content).
 //! 2. Whether a node is an ID or has the is-idrefs property depends on its typed value (XDM 1.0
 //!    §6.2.4, §6.3.4), which for a union with a QName member depends on the node's in-scope
 //!    namespaces: a `strip` copy keeps the properties its source has ("The values of the is-id and
@@ -309,9 +310,10 @@ fn an_element_default_qname_is_written_with_a_prefix_in_scope() {
 /// elsewhere or nowhere), the text needs a namespace declaration on the element. Until M4g that
 /// was `XSLT2-NOTIMPL` (upstream proposal C89: neither the tree builder's public API nor an outer
 /// validation's namespace snapshot can take a declaration after the start tag); since M4g the
-/// start tag of an element that may take such a value is held until it ends (the C89
-/// workaround, `tests/m4g_xsd11_residue.rs`), and the prefix is declared on it: the tree's
-/// QName is the {value}.
+/// start tag of an element that may take such a value is held until it ends
+/// (`tests/m4g_xsd11_residue.rs`; since the Wave B follow-up only when the value needs a new
+/// prefix, `tests/wave_b_followup.rs`), and the prefix is declared on it: the tree's QName is the
+/// {value}.
 #[test]
 fn an_element_default_qname_with_no_prefix_in_scope_is_declared_since_m4g() {
     for scope in [r#"xmlns:p="urn:other""#, ""] {
