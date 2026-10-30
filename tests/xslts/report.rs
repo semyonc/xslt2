@@ -225,7 +225,7 @@ impl Report {
         }
         let owners = self.not_implemented_by_owner();
         if !owners.is_empty() {
-            println!("\n== notImplemented by owning milestone ==");
+            println!("\n== notImplemented by owner ==");
             for (owner, cases) in &owners {
                 println!("  {cases:6}  {owner}");
             }
@@ -354,17 +354,24 @@ impl Report {
     }
 }
 
-/// The owner in a `… is not implemented (<owner>)` message: a roadmap
-/// milestone, `M` followed by alphanumerics.
+/// The owner in a `… is not implemented (<owner>)` message: a Cargo feature
+/// of the processor, lowercase words joined by `-` (`icu-collation`), or a
+/// tag of `M` followed by alphanumerics.
 pub fn notimpl_owner(message: &str) -> Option<&str> {
     let inner = message
         .strip_suffix(')')?
         .rsplit_once(" is not implemented (")?
         .1;
-    let valid = inner.starts_with('M')
+    let tag = inner.starts_with('M')
         && inner.len() > 1
         && inner[1..].chars().all(|c| c.is_ascii_alphanumeric());
-    valid.then_some(inner)
+    let feature = inner.contains('-')
+        && inner.split('-').all(|w| {
+            !w.is_empty()
+                && w.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        });
+    (tag || feature).then_some(inner)
 }
 
 fn print_row(name: &str, c: &Counts) {

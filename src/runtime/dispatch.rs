@@ -305,7 +305,7 @@ impl<'a, 't> Transformation<'a, 't> {
     }
 
     /// Counts one more level of template invocation or function call against
-    /// `TransformOptions::max_recursion_depth` (Q33), checks the stack guard
+    /// `TransformOptions::max_recursion_depth`, checks the stack guard
     /// (`TransformOptions::stack_limit`), and returns the new depth, which the
     /// caller restores to `depth - weight` when the call returns.
     ///
@@ -327,7 +327,7 @@ impl<'a, 't> Transformation<'a, 't> {
         Ok(depth)
     }
 
-    /// The stack guard (Q33): fails with the depth error once the run has used
+    /// The stack guard: fails with the depth error once the run has used
     /// more stack, measured from where it started, than its limit allows.
     ///
     /// Checked by [`Self::enter`] and wherever else the run nests on the host

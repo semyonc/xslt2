@@ -19,7 +19,7 @@ mod common;
 use std::sync::Arc;
 
 use bumpalo::Bump;
-use xsd_schema::document::{build_typed_document, BufferDocumentOptions};
+use xsd_schema::document::{build_typed_document, BufferDocument, BufferDocumentOptions};
 use xsd_schema::namespace::NameTable;
 use xsd_schema::pipeline::load_and_process_schema;
 use xsd_schema::SchemaSet;
@@ -365,11 +365,13 @@ fn an_untyped_prebuilt_document_is_still_admitted() {
         .expect("the stylesheet compiles");
     let arena = Bump::new();
     let run = compiled.transformation(&arena, TransformOptions::default());
-    let doc = run
-        .store()
-        .borrow()
-        .parse("<r><item>42</item></r>", Some("file:///m2a/plain.xml"))
-        .expect("a plain parse");
+    // A tree the host parsed into the run's arena itself, with its document
+    // base URI: what `DocumentStore::insert_ref` takes.
+    let mut doc =
+        BufferDocument::from_reader_default("<r><item>42</item></r>".as_bytes(), &arena, &names)
+            .expect("a plain parse");
+    doc.set_document_base_uri(Some(arena.alloc_str("file:///m2a/plain.xml")));
+    let doc: &BufferDocument<'_> = arena.alloc(doc);
     let id = run
         .store()
         .borrow_mut()

@@ -185,7 +185,7 @@ fn declared_encoding(bytes: &[u8]) -> Option<String> {
 /// Whether `uri` already has a scheme (`file:`, `http:`, `urn:`, …).
 ///
 /// A single-letter "scheme" is a Windows drive letter, not a scheme.
-pub fn has_scheme(uri: &str) -> bool {
+pub(crate) fn has_scheme(uri: &str) -> bool {
     match uri.find(':') {
         Some(i) if i > 1 => uri[..i]
             .chars()
@@ -269,7 +269,7 @@ pub fn resolve_uri(base: &str, reference: &str) -> String {
 /// part. A leading `..` of a relative path, which has nothing to remove, is
 /// kept when `uri` has no scheme; with a scheme, §5.2.4 applies as written and
 /// drops it.
-pub fn normalize_uri(uri: &str) -> String {
+pub(crate) fn normalize_uri(uri: &str) -> String {
     let parts = UriParts::parse(uri);
     let path = remove_dot_segments(parts.path, Dots::of(&parts));
     UriParts {
@@ -470,7 +470,7 @@ impl<'u> UriParts<'u> {
 /// two name the same file. The stylesheet loader's cycle check (§3.10.2
 /// XTSE0180, §3.10.3 XTSE0210) compares modules by this identity, or a
 /// self-include spelled `.//m.xsl` would load itself under an ever longer
-/// name until the operating system refused the path (review R6). For a `file:`
+/// name until the operating system refused the path. For a `file:`
 /// URI the runs of `/` in the path are collapsed; every other URI is its own
 /// identity.
 pub(crate) fn resource_identity(uri: &str) -> String {

@@ -75,7 +75,7 @@ impl<'a, 't> Transformation<'a, 't> {
     /// §5.5.4 makes a dynamic error raised while matching recoverable: "the
     /// optional recovery action is to treat the pattern as not matching".
     /// `TransformOptions::strict_recoverable` signals it instead.
-    pub fn matches(&self, pattern: &Pattern, node: &Nav<'t>) -> Result<bool, XsltError> {
+    pub(crate) fn matches(&self, pattern: &Pattern, node: &Nav<'t>) -> Result<bool, XsltError> {
         let empty = Frame::default();
         self.matches_with(pattern, node, MatchEnv::top_level(&empty))
     }
@@ -87,15 +87,15 @@ impl<'a, 't> Transformation<'a, 't> {
     /// ([`EvaluationScope`]).
     ///
     /// A `match` pattern of `xsl:template` or `xsl:key` is a top-level
-    /// attribute and sees the global variables only (DESIGN §9.1), so its
+    /// attribute and sees the global variables only, so its
     /// frame is empty; a `group-starting-with` / `group-ending-with` pattern
     /// is an attribute of an instruction and sees every variable in scope
     /// there (§9.7: "the scope of a local variable … is all following
     /// siblings of the variable-binding element, and their descendants") —
     /// which is the frame the instruction runs in (`for-each-group-071`
     /// refers to a function parameter). The `count` / `from` patterns of
-    /// `xsl:number` (M3c) are the same kind of pattern and are meant to come
-    /// through here too, with a scope per evaluation of the instruction.
+    /// `xsl:number` are the same kind of pattern and come through here too,
+    /// with a scope per evaluation of the instruction.
     pub(super) fn matches_in(
         &self,
         pattern: &Pattern,
@@ -350,7 +350,7 @@ impl<'a, 't> Transformation<'a, 't> {
     /// (S0 is what the node test selects). The node matches the step if it is
     /// still in the sequence the last predicate leaves.
     ///
-    /// Each predicate is decided for **this node alone** (M2l), which gives
+    /// Each predicate is decided for **this node alone**, which gives
     /// the same answer as filtering the whole of S*i* — the node is in
     /// S*i+1* exactly when the predicate holds for it with its own focus in
     /// S*i* — and needs S*i* only for that focus:
@@ -475,7 +475,7 @@ impl<'a, 't> Transformation<'a, 't> {
     /// (the level it is for, and its members) for the step's later predicates,
     /// which continue from it instead of starting again from S0 — so a step
     /// with several positional predicates still filters the siblings once per
-    /// candidate, as before M2l.
+    /// candidate.
     fn placement(
         &self,
         step: &PatternStep,
@@ -1024,7 +1024,7 @@ const PLACEMENT_CACHE_LIMIT: usize = 4096;
 /// ever re-evaluated within one `Transformation` (e.g. reset per run), this cache
 /// and `id_key_selections` must be cleared with them. Errors are not remembered: a candidate whose
 /// sequence cannot be built gets the error again (its cost is then a pass per
-/// candidate, as before M2l).
+/// candidate).
 #[derive(Default)]
 pub(super) struct PlacementCache {
     /// By the predicate whose input sequence the entries are.
@@ -1103,10 +1103,9 @@ impl<'e, 't> MatchEnv<'e, 't> {
 
 /// What the pattern matcher remembers for **one evaluation** of an instruction
 /// whose patterns see the instruction's local variables:
-/// `group-starting-with` / `group-ending-with` of `xsl:for-each-group` (M2g)
-/// and, once M3c implements `xsl:number`, its `count` / `from` patterns,
-/// which are meant to match through [`Transformation::matches_in`] with a scope
-/// of their own per evaluation in the same way.
+/// `group-starting-with` / `group-ending-with` of `xsl:for-each-group`, and
+/// the `count` / `from` patterns of `xsl:number`, which match through
+/// [`Transformation::matches_in`] with a scope of their own per evaluation.
 ///
 /// The run-wide caches ([`PlacementCache`], `id_key_selections`) refuse
 /// whatever reads a local variable, because a local differs between
@@ -1194,7 +1193,7 @@ mod tests {
     // ── §5.5.4: what may and may not be recovered from ───────────────────
 
     /// `guard_recoverable` seen directly, including the one case no stylesheet
-    /// can reach through the public API in this milestone: an
+    /// can reach through the public API: an
     /// `XSLT2-INTERNAL` error raised while matching.
     ///
     /// A broken invariant is not "a dynamic error or type error that occurs
@@ -1480,6 +1479,82 @@ mod tests {
                 ),
                 "untyped_only={untyped_only}"
             );
+        }
+    }
+
+    // ── The stack guard on a direct match ───────────────────────────────
+
+    /// Moved from the integration tests when `Transformation::matches`
+    /// became crate-internal.
+    mod stack_guard {
+        use bumpalo::Bump;
+        use xsd_schema::namespace::NameTable;
+        use xsd_schema::navigator::DomNavigator;
+
+        use crate::{Compiler, TransformOptions, XsltError, XsltFunctions};
+
+        const NS: &str = "http://www.w3.org/1999/XSL/Transform";
+
+        /// Wraps top-level content in a `version="2.0"` stylesheet with the
+        /// `xs` and `f` prefixes bound.
+        fn sheet(body: &str) -> String {
+            format!(
+                r#"<xsl:stylesheet version="2.0" xmlns:xsl="{NS}"
+             xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:f="urn:f"
+             exclude-result-prefixes="xs f">{body}</xsl:stylesheet>"#
+            )
+        }
+
+        /// A direct call of `Transformation::matches`
+        /// evaluates a pattern's predicates — and the stylesheet functions they call —
+        /// outside a run, so the stack guard must be on there too. On an ordinary
+        /// 2 MiB thread, `r[f:g(1000)]` used to recurse past the end of the stack and
+        /// abort the process; it now ends in the depth error, as the same stylesheet
+        /// does through `transform_document`.
+        #[test]
+        fn a_direct_pattern_match_is_under_the_stack_guard() {
+            let main = sheet(
+                r#"<xsl:function name="f:g" as="xs:boolean">
+                     <xsl:param name="n" as="xs:integer"/>
+                     <xsl:sequence select="if ($n = 0) then true() else f:g($n - 1)"/>
+                   </xsl:function>
+                   <xsl:template match="r[f:g(1000)]">deep</xsl:template>"#,
+            );
+            let result = std::thread::Builder::new()
+                .stack_size(2 * 1024 * 1024)
+                .spawn(move || -> Result<bool, XsltError> {
+                    let functions = XsltFunctions::new();
+                    let names = NameTable::new();
+                    let compiled = Compiler::new(&names, &functions).compile_str(&main, "urn:t")?;
+                    let pattern = compiled
+                        .templates()
+                        .iter()
+                        .find_map(|rule| rule.pattern)
+                        .map(|id| compiled.pattern(id))
+                        .expect("the r[f:g(1000)] rule");
+                    let arena = Bump::new();
+                    let run = compiled.transformation(&arena, TransformOptions::default());
+                    let doc = run.load_document("urn:in", "<r/>")?;
+                    let mut node = run
+                        .store()
+                        .borrow()
+                        .get(doc)
+                        .expect("loaded")
+                        .doc
+                        .create_navigator();
+                    assert!(node.move_to_first_child(), "the r element");
+                    // A second call, after the first has left its scope, is guarded
+                    // just the same.
+                    let first = run.matches(pattern, &node);
+                    assert!(first.is_err(), "{first:?}");
+                    run.matches(pattern, &node)
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "XSLT2-INTERNAL", "{error}");
+            assert!(error.message.contains("recursing without end"), "{error}");
         }
     }
 }

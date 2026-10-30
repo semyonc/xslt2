@@ -124,7 +124,7 @@ pub trait Engine {
     fn run(&self, run: &TestRun<'_>) -> RunOutput;
 }
 
-/// M0 engine: every test is "not implemented", so every runnable case fails honestly.
+/// A stub engine: every test is "not implemented", so every runnable case fails honestly.
 pub struct StubEngine;
 
 impl Engine for StubEngine {

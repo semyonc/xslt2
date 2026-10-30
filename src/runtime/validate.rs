@@ -1,4 +1,4 @@
-//! Validation of constructed nodes (§19.2; M4 plan §4 M4d–M4f, decisions D-5, D-10, D-12).
+//! Validation of constructed nodes (§19.2).
 //!
 //! Two halves: what `xsl:attribute` validates when it is evaluated
 //! ([`Transformation::validate_attribute`]), and the validating receiver every tree pipeline of a
@@ -25,7 +25,7 @@
 //!   matters only to an `xs:QName` / `xs:NOTATION` value, which XTTE1545 excludes first, and
 //!   "Validation Root Valid (ID/IDREF)" is not applied to element and attribute validation
 //!   (§19.2.1.3).
-//! - `validation="lax"` on `xsl:attribute` (decision D-d1): the same with a declaration, but an
+//! - `validation="lax"` on `xsl:attribute`: the same with a declaration, but an
 //!   invalid value is XTTE1515; without one the attribute "is not validated" (§19.2.1.1) and is
 //!   `xs:untypedAtomic`.
 //! - XTTE1545 for a type "derived from, or constructed by list or union from, the primitive types
@@ -43,7 +43,7 @@
 //! enclosing constructor whose validation is not `preserve` decides ([`Boundary`], applied by
 //! [`Validating`]).
 //!
-//! **Copies and documents** (M4e). `xsl:copy` and `xsl:copy-of` announce, for the copy of each
+//! **Copies and documents.** `xsl:copy` and `xsl:copy-of` announce, for the copy of each
 //! element or document node they copy, the boundary their validation asks for
 //! (`Transformation::copy_validation`, `ComplexContentNormalizer::copy_selected`): `strip` none — the normalizer
 //! copies untyped itself, passing on the ids of `xs:ID` attributes (`Receiver::element_id`), so a
@@ -63,7 +63,7 @@
 //! equivalent to using validation="preserve" on xsl:document … Similarly, validation is not
 //! applied to document nodes created using xsl:message" (§19.2.2).
 //!
-//! **Type-driven and lax roots** (M4f; upstream C36, `xsd_schema::validation::ValidationRoot`).
+//! **Type-driven and lax roots** (`xsd_schema::validation::ValidationRoot`).
 //! `[xsl:]type` on an element constructor, a copy or a document node is a [`Boundary::Type`]: a
 //! run whose root is assessed "using this type definition as the "processor-stipulated type
 //! definition"" (§19.2.1.2; `ValidationRoot::Type`), whatever its name — an `xsi:type` overrides
@@ -86,30 +86,28 @@
 //! **The XPath 2.0 types** (§3.13 puts `xs:untypedAtomic`, `xs:anyAtomicType`,
 //! `xs:dayTimeDuration` and `xs:yearMonthDuration` in the in-scope schema components of every
 //! processor). Upstream has them as components of every schema set, of an XML Schema 1.0 set too
-//! (`SchemaSet::xpath_type`, `wave-b` batch (h), C72 / C92): `[xsl:]type` naming one is a
+//! (`SchemaSet::xpath_type`): `[xsl:]type` naming one is a
 //! [`Boundary::Type`] like any other type — validated against it, annotated with it (an attribute
-//! `type="xs:untypedAtomic"` stays unbound, which is the same annotation, M4d D-d7) — and an
+//! `type="xs:untypedAtomic"` stays unbound, which is the same annotation) — and an
 //! `xsi:type` naming one resolves in a constructed tree, the validator of constructed trees having
 //! `ValidationFlags::XPATH_TYPES` (`Transformation::construction_validator`; a source document is
-//! validated as XML Schema validates it, without the flag). (Until this round they went through a
-//! host-side workaround — stand-in types, a fence for the durations in 1.0, warnings.)
+//! validated as XML Schema validates it, without the flag).
 //!
 //! **A QName / NOTATION element default that needs a namespace declaration.** An empty element
 //! takes its declaration's `default` / `fixed` value, whose {value} is read with the schema's
 //! bindings (Datatypes §3.3.18), so writing it may need a prefix the element does not bind. Upstream
-//! gives the value before the element's content (`SchemaSet::element_value_constraint_for_type`,
-//! `wave-b` batch (q), C89), but no way to declare a prefix on a start tag already built, nor to
+//! gives the value before the element's content (`SchemaSet::element_value_constraint_for_type`),
+//! but no way to declare a prefix on a start tag already built, nor to
 //! add one to a namespace snapshot a run already holds; and whether the element takes the value
 //! is known only at its end (an element or character child prevents it). Declaring the prefix on
 //! every such start tag would leave a namespace node on an element that then gets content, which
-//! §5.7.3 does not allow (decision FU-2). So [`Validating`] holds the start tag of exactly the
+//! §5.7.3 does not allow. So [`Validating`] holds the start tag of exactly the
 //! elements whose value constraint, read under the run's governing type, holds a QName in a
 //! namespace the element binds no prefix to (`Validating::needs_a_new_prefix`) — from the builder
 //! and from the runs outside that one — until the element ends ([`Frame::deferred`]), declares the
 //! prefix the value needs on it, and only then lets the outer runs and the builder see it
 //! (`Validating::end_deferred`); an element child releases the hold early (the element then takes
-//! no value). Every other start tag goes on at once. (M4g held every element a run gave a
-//! QName-capable value constraint, the value being unknown before the end.)
+//! no value). Every other start tag goes on at once.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -241,13 +239,13 @@ impl<'a, 't> Transformation<'a, 't> {
     /// rules for "String Valid"" — otherwise XTTE1540; XTTE1545 first for a type built from
     /// `xs:QName` / `xs:NOTATION`. String Valid is defined against a simple type definition, so a
     /// complex type (which `xsl:attribute` cannot name, XTSE1530, but `xsl:copy` and `xsl:copy-of`
-    /// can, for a copied attribute) leaves no attribute valid: XTTE1540 (decision D-f4; XSLT 3.0
-    /// gave this case its own code, XTTE1535, which XSLT 2.0 does not have).
+    /// can, for a copied attribute) leaves no attribute valid: XTTE1540 (XSLT 3.0 gave this case
+    /// its own code, XTTE1535, which XSLT 2.0 does not have).
     ///
     /// `xs:untypedAtomic`: every string is one, and an attribute annotated `xs:untypedAtomic` is
     /// exactly an unvalidated one (XPath 2.0 §2.5.1: "An attribute that has been validated in skip
     /// mode is represented in the data model by an attribute node with the type annotation
-    /// xs:untypedAtomic") — so it is passed on unbound, its value as it is (M4d D-d7).
+    /// xs:untypedAtomic") — so it is passed on unbound, its value as it is.
     fn attribute_against_type(
         &self,
         type_key: TypeKey,
@@ -293,8 +291,8 @@ impl<'a, 't> Transformation<'a, 't> {
         ))
     }
 
-    /// The type `[xsl:]type` names, in the in-scope schema types (M4 plan D-7: the whole set;
-    /// XTSE1520 has checked that it exists) — the XPath 2.0 types of §3.13 included, which
+    /// The type `[xsl:]type` names, in the in-scope schema types (the whole set; XTSE1520 has
+    /// checked that it exists) — the XPath 2.0 types of §3.13 included, which
     /// upstream has in every schema set ([`resolve_type`]).
     fn resolve_validation_type(&self, type_name: &QName, what: &str) -> Result<TypeKey, XsltError> {
         let set = self.validating_set()?;
@@ -311,7 +309,7 @@ impl<'a, 't> Transformation<'a, 't> {
     /// (§19.2.1.1) and `type` (§19.2.1.2) — for `xsl:copy` of an element with `preserve`, "the
     /// copied element will have a type annotation of xs:anyType … but any contained nodes will
     /// have their type annotations retained in the same way as with xsl:element", which is
-    /// [`Boundary::Preserve`]. `type="xs:untyped"` is [`Boundary::Untyped`] (decision D-f3).
+    /// [`Boundary::Preserve`]. `type="xs:untyped"` is [`Boundary::Untyped`].
     pub(super) fn element_boundary(
         &self,
         validation: &Validation,
@@ -367,8 +365,8 @@ impl<'a, 't> Transformation<'a, 't> {
     /// schema components (`xs:untypedAtomic`, `xs:anyAtomicType`, `xs:dayTimeDuration`,
     /// `xs:yearMonthDuration`), which an XML Schema set's version may not define. A source
     /// document is validated as XML Schema validates it, by the source validator, without the
-    /// flag (decision FU-1; M4 plan D-12's one validator per transformation becomes one per
-    /// purpose: the content models are built once more when a run validates both).
+    /// flag: one validator per purpose, so the content models are built once more when a run
+    /// validates both.
     pub(crate) fn construction_validator(&self) -> Option<&SchemaValidator<'a>> {
         let set = self.sheet.schema_set()?;
         self.sheet.validates.then(|| {
@@ -465,10 +463,10 @@ impl<'a, 't> Transformation<'a, 't> {
     }
 
     /// A `preserve` copy carries the bindings of the node it copies, which name components of the
-    /// set its document is bound to — they mean nothing in another set (M4 plan D-2; upstream's
-    /// own `document::copy` refuses that case with `CopyError::SchemaMismatch`). Through the public
+    /// set its document is bound to — they mean nothing in another set (upstream's own
+    /// `document::copy` refuses that case with `CopyError::SchemaMismatch`). Through the public
     /// API no node of a run is typed against another set: admission strips such a tree, with a
-    /// warning (M4b), and a typed parameter of another set is refused; so this is an internal
+    /// warning, and a typed parameter of another set is refused; so this is an internal
     /// error, checked rather than assumed.
     pub(super) fn check_same_schema_set(&self, nav: &Nav<'t>) -> Result<(), XsltError> {
         match (nav.document().schema_set(), self.schema_set) {
@@ -583,12 +581,12 @@ fn first_namespace_sensitive<'t>(nav: &Nav<'t>) -> Option<Nav<'t>> {
 }
 
 /// The type `name` denotes in the in-scope schema types: a built-in type of the XML Schema
-/// namespace, or a type of the set (M4 plan D-7: the whole set). The built-in ones are those the
+/// namespace, or a type of the set (every type of the set). The built-in ones are those the
 /// set's schema documents can name, and the XPath 2.0 types XDM 1.0 §2.6.2 adds to the XML Schema
 /// namespace (§3.13: in scope in every processor) — `SchemaSet::xpath_type`, which has
 /// `xs:anyAtomicType`, `xs:untypedAtomic`, `xs:dayTimeDuration` and `xs:yearMonthDuration` in an
 /// XML Schema 1.0 set too, and `xs:untypedAtomic` in a 1.1 set, whose schema documents cannot name
-/// it (upstream batch (h), H-1).
+/// it.
 fn resolve_type(set: &SchemaSet, name: &QName) -> Option<TypeKey> {
     let names = &set.name_table;
     if name.uri == XSD_NS {
@@ -711,7 +709,7 @@ fn display(name: &Name) -> String {
 }
 
 /// The value constraints of element declarations under governing types, as upstream reads them
-/// (`SchemaSet::element_value_constraint_for_type`, upstream C89), kept for the transformation:
+/// (`SchemaSet::element_value_constraint_for_type`), kept for the transformation:
 /// the record depends on the declaration and the type alone (its QNames are read with the schema's
 /// bindings), and reading it validates the {lexical form}, so a run that constructs many elements
 /// of one declaration reads it once.
@@ -744,7 +742,7 @@ impl ValueConstraints {
 /// The receiver between the normalizer and the [`ResultBuilder`] of a transformation's tree
 /// pipelines: it applies §19.2.1.1's annotation rule over the [`Boundary`] events and runs the
 /// validation of every `strict`, `lax` and `type` element boundary through `xsd-schema`'s push
-/// API (one run per boundary, its root assessed as [`RunMode`] says; M4f).
+/// API (one run per boundary, its root assessed as [`RunMode`] says).
 ///
 /// **The annotation rule.** "Conceptually, the validation requested for a child element or
 /// attribute node is applied before the validation requested for its parent element" — so the
@@ -767,11 +765,10 @@ impl ValueConstraints {
 /// to every run open at the time, in the order the driver for parsed documents sends them
 /// (`validate_element`, `validate_attribute` …, `validate_end_of_attributes`, `validate_text` /
 /// `validate_whitespace`, `validate_end_element`). "The validation rule "Validation Root Valid
-/// (ID/IDREF)" is not applied" (§19.2.1.3) — `cvc-id.1` / `cvc-id.2` are dropped (upstream's
-/// optional C38 would make that a flag) — while "Identity-constraint Satisfied" is (upstream
-/// always enforces it). When the root ends the run ends (`end_validation`), and any
+/// (ID/IDREF)" is not applied" (§19.2.1.3) — `cvc-id.1` / `cvc-id.2` are dropped — while
+/// "Identity-constraint Satisfied" is (upstream always enforces it). When the root ends the run ends (`end_validation`), and any
 /// error left is XTTE1510 — an inner run ends before an outer one, so the innermost failure is the
-/// one reported (D-10).
+/// one reported (§2.9 leaves the choice among several errors to the processor).
 ///
 /// **Values.** §19.2.1.3 makes the validation of an element "equivalent to" serializing it,
 /// parsing it, validating it and mapping the PSVI back to the XDM, so what a validation changes in
@@ -792,7 +789,7 @@ impl ValueConstraints {
 ///   entirely of whitespace and the character information items used to construct this node have
 ///   a parent and that parent is an element and its {content type} is not "mixed", then the
 ///   content of the Text Node is the zero-length string" — [`element_only`]; the typed source
-///   build applies the same rule, upstream's own since `wave-b` `d5f2a8e`, C67).
+///   build applies the same rule, upstream's own).
 ///
 /// The tree gets what the outermost run made of each node — under a `strip` boundary too, which
 /// changes annotations only (§19.2.1.1: "The typed value of the node is changed to be the same as
@@ -979,7 +976,7 @@ enum View {
     Simple {
         type_key: TypeKey,
         /// The value constraint of the element's declaration as the run's governing type reads
-        /// it (`SchemaSet::element_value_constraint_for_type`; upstream C89), when there is one:
+        /// it (`SchemaSet::element_value_constraint_for_type`), when there is one:
         /// the {lexical form} an empty element takes, and the value whose QNames may need a
         /// prefix declared on the element ([`Validating::needs_a_new_prefix`]).
         constraint: Option<Rc<ElementValueConstraint>>,
@@ -1054,7 +1051,7 @@ struct Run<'v> {
     /// validated, again with lax validation"): a `lax` run's root with no top-level declaration,
     /// and, recursively, an undeclared child of an element in the region. Their `xsi:type` and
     /// `xsi:nil` are not passed to the run ("the presence of an xsi:type attribute will not of
-    /// itself cause an element to be validated"; decision D-f2, fix round 1). Pushed when an
+    /// itself cause an element to be validated"). Pushed when an
     /// element's start tag reaches the run, popped when it ends; always `false` in `strict` and
     /// `type` runs.
     lax_region: Vec<bool>,
@@ -1069,7 +1066,7 @@ impl Run<'_> {
     }
 }
 
-/// How a run assesses its root (§19.2.1.1, §19.2.1.2; upstream C36's
+/// How a run assesses its root (§19.2.1.1, §19.2.1.2; `xsd-schema`'s
 /// `xsd_schema::validation::ValidationRoot`, XML Schema 1.1 §5.2).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RunMode {
@@ -1129,7 +1126,7 @@ struct AttributeSlot {
 
 impl<'v, 't> Validating<'v, 't> {
     /// A validating receiver in front of `out`, the tree built with `set`; `validator` is the
-    /// transformation's one validator (D-12), needed when the stylesheet validates elements.
+    /// transformation's one validator, needed when the stylesheet validates elements.
     pub(crate) fn new(
         out: ResultBuilder<'t>,
         set: Option<&'t SchemaSet>,
@@ -1261,7 +1258,7 @@ impl<'v, 't> Validating<'v, 't> {
     /// content, held for its simple content, and a run that assessed it so (and found it valid)
     /// passes on the [schema normalized value] — of the declaration's default or fixed value when
     /// the text is empty: XML Schema 1.1 §3.3.4.3 clause 5.1 ("If D has a {value constraint}, and E
-    /// has neither element nor character [children], and E is not ·nilled· with respect to D"),
+    /// has neither element nor character \[children\], and E is not ·nilled· with respect to D"),
     /// §3.3.1: "if the element being ·validated· is empty, then for purposes of calculating the
     /// [schema normalized value] and other contributions to the ·post-schema-validation infoset·
     /// the element is treated as if {value constraint}.{lexical form} was used as the content of
@@ -1387,7 +1384,7 @@ impl<'v, 't> Validating<'v, 't> {
 
     /// The text of an element that took its declaration's `default` / `fixed` value, when that is
     /// or holds `xs:QName` / `xs:NOTATION` values: `value` is the run's typed value, made with the
-    /// declaration's bindings (the {value}, Structures §3.3.2; upstream since `wave-b` `d5f2a8e`),
+    /// declaration's bindings (the {value}, Structures §3.3.2; as upstream makes it),
     /// written with prefixes the element binds to their namespaces — those it was written with,
     /// which every run open at it has in its namespace snapshot, so an outer run reads the same
     /// value. Where none is bound, a prefix is declared on the element, whose start tag was held
@@ -1585,14 +1582,14 @@ impl<'v, 't> Validating<'v, 't> {
         }
     }
 
-    /// `qn` written for the element (upstream's order, its decision D-f3): the schema's own
+    /// `qn` written for the element (in upstream's order of preference): the schema's own
     /// prefix when the element binds it to the same namespace; unprefixed when the schema wrote it
     /// so and the default namespace is the same; another prefix bound to the namespace; unprefixed
     /// under a default namespace that is it; else a prefix declared on the element (`ns_dN`, as for
     /// the attribute names fixup needs — `prefix_for`) or, with `fixed`, `Err(uri)`. The XML
     /// namespace is `xml`'s. A name in no namespace is unprefixed: no prefix denotes no namespace,
-    /// so under a default namespace it reads as a name in that namespace (upstream's D-f2, the one
-    /// case the fixup cannot cover).
+    /// so under a default namespace it reads as a name in that namespace (the one case the fixup
+    /// cannot cover).
     fn qname_written(
         &mut self,
         qn: &xsd_schema::types::QNameValue,
@@ -1681,7 +1678,7 @@ impl<'v, 't> Validating<'v, 't> {
 
     /// Whether the element of `frame`, if it ends empty and takes the value constraint `view`
     /// gives it, needs a prefix declared for it: the value (the {lexical form} read under the
-    /// run's governing type, upstream C89's `element_value_constraint_for_type`) holds an
+    /// run's governing type, upstream's `element_value_constraint_for_type`) holds an
     /// `xs:QName` / `xs:NOTATION` in a namespace that neither a prefix nor the default namespace
     /// of the element's [`written_scope`](Self::written_scope) is bound to — exactly when
     /// `qname_written` would have nothing to write it with (the XML namespace is `xml`'s; a name in
@@ -1725,7 +1722,7 @@ impl<'v, 't> Validating<'v, 't> {
     /// defaulted ([`start_in_run`](Self::start_in_run)) —, then on to the builder with the values
     /// the outermost run gave and the bindings the decider gives ([`emit_start`](Self::emit_start)).
     ///
-    /// **The held start tag (C89).** When a run's assessment gives the element a declaration whose
+    /// **The held start tag.** When a run's assessment gives the element a declaration whose
     /// `default` / `fixed` value, read under the run's governing type, holds an `xs:QName` /
     /// `xs:NOTATION` in a namespace the element binds no prefix to
     /// ([`needs_a_new_prefix`](Self::needs_a_new_prefix), from upstream's
@@ -1736,7 +1733,7 @@ impl<'v, 't> Validating<'v, 't> {
     /// it gets content (§3.3.4.3 clause 5.1). Declaring the prefix on the start tag at once would
     /// leave a namespace node on an element that gets content, which XSLT 2.0 §5.7.3 does not
     /// allow ("a namespace node must not be added to the tree unless the namespace node is
-    /// necessary …"; decision FU-2), and upstream offers no way to add one to a start tag already
+    /// necessary …"), and upstream offers no way to add one to a start tag already
     /// built or to a snapshot already given. So the start tag of exactly such an element goes no
     /// further than that run: the builder and the runs outside it see it only when the element
     /// ends ([`Validating::end_deferred`]), with the prefix declared if the element took the value,
@@ -2016,7 +2013,7 @@ impl<'v, 't> Validating<'v, 't> {
     /// A held start tag, released early: an element child arrived in the content of the
     /// element whose frame is `frame` and whose start tag is held ([`Frame::deferred`]), so the
     /// element has content and takes no default or fixed value (XML Schema 1.1 Part 1 §3.3.4.3
-    /// clause 5.1: only when "E has neither element nor character [children]"). The runs that
+    /// clause 5.1: only when "E has neither element nor character \[children\]"). The runs that
     /// have not seen the start tag see it now, innermost first, and the builder gets it — before
     /// what the element held goes out ([`release_held`](Self::release_held)).
     fn complete_deferred(&mut self, frame: usize) -> Result<(), XsltError> {
@@ -2109,8 +2106,8 @@ impl<'v, 't> Validating<'v, 't> {
     /// Valid (ID/IDREF)" is applied to the single element node child of the document node" — its
     /// `cvc-id.1` (a dangling IDREF) and `cvc-id.2` (a duplicate ID) are XTTE1555 ("It is a type
     /// error if, when validating a document node, document-level constraints are not satisfied"),
-    /// any other error is the element's own invalidity, XTTE1510, which comes first (decision
-    /// D-e5: an identity constraint is part of the element's validation, §19.2.1.3); the verdict is
+    /// any other error is the element's own invalidity, XTTE1510, which comes first (an identity
+    /// constraint is part of the element's validation, §19.2.1.3); the verdict is
     /// kept on the document node's frame until it ends.
     fn end_run(&mut self) -> Result<(), XsltError> {
         let Some(mut run) = self.runs.pop() else {
@@ -2229,7 +2226,7 @@ impl<'v, 't> Validating<'v, 't> {
     /// note, "the presence of an xsi:type attribute will not of itself cause an element to be
     /// validated: if validation against a named type is required, as distinct from validation
     /// against a top-level element declaration, then it must be requested using the XSLT
-    /// [xsl:]type attribute" (decision D-f2, revised in fix round 1; XML Schema's lax wildcard
+    /// \[xsl:\]type attribute" (XML Schema's lax wildcard
     /// validation would validate it strictly against the `xsi:type`, so the run is not given it —
     /// the way `ValidationRoot::Lax`'s rustdoc names for a host).
     fn start_run(
@@ -2372,8 +2369,8 @@ fn attribute_binding(info: &SchemaInfo) -> Option<NodeSchemaBinding> {
 
 /// Whether the type a run assessed an element with is complex with element-only or empty content —
 /// the elements whose whitespace text XDM 1.0 §6.7.4 makes no text node ([`View::ElementOnly`]).
-/// (The typed source build applied the same rule in this crate until upstream's typed build took
-/// it over, `wave-b` `d5f2a8e`, C67; upstream also drops whitespace in empty content only when the
+/// (Upstream's typed source build applies the same rule; it also drops whitespace in empty
+/// content only when the
 /// element is nilled — whitespace in empty content that is not nilled makes the element invalid,
 /// `cvc-complex-type.2.1`, which here is XTTE1510 before the tree is used.)
 fn element_only(info: &SchemaInfo) -> bool {

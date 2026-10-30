@@ -717,7 +717,7 @@ fn column_keys(
 }
 
 /// The engine's `lt` on two values (XPath 2.0 §B.2), a date or time without a timezone read with
-/// `timezone`, the transformation's implicit timezone (`eval_binary_with_timezone`, upstream C94).
+/// `timezone`, the transformation's implicit timezone (`eval_binary_with_timezone`).
 fn value_lt(
     left: &XmlValue,
     right: &XmlValue,

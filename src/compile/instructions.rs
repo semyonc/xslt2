@@ -1,4 +1,4 @@
-//! Sequence constructors (§5.7) and the XSLT instructions of §7.4.
+//! Sequence constructors (§5.7) and the XSLT instructions.
 
 use xsd_schema::navigator::{DomNavigator, DomNodeType};
 
@@ -513,13 +513,12 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     /// "No error is reported either statically or dynamically" covers the
     /// unknown element, not the fallback bodies: those *are* evaluated, so a
     /// failure to compile one is a real error and is propagated (it used to be
-    /// replaced by the `XSLT2-NOTIMPL` below, which hid genuine `XTSE` errors —
-    /// M2a review, finding 1).
+    /// replaced by the `XSLT2-NOTIMPL` below, which hid genuine `XTSE`
+    /// errors).
     ///
     /// The `None` arm raises the same **static** error as the
     /// non-forwards-compatible branch, which is what §3.9 asks for: deferring it
-    /// to evaluation was the XSLT 1.0 rule, and until M2c the compiler kept it
-    /// (`XSLT2_M2A_REVIEW_FIXES.md`, "Noticed, not done"). The element table
+    /// to evaluation was the XSLT 1.0 rule. The element table
     /// normally reports this before the instruction is ever compiled
     /// ([`checks`]); the arm is kept so that the rule holds here too rather than
     /// depending on the order the two passes run in.

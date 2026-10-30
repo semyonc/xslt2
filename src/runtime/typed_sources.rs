@@ -1,54 +1,52 @@
-//! Typed source documents (M4b; M4 plan D-2, D-4, D-13): a source document validated against the
+//! Typed source documents: a source document validated against the
 //! stylesheet's schema set as it is parsed, and the admission of typed trees.
 //!
 //! **One pass.** A source the host asks to validate ([`SourceValidation::Strict`] or
 //! [`SourceValidation::Lax`]) is read once by `xsd-schema`'s validation driver, which builds the
-//! typed tree as it validates (`TypedBuilderHandler`, upstream C14, with its defaults: defaults as
-//! nodes) with this crate's own sink (every error, with its instance path, B8). The validator is
-//! made once per transformation (its content models are built when it is made, D-12).
+//! typed tree as it validates (`TypedBuilderHandler`, with its defaults: defaults as nodes) with
+//! this crate's own sink (every error, with its instance path). The validator is made once per
+//! transformation (its content models are built when it is made).
 //!
-//! **What the tree holds** is the XDM of a PSVI, which `xsd-schema`'s typed build gives since
-//! `wave-b` `d5f2a8e` (batch (t)); nothing here repeats it:
+//! **What the tree holds** is the XDM of a PSVI, which `xsd-schema`'s typed build gives; nothing
+//! here repeats it:
 //!
-//! - whitespace in element-only content is no text node (C67) — XDM 1.0 §6.7.4 (Construction from a
+//! - whitespace in element-only content is no text node — XDM 1.0 §6.7.4 (Construction from a
 //!   PSVI, read at w3.org): "if the resulting Text Node consists entirely of whitespace and the
 //!   character information items used to construct this node have a parent and that parent is an
 //!   element and its {content type} is not 'mixed', then the content of the Text Node is the
 //!   zero-length string … an empty Text Node will be discarded when its parent is constructed";
 //!   XSLT §4.4's note says the same ("elements that are defined in a DTD or a Schema to contain
 //!   element-only content will have whitespace text nodes stripped, regardless of the
-//!   xsl:strip-space and xsl:preserve-space declarations"). Until batch (t) this crate's own
-//!   handler around the typed builder dropped it; the validating receiver of constructed trees
-//!   still applies the rule itself (`validate::element_only`), since it does not use the typed
-//!   build;
+//!   xsl:strip-space and xsl:preserve-space declarations"). The validating receiver of
+//!   constructed trees applies the rule itself (`validate::element_only`), since it does not use
+//!   the typed build;
 //! - the \[schema normalized value\] as the string value of a valid attribute and of a valid
-//!   element with simple content (XDM 1.0 §6.2.4, §6.3.4; C66, `66e3e3f`);
+//!   element with simple content (XDM 1.0 §6.2.4, §6.3.4);
 //! - defaulted attributes as attribute nodes, and the `default` / `fixed` value of a valid empty
 //!   element with simple content as its text node (XDM 1.0 §6.2.4: "Default and fixed attributes
 //!   provided by XML Schema processing are added to the \[attributes\]", "where a fixed or default
 //!   value for an element is defined in the schema, and the element takes this default value, a
-//!   text node will be created to contain the value"; C39) — so §4.3's Note holds: "any defaulted
+//!   text node will be created to contain the value") — so §4.3's Note holds: "any defaulted
 //!   elements and attributes that were added to the tree by the validation process will still be
 //!   present" after `input-type-annotations="strip"` (`validation-0701` needs the defaulted
 //!   `select` of `schema-for-xslt20.xsd`);
-//! - an element whose typed value is a single `xs:ID` in the id index (C62), and the is-idrefs
-//!   property of elements and attributes (C54).
+//! - an element whose typed value is a single `xs:ID` in the id index, and the is-idrefs
+//!   property of elements and attributes.
 //!
-//! **An invalid document is an error** (D-4), reported with the code the loader reports a document
+//! **An invalid document is an error**, reported with the code the loader reports a document
 //! it cannot turn into a tree with: FODC0002 for `fn:doc` and `document()` — F&O 1.0 §15.5.4 groups
 //! "an error in retrieving a resource, or in parsing and validating its content" — and XTDE1170 for
 //! the principal source, as for its parse errors.
 //!
-//! **`Lax`** is XML Schema 1.1 §5.2's lax wildcard validation (upstream C36,
-//! `ValidationRoot::Lax`; M4f): "If the ·validation root· and the schema determine an element
+//! **`Lax`** is XML Schema 1.1 §5.2's lax wildcard validation (`xsd-schema`'s
+//! `ValidationRoot::Lax`): "If the ·validation root· and the schema determine an element
 //! declaration (by the name of the element) … or a type definition (by xsi:type), then ·strict·
 //! validation is performed. If they do not identify any declaration or definition, then ·lax
 //! assessment· is performed" — a root with no declaration and no `xsi:type` is no error, its
 //! declared descendants are validated. The typed build types an element it assessed laxly without
 //! a declaration or type `xs:anyType` when something below it was assessed, and leaves it
 //! `xs:untyped` otherwise: XDM 1.0 §3.3.1.1's answers for [validation attempted] "partial" and
-//! "none" — the same as for every element a lax wildcard matches in a typed source (decision D-f6
-//! of the M4f report; upstream C85, `wave-b` `7608d3a`).
+//! "none" — the same as for every element a lax wildcard matches in a typed source.
 //!
 //! **Admission** of a typed tree (`Transformation::admit_typed`, used by every loader and for a
 //! tree the host built) applies §4.3 and §4.4 in their order — "Stripping of type annotations
@@ -100,7 +98,7 @@ impl ValidationSink for Collect<'_> {
     fn on_warning(&mut self, _warning: ValidationWarning) {}
 }
 
-/// The schema set a typed document is bound to, compared with the stylesheet's by address (D-13).
+/// The schema set a typed document is bound to, compared with the stylesheet's by address.
 fn same_set(doc: &BufferDocument<'_>, set: Option<&SchemaSet>) -> bool {
     match (doc.schema_set(), set) {
         (Some(a), Some(b)) => std::ptr::eq(a, b),
@@ -120,8 +118,8 @@ fn has_simple_content(nav: &Nav<'_>) -> bool {
 }
 
 impl<'a, 't> Transformation<'a, 't> {
-    /// The validator of this run's source documents, made on first use (D-12; the constructed
-    /// trees have their own, `Transformation::construction_validator`).
+    /// The validator of this run's source documents, made on first use (the constructed trees
+    /// have their own, `Transformation::construction_validator`).
     pub(super) fn validator(&self, set: &'a SchemaSet) -> &SchemaValidator<'a> {
         self.validator
             .get_or_init(|| SchemaValidator::new(set, validation_flags(set)))
@@ -139,12 +137,12 @@ impl<'a, 't> Transformation<'a, 't> {
 /// are not read here: the typed builder stores bindings, and the navigator computes a typed value
 /// from the binding and the string value when one is asked for. The runtime still computes every
 /// value validity needs (facets, ID / IDREF, identity constraints), so dropping the flag changes no
-/// result (review F9).
+/// result.
 ///
-/// In an XML Schema 1.1 context (`SchemaContextBuilder::xsd_version`, M4g) assertions are part of
+/// In an XML Schema 1.1 context (`SchemaContextBuilder::xsd_version`) assertions are part of
 /// the assessment too (XML Schema 1.1 Part 1 §3.4.4.2 clause 6, "Assertion Satisfied"; §3.13's
-/// implementation-defined 1.1 mode): upstream evaluates them only when asked (B9,
-/// `PROCESS_ASSERTIONS`, by buffering each asserted element's subtree), for sources and
+/// implementation-defined 1.1 mode): upstream evaluates them only when asked
+/// (`PROCESS_ASSERTIONS`, by buffering each asserted element's subtree), for sources and
 /// constructed trees alike.
 pub(super) fn validation_flags(set: &SchemaSet) -> ValidationFlags {
     let mut flags = ValidationFlags::default() - ValidationFlags::BUILD_PSVI_TYPED_VALUES;
@@ -244,11 +242,11 @@ impl<'a, 't> Transformation<'a, 't> {
         Ok(arena.alloc(doc))
     }
 
-    /// Admits a **typed** tree into the run (D-13), applying §4.3 and §4.4: returns the tree the
+    /// Admits a **typed** tree into the run, applying §4.3 and §4.4: returns the tree the
     /// run is to see — `doc` itself, or an admission copy — and whether the copy stands for it.
     ///
     /// * Annotations of a set other than the stylesheet's (a tree the host built elsewhere) cannot be
-    ///   read: the tree is stripped (§4.3's stripping), with a warning (D-2).
+    ///   read: the tree is stripped (§4.3's stripping), with a warning.
     /// * `input-type-annotations="strip"` (§4.3) strips them; a basic processor admits a typed source
     ///   tree only that way ("This error will not arise if the input-type-annotations attribute is
     ///   set to strip", §21.1 XTDE1665 — the caller refuses it otherwise).
@@ -287,9 +285,9 @@ impl<'a, 't> Transformation<'a, 't> {
     ///
     /// Under `strip` the ids the source's index files for an element are registered on the copy
     /// (`register_xml_id`): those its attributes answer to (an `xml:id`, an `xs:ID`-typed attribute)
-    /// and the one its own typed value is (upstream C62, `receiver::kept_of_element`; review F4,
-    /// `tests/m4b_review.rs`) — and every element and attribute with the is-idrefs property in the
-    /// source has it on the copy (`register_idrefs`, upstream C54), so `fn:id` and `fn:idref` find
+    /// and the one its own typed value is (`receiver::kept_of_element`) — and every element and
+    /// attribute with the is-idrefs property in the source has it on the copy (`register_idrefs`),
+    /// so `fn:id` and `fn:idref` find
     /// on the stripped tree what they find on the typed one.
     fn copy_typed(
         &self,
@@ -467,7 +465,7 @@ fn mode_name(validation: SourceValidation) -> &'static str {
     }
 }
 
-/// One validation error, with the node it is about (B8's instance path).
+/// One validation error, with the node it is about (its instance path).
 fn describe(error: &ValidationError) -> String {
     match error.instance_path() {
         Some(path) => format!("[{}] {} at {path}", error.constraint, error.message),

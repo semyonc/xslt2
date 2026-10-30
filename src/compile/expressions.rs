@@ -1,4 +1,4 @@
-//! Static contexts (§5.4.1, §7.2), the variable scope an expression is
+//! Static contexts (§5.4.1), the variable scope an expression is
 //! compiled against (§5.1) and the QName attributes of a declaration (§2.4).
 
 use xsd_schema::navigator::DomNavigator;
@@ -17,7 +17,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     // ── Static contexts ──────────────────────────────────────────────────
 
     /// Interns the lexical static context of `nav` and builds its
-    /// [`XPathContext`] the first time it is seen (§7.2).
+    /// [`XPathContext`] the first time it is seen.
     pub(super) fn context_of(
         &mut self,
         nav: &Nav<'t>,

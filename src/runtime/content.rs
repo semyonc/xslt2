@@ -224,8 +224,7 @@ impl SimpleDefault {
 /// node is therefore built for real, through the same pipeline every other tree
 /// of the transformation goes through — the [`ComplexContentNormalizer`] (§5.7.1:
 /// adjacent atomic values joined by spaces) and the validating receiver, so a
-/// `strict` element is validated (§19.2.1.1; decision D-d11 of
-/// `XSLT2_M4D_REPORT.md`, reversed in its fix round) — and what it contributes is
+/// `strict` element is validated (§19.2.1.1) — and what it contributes is
 /// its typed value, each atomic value cast to a string (`xsl-document-0601`): an
 /// untyped node's string value, a validated element's value of its type — one
 /// string per item of a list type, an element default it took included (a node

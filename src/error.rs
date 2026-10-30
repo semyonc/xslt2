@@ -1,10 +1,12 @@
-//! Error type for the XSLT 2.0 processor.
+//! Errors: [`XsltError`] and the error codes.
 //!
-//! Every error carries a specification error code — Appendix E of `xslt20.html`
-//! (`XTSE…`, `XTDE…`, `XTTE…`, `XTRE…`, `XTMM9000`), or an XPath / F&O / serialization
-//! code that passes through unchanged — mirroring `ValidationError.constraint` in
-//! `xsd-schema`: the code is the join key between the spec, the code base and the
-//! conformance suite.
+//! Every error carries a specification error code — one of XSLT 2.0's,
+//! Appendix E (`XTSE…`, `XTDE…`, `XTTE…`, `XTRE…`, `XTMM9000`; the constants
+//! in [`codes`]), or an XPath / F&O / serialization code that passes through
+//! unchanged — as `xsd-schema`'s validation errors carry the constraint they
+//! violate: the code is what joins an error to the specification and to the
+//! conformance suite. The processor's own two codes are in [`codes_internal`];
+//! an error the stylesheet raises with `fn:error` has the code it names.
 
 pub mod codes;
 
@@ -12,21 +14,21 @@ use std::fmt;
 
 /// Codes that are **not** in Appendix E: this implementation's own.
 ///
-/// The specification has no code for "the processor does not implement this
-/// yet", and M0b used the non-existent `"XTDE0000"` as a placeholder for
-/// builder and serializer failures. Both are replaced by the two constants
-/// below, which are documented, greppable and classified as
-/// [`ErrorKind::Other`], so the conformance harness can separate a missing
-/// feature from a wrong answer.
+/// The specification has no code for "the processor does not implement this",
+/// nor for a failure of the processor itself. These two constants are, and
+/// both classify as [`ErrorKind::Other`], so that a missing feature or a broken
+/// invariant is never mistaken for an error of the stylesheet
+/// ([`XsltError::is_processor_failure`](crate::XsltError::is_processor_failure)).
 pub mod codes_internal {
-    /// A construct the processor recognizes but has not implemented yet.
+    /// A construct the processor recognizes but does not implement.
     ///
-    /// The message always names the feature and the one sub-milestone of the
-    /// roadmap (`xslt_doc/XSLT2_ROADMAP.md` §4) that owns it, e.g.
-    /// `xsl:sort is not implemented (M2d)`. The conformance harness reports a
-    /// case ending in this code as `not implemented` rather than as a plain
-    /// failure, and totals those cases per owning sub-milestone from the
-    /// trailing `(…)`.
+    /// The message names the construct and, in parentheses, what it would
+    /// take, e.g. `the collation http://www.w3.org/2013/collation/UCA is not
+    /// implemented (icu-collation)` for a UCA collation in a build without the
+    /// `icu-collation` feature
+    /// ([`XsltError::not_implemented`](crate::XsltError::not_implemented)). The
+    /// conformance harness reports a case ending in this code as "not
+    /// implemented" rather than as a failure, grouped by that tag.
     pub const NOT_IMPLEMENTED: &str = "XSLT2-NOTIMPL";
 
     /// An internal failure: a broken invariant, or an error from a lower layer
@@ -41,7 +43,7 @@ pub mod codes_internal {
 /// An error QName in this namespace adds nothing to its local name — the code
 /// alone identifies it, and that is how the rest of this crate prints and
 /// compares such codes — so [`XsltError`]'s `Display` leaves it out.
-pub const XQT_ERRORS_NAMESPACE: &str = xsd_schema::xpath::error::XQT_ERRORS_NAMESPACE;
+pub(crate) const XQT_ERRORS_NAMESPACE: &str = xsd_schema::xpath::error::XQT_ERRORS_NAMESPACE;
 
 /// Who raised an error, when its code alone does not say.
 ///
@@ -105,8 +107,12 @@ impl ErrorKind {
 /// Where an error was raised in the stylesheet.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Location {
+    /// The base URI of the stylesheet module; `None` when the module has
+    /// none.
     pub module_uri: Option<String>,
+    /// The line in the module, from 1; 0 when it is not known.
     pub line: u32,
+    /// The column in the line, from 1; 0 when it is not known.
     pub column: u32,
 }
 
@@ -129,7 +135,12 @@ pub struct XsltError {
     /// name** of the error QName; the namespace URI is
     /// [`error_namespace`](Self::error_namespace).
     pub code: String,
+    /// What went wrong, in words, for a person to read.
     pub message: String,
+    /// Where in the stylesheet the error was raised: the instruction,
+    /// declaration or attribute being compiled or evaluated. `None` for an
+    /// error that has no place in the stylesheet, such as a source document
+    /// that cannot be read.
     pub location: Option<Location>,
     /// Set exactly when the stylesheet raised this error through `fn:error`,
     /// and then holds the namespace URI of the error QName — the empty string
@@ -143,6 +154,9 @@ pub struct XsltError {
 }
 
 impl XsltError {
+    /// An error the **processor** raises, with a specification error code
+    /// and a message; it has no location until
+    /// [`with_location`](Self::with_location) gives it one.
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
@@ -200,16 +214,16 @@ impl XsltError {
         Some((self.error_namespace()?, self.code.as_str()))
     }
 
-    /// A feature this processor does not implement yet (`XSLT2-NOTIMPL`).
+    /// A feature this processor does not implement (`XSLT2-NOTIMPL`).
     ///
-    /// `feature` names the construct, `milestone` the roadmap sub-milestone that
-    /// owns it — `M2d`, `M3a`, `M4`, …, never a coarse `M2` or `M3` — so a
-    /// harness failure reads as a plan item rather than as a bug. The message is
-    /// `{feature} is not implemented ({milestone})`.
-    pub fn not_implemented(feature: impl fmt::Display, milestone: &str) -> Self {
+    /// `feature` names the construct, `owner` what would provide it — a Cargo
+    /// feature, say — so that the error tells a user where to look rather than
+    /// reading as a wrong answer. The message is
+    /// `{feature} is not implemented ({owner})`.
+    pub fn not_implemented(feature: impl fmt::Display, owner: &str) -> Self {
         Self::new(
             codes_internal::NOT_IMPLEMENTED,
-            format!("{feature} is not implemented ({milestone})"),
+            format!("{feature} is not implemented ({owner})"),
         )
     }
 
@@ -307,6 +321,7 @@ impl XsltError {
         )
     }
 
+    /// This error raised at `location`, replacing any location it had.
     pub fn with_location(mut self, location: Location) -> Self {
         self.location = Some(location);
         self
@@ -314,7 +329,7 @@ impl XsltError {
 
     /// Attaches `location` unless the error already carries one (the innermost
     /// instruction that knew where it was wins).
-    pub fn or_location(mut self, location: &Location) -> Self {
+    pub(crate) fn or_location(mut self, location: &Location) -> Self {
         if self.location.is_none() {
             self.location = Some(location.clone());
         }
@@ -379,7 +394,7 @@ impl XsltError {
     /// it is, so [`raised_error_to_xslt`] (and `From<XPathError>`) give back
     /// exactly this error — code, message, location and [`ErrorOrigin`] — on
     /// the way out.
-    pub fn into_xpath_error(self) -> xsd_schema::xpath::XPathError {
+    pub(crate) fn into_xpath_error(self) -> xsd_schema::xpath::XPathError {
         let (namespace_uri, local_name) = match self.error_qname() {
             Some((namespace_uri, local_name)) => {
                 (namespace_uri.to_string(), local_name.to_string())
@@ -423,7 +438,7 @@ impl From<xsd_schema::xpath::XPathError> for XsltError {
 ///
 /// Returns `None` for every other engine error, so the caller keeps its own
 /// mapping.
-pub fn raised_error_to_xslt(e: &xsd_schema::xpath::XPathError) -> Option<XsltError> {
+pub(crate) fn raised_error_to_xslt(e: &xsd_schema::xpath::XPathError) -> Option<XsltError> {
     if let Some(own) = e.downcast_host_payload::<XsltError>() {
         return Some(own.clone());
     }

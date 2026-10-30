@@ -1,6 +1,6 @@
 //! `xsl:for-each-group` at run time (§14.3): allocating the population to
 //! groups, putting the groups in processing order, and evaluating the body once
-//! per group with that group as the current group (§14.1, §14.2; DESIGN §9.1).
+//! per group with that group as the current group (§14.1, §14.2).
 //!
 //! `group-by` hashes its grouping keys with the `eq`-consistent placement of
 //! `runtime/keys.rs` — the same slots an `xsl:key` index uses — so allocating a

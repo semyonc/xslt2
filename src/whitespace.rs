@@ -48,6 +48,7 @@ pub fn trim_start(text: &str) -> &str {
 }
 
 /// [`str::trim_end`] over XML whitespace only.
+#[cfg(test)]
 #[inline]
 pub fn trim_end(text: &str) -> &str {
     text.trim_end_matches(is_xml_whitespace)

@@ -1,4 +1,4 @@
-//! Keys at run time (§16.3, DESIGN §9.7): the per-document index, built the
+//! Keys at run time (§16.3): the per-document index, built the
 //! first time `key()` asks for it, and the lookup `key()` performs.
 //!
 //! An index belongs to one key **and one document**. §16.3.1: "An `xsl:key`
@@ -257,7 +257,7 @@ pub(super) enum Slot {
     /// defined between the two): the octets.
     Binary(XmlTypeCode, Vec<u8>),
     /// One of the five `xs:g*` types, which `eq` compares by starting instant
-    /// with the implicit timezone (upstream since `wave-b` `be5fe3d`): the type
+    /// with the implicit timezone: the type
     /// code, and `0` — every value of the type shares the slot, the candidates
     /// confirmed by `eq` ([`placement_of`]).
     Components(XmlTypeCode, u64),
@@ -458,8 +458,8 @@ impl<'a, 't> Transformation<'a, 't> {
     /// A build that fails is not attempted again while its index could be
     /// asked for: its error is remembered and raised by every later use. The
     /// build sees only the nodes of the document, the global variables, the
-    /// key's own declarations (DESIGN §9.1's row: singleton focus, default
-    /// mode, no tunnel parameters, no current template rule) and, for a key
+    /// key's own declarations (a singleton focus, the default mode, no tunnel
+    /// parameters, no current template rule) and, for a key
     /// that may observe it, the current group — all fixed for as long as the
     /// index is kept, so it would fail the same way each time — while a
     /// pattern that calls `key()` would otherwise repeat it for every
@@ -587,7 +587,7 @@ impl<'a, 't> Transformation<'a, 't> {
 
     /// The atomized value of a declaration's key specifier for `node`.
     ///
-    /// The dynamic context is DESIGN §9.1's row for `xsl:key`: a singleton
+    /// The dynamic context of `xsl:key`: a singleton
     /// focus on the node (§16.3.1: "The expression will be evaluated with the
     /// node that matches the pattern as the context node"); `current()` the
     /// same node (§16.6.1: "For an outermost expression … the current item is

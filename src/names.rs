@@ -22,7 +22,9 @@ pub const CODEPOINT_COLLATION: &str = "http://www.w3.org/2005/xpath-functions/co
 /// An expanded name: namespace URI (empty for none) plus local part.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct QName {
+    /// The namespace URI; the empty string for a name in no namespace.
     pub uri: String,
+    /// The local part.
     pub local: String,
 }
 
@@ -41,11 +43,6 @@ impl QName {
             uri: uri.into(),
             local: local.into(),
         }
-    }
-
-    /// Whether this is a name in the XSLT namespace.
-    pub fn is_xslt(&self) -> bool {
-        self.uri == XSLT_NS
     }
 }
 

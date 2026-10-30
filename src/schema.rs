@@ -1,6 +1,6 @@
 //! The schema-aware mode: the schema context and `xsl:import-schema` (§3.14, §2.8, §3.13, §21.2).
 //!
-//! A schema-aware compilation is two steps (M4 plan D-1, adopted by the user 2026-10-19):
+//! A schema-aware compilation is two steps:
 //!
 //! 1. The caller builds a [`SchemaContext`] — it owns the `SchemaSet` — from a **pre-scan** of the
 //!    stylesheet: [`SchemaContextBuilder::stylesheet_file`] (or `_uri`, `_str`) loads the module graph
@@ -10,16 +10,16 @@
 //!    into one schema set — together with the schemas the host adds
 //!    ([`SchemaContextBuilder::schema_uri`], `schema_file`, `schema_str`; §3.13: "An implementation
 //!    may define mechanisms that allow additional schema components to be added to the in-scope
-//!    schema components for the stylesheet"), against which source documents are validated (M4b,
-//!    D-2: one set per compiled stylesheet).
+//!    schema components for the stylesheet"), against which source documents are validated (one
+//!    set per compiled stylesheet).
 //! 2. `Compiler::schema_aware(&context, &functions)` compiles the same stylesheet with the set's own
 //!    `NameTable` as its names (the XPath binder looks schema types up by the ids of its context's table)
-//!    and the set in every XPath static context. It parses the module graph a second time — the "double
-//!    parse" of the plan — and checks that every import it finds is one the context loaded.
+//!    and the set in every XPath static context. It parses the module graph a second time and checks
+//!    that every import it finds is one the context loaded.
 //!
 //! **Why the set first.** A `SchemaSet` owns its `NameTable` and is mutated while schemas load, so a
 //! compiler that runs first cannot borrow it; the compiled stylesheet, every document of every run and
-//! the set must share one table (DESIGN §6.6).
+//! the set must share one table, because a name is identified by its id in that table.
 //!
 //! **§3.14's semantics**, defined by a synthetic schema document of `xs:import`s:
 //!
@@ -29,7 +29,7 @@
 //!   is one whose target namespace is not the declaration's (the synthetic `xs:import` names it,
 //!   src-import) — unless the set already holds a schema document of the declared namespace (a
 //!   host schema's, or an earlier import's): the location is then a hint that did not lead to the
-//!   namespace's schema and is passed over, `found()` false (M4g, decision D-g11; XML Schema 1.1
+//!   namespace's schema and is passed over, `found()` false (XML Schema 1.1
 //!   Part 1 §4.2.6.2: "it is open to applications to ignore all but the first `<import>` for a given
 //!   namespace, regardless of the ·actual value· of schemaLocation"). The pass-over is
 //!   order-dependent — an earlier import counts only when it was loaded first — and a document an
@@ -42,31 +42,31 @@
 //!   namespace is found when a host schema (or a document one of the set's directives loaded) has it
 //!   as its target namespace, and contributes nothing otherwise (the Schema for Schemas is not
 //!   available, so the XML Schema namespace is not "found" unless a host gives it);
-//! * inline — the `xs:schema` element is cut out of the module text by its source span (D-9, "the
-//!   slice approach", proven on 517 WSDLs by SOAP S0), the in-scope namespace bindings it does not
+//! * inline — the `xs:schema` element is cut out of the module text by its source span, the
+//!   in-scope namespace bindings it does not
 //!   declare itself are written into its start tag on the same line, the elements of it that §3.12
 //!   `use-when` excludes are blanked out, and it is loaded under the location `<base URI>#schema-N`
 //!   (N from 1 in each module; a module reached twice has its inline schemas loaded once). Line
 //!   numbers inside the slice are the module's.
 //!
-//! Every component of the set is in scope for the whole stylesheet (D-7: lenient — the engine has no
-//! namespace filter, §3.13 allows implementation-defined additions); XTSE1520 and `type-available` read
+//! Every component of the set is in scope for the whole stylesheet (the XPath engine has no namespace
+//! filter, and §3.13 allows implementation-defined additions); XTSE1520 and `type-available` read
 //! the same set. So the transitive-import rule of §3.14 ("These rules do not cause names to be
 //! imported transitively … The stylesheet must import all the namespaces containing names that it
 //! actually references") is not enforced: a name a schema document of the set defines is usable
 //! although no `xsl:import-schema` names its namespace — an implementation-defined addition to the
 //! in-scope schema components (§3.13), documented, never an error a conforming stylesheet meets.
 //!
-//! **XML Schema version** (M4g, D-3): 1.0 unless [`SchemaContextBuilder::xsd_version`] asks for 1.1,
+//! **XML Schema version**: 1.0 unless [`SchemaContextBuilder::xsd_version`] asks for 1.1,
 //! for every schema document of the context alike.
 //!
 //! **Locations.** A `file:` URI is handed to `xsd-schema` as the file-system path it names
 //! (`schema_location`), so that every location the context reports — in a schema error, a warning,
 //! an inline schema's `<base URI>#schema-N` — is spelled one way, as a path; `ResolverLoader` turns a
-//! path back into a `file:` URI before asking the compiler's resolver. Since `wave-b` `98ab11a`
-//! (C15a) `xsd-schema` resolves every directive by RFC 3986 and identifies a document however its
-//! location is spelled (`s/../x.xsd` and `x.xsd` are one document); it reads `file:` URIs too, so the
-//! path form is a choice of spelling, no longer a workaround. A location with a scheme reaches
+//! path back into a `file:` URI before asking the compiler's resolver. `xsd-schema` resolves every
+//! directive by RFC 3986 and identifies a document however its location is spelled (`s/../x.xsd`
+//! and `x.xsd` are one document); it reads `file:` URIs too, so the path form is a choice of
+//! spelling. A location with a scheme reaches
 //! `ResolverLoader` resolved and normalized, and a relative one (a stylesheet named by a relative
 //! URI) relative.
 
@@ -101,7 +101,7 @@ const XSI_NS: &str = "http://www.w3.org/2001/XMLSchema-instance";
 // ── The context ──────────────────────────────────────────────────────────
 
 /// The schema components a schema-aware stylesheet is compiled against (§3.13's in-scope schema
-/// components), owned by the caller (M4 plan D-1).
+/// components), owned by the caller.
 ///
 /// The [`CompiledStylesheet`](crate::CompiledStylesheet) made from it borrows it, the same way it
 /// borrows the name table in basic mode: the set's own [`NameTable`] *is* the stylesheet's table, so
@@ -164,7 +164,7 @@ impl Default for SchemaContext {
 
 impl SchemaContext {
     /// A context with the built-in types only (§3.13: "A schema-aware XSLT processor additionally
-    /// supports: All other built-in types defined in \[XML Schema Part 2\]"), XSD 1.0 (M4 plan D-3).
+    /// supports: All other built-in types defined in \[XML Schema Part 2\]"), XSD 1.0.
     /// Enough for a stylesheet without `xsl:import-schema`.
     pub fn new() -> Self {
         Self::with_version(XsdVersion::V1_0)
@@ -225,7 +225,7 @@ impl SchemaContext {
     /// happened: each `schema-location` it did not load from — one that could not be read (§3.14:
     /// "it is not intrinsically an error if no schema document can be located"), and one passed
     /// over because the set already held a schema document of the declared namespace and the
-    /// document at the location has another target namespace (decision D-g11; Structures 1.1
+    /// document at the location has another target namespace (Structures 1.1
     /// §4.2.6.2 permits ignoring such a hint, "but such a strategy risks missing useful information
     /// when new schemaLocations are offered"). The import's [`SchemaImport::found`] is then false.
     pub fn warnings(&self) -> &[String] {
@@ -239,7 +239,7 @@ impl SchemaContext {
     /// §3.14: "The `namespace` attribute indicates that a schema for the given namespace is required
     /// by the stylesheet. This information may be enough on its own to enable an implementation to
     /// locate the required schema components" — the context is where this processor locates them
-    /// (review R5). An import by location or an inline schema the context did not load is not
+    /// An import by location or an inline schema the context did not load is not
     /// satisfied by other documents of its namespace: they may define other components.
     fn covers(&self, planned: &PlannedImport) -> bool {
         let key = planned.key();
@@ -354,9 +354,13 @@ impl SchemaImport {
 pub enum ImportSource {
     /// `schema-location`, resolved against the base URI of the declaration.
     Location(String),
-    /// An inline `xs:schema`, loaded under `system_id` (`<base URI>#schema-N`, N counted from 1 in
-    /// each module, in document order; M4 plan D-9).
-    Inline { system_id: String },
+    /// An inline `xs:schema`, the child of the `xsl:import-schema`
+    /// declaration.
+    Inline {
+        /// The URI the inline schema is loaded under: `<base URI>#schema-N`,
+        /// N counted from 1 in each module, in document order.
+        system_id: String,
+    },
     /// Neither: the namespace alone.
     NamespaceOnly,
 }
@@ -412,8 +416,8 @@ impl SchemaContextBuilder {
         self
     }
 
-    /// The version of XML Schema the context's one set implements (M4 plan D-3: one version per
-    /// context; default [`XsdVersion::V1_0`]).
+    /// The version of XML Schema the context's one set implements (one version per context;
+    /// default [`XsdVersion::V1_0`]).
     ///
     /// XSLT 2.0 refers to XML Schema 1.0 — its normative references name "XML Schema Part 1:
     /// Structures Second Edition" and "XML Schema Part 2: Datatypes Second Edition" —, so 1.0 is the
@@ -443,11 +447,11 @@ impl SchemaContextBuilder {
     /// Adds the schema document the resolver serves at `uri` (an absolute URI) to the context.
     ///
     /// §3.13: "An implementation may define mechanisms that allow additional schema components to be
-    /// added to the in-scope schema components for the stylesheet" — this is that mechanism (M4 plan
-    /// D-2): the host's schemas join the stylesheet's imports in the **one** schema set of the
+    /// added to the in-scope schema components for the stylesheet" — this is that mechanism: the
+    /// host's schemas join the stylesheet's imports in the **one** schema set of the
     /// context, against which the stylesheet is compiled and every source document is validated
     /// (`TransformOptions::source_validation`). Their components are in scope for the whole
-    /// stylesheet (D-7). Host schemas are loaded before the stylesheet's imports: an
+    /// stylesheet. Host schemas are loaded before the stylesheet's imports: an
     /// `xsl:import-schema` by namespace only of a namespace a host schema supplies is `found()`, and
     /// one by location of a document a host schema already loaded (the same URI) loads it once.
     ///
@@ -520,7 +524,7 @@ impl SchemaContextBuilder {
     }
 
     /// Loads the imports into one schema set (XSD 1.0 unless [`xsd_version`](Self::xsd_version)
-    /// says otherwise, D-3) and compiles it.
+    /// says otherwise) and compiles it.
     ///
     /// > \[ERR XTSE0220\] It is a static error if the synthetic schema document does not satisfy the
     /// > constraints described in \[XML Schema Part 1\] (section 5.1, Errors in Schema Construction
@@ -547,7 +551,7 @@ enum Planned {
     NamespaceOnly,
 }
 
-/// An inline `xs:schema`, cut out of the module text (D-9).
+/// An inline `xs:schema`, cut out of the module text.
 struct InlineSchema {
     /// `<base URI>#schema-N`, as the caller sees it.
     system_id: String,
@@ -593,8 +597,8 @@ impl PlannedImport {
 ///
 /// A module reached twice — two `xsl:include`s of it, or an include and an import (§3.10.2 forbids
 /// only a module including itself) — is two modules of the graph, but its declarations are the same
-/// elements of the same resource: each is used once (review R4; loading one inline schema twice
-/// would be "multiple definitions of the same name", XTSE0220).
+/// elements of the same resource: each is used once (loading one inline schema twice would be
+/// "multiple definitions of the same name", XTSE0220).
 pub(crate) fn plan(modules: &ModuleSet<'_>) -> Result<Vec<PlannedImport>, XsltError> {
     let mut found: Vec<(Option<DeclarationId>, PlannedImport)> = Vec::new();
     let mut numbering = InlineNumbering::default();
@@ -645,7 +649,7 @@ impl DeclarationId {
     }
 }
 
-/// The `N` of `#schema-N` (D-9): the inline schemas of each module are numbered from 1 in document
+/// The `N` of `#schema-N`: the inline schemas of each module are numbered from 1 in document
 /// order, and one reached again (another copy of its module) keeps its number.
 #[derive(Default)]
 struct InlineNumbering {
@@ -814,7 +818,7 @@ pub(crate) fn inline_schema_element<'t>(
     Ok(schema)
 }
 
-/// Cuts an inline `xs:schema` out of its module's text (D-9): the element's bytes, with the in-scope
+/// Cuts an inline `xs:schema` out of its module's text: the element's bytes, with the in-scope
 /// namespace bindings it does not declare itself written into its start tag right after the element
 /// name, on the same line — §3.14's "a document containing a copy of the `xs:schema` element", whose
 /// in-scope namespaces a copy keeps.
@@ -824,7 +828,7 @@ pub(crate) fn inline_schema_element<'t>(
 /// effectively excluded from a stylesheet module the stylesheet module has the same effect as if the
 /// node were not there" — so every element of the schema that `use-when` excludes (the loader has
 /// computed them, `Module::is_excluded`) is blanked out of the copy: each of its bytes but line ends
-/// becomes a space, so that what follows keeps its line and column (review R1).
+/// becomes a space, so that what follows keeps its line and column.
 fn slice(
     module: &Module<'_>,
     schema: &Nav<'_>,
@@ -948,7 +952,7 @@ fn escape_attribute(value: &str) -> String {
 }
 
 /// Checks that a schema context covers the imports of a module graph being compiled — that the
-/// context was built from this stylesheet (D-1).
+/// context was built from this stylesheet.
 pub(crate) fn check_coverage(
     context: &SchemaContext,
     modules: &ModuleSet<'_>,
@@ -979,8 +983,7 @@ pub(crate) fn check_coverage(
 
 /// The location `xsd-schema` loads a URI under: the path a `file:` URI names, the URI itself
 /// otherwise — the one spelling of the context's locations in its diagnostics (see the module
-/// docs; until `wave-b` `98ab11a` it also kept `xsd-schema` from treating a `file:` base as a
-/// path, C15a).
+/// docs).
 fn schema_location(uri: &str) -> String {
     let is_file = uri.starts_with("file:") || !resolver::has_scheme(uri);
     match resolver::uri_to_path(uri).filter(|_| is_file) {
@@ -1008,12 +1011,10 @@ impl ResolverLoader {
     ///
     /// The [`Resolver`] contract: "`uri` is always absolute: \[`resolve_uri`\] has already been
     /// applied". `xsd-schema` resolves a directive against its document's location itself, by RFC
-    /// 3986 §5.2 since `wave-b` `98ab11a` (C15a; review R3 of M4a found it was not), in one of three
-    /// forms:
+    /// 3986 §5.2, in one of three forms:
     ///
     /// * a URI with a scheme (an `http:` base, or any other non-`file:` one): resolved and
-    ///   normalized (§5.2.4's dot segments removed, §6.2.2 / §6.2.3) — passed on as it is (until
-    ///   the Wave B follow-up this crate removed the dot segments itself);
+    ///   normalized (§5.2.4's dot segments removed, §6.2.2 / §6.2.3) — passed on as it is;
     /// * an absolute path (a `file:` base, which this module hands `xsd-schema` as the path it names,
     ///   [`schema_location`]): lexically normalized — turned back into its `file:` URI;
     /// * a relative path (a stylesheet named by a relative URI, `resolve_uri`'s "base that is itself
@@ -1382,7 +1383,7 @@ impl Loading {
         Ok(())
     }
 
-    /// A namespace-only import: a host schema of the namespace, loaded before the imports (M4b);
+    /// A namespace-only import: a host schema of the namespace, loaded before the imports;
     /// else the schemas `xsd-schema` embeds (the XML namespace, XLink); the built-in attribute
     /// declarations of the XML Schema instance namespace; nothing for any other namespace (a
     /// document a directive loads later still makes it `found()`, `Loading::run`).
@@ -1390,8 +1391,8 @@ impl Loading {
     /// The XML Schema namespace is "found" only with the Schema for Schemas (§3.13's Note: "A
     /// stylesheet that is designed to process XML Schema documents as its input or output may import
     /// the Schema for Schemas"), which this processor does not have: its built-in types are in every
-    /// set whether imported or not, its element declarations (`schema-element(xs:schema)`) in none
-    /// (review R6).
+    /// set whether imported or not, its element declarations (`schema-element(xs:schema)`) in
+    /// none.
     fn load_namespace(
         &mut self,
         namespace: &Option<String>,
@@ -1480,7 +1481,7 @@ pub(crate) enum TypeKind {
 
 /// The XSD built-in types a schema-aware processor has (§3.13, "All other built-in types defined in
 /// \[XML Schema Part 2\]"), with the five \[XPath 2.0\] adds and whether each is simple; `None` for a
-/// name that is not one. XSD 1.0's list (D-3).
+/// name that is not one. XSD 1.0's list.
 pub(crate) fn built_in_type(local: &str) -> Option<TypeKind> {
     Some(match local {
         "anyType" | "untyped" => TypeKind::Complex,
@@ -1518,10 +1519,11 @@ pub(crate) fn built_in_has_constructor(local: &str) -> bool {
 const XSD11_PART_2_ADDITIONS: [&str; 1] = ["dateTimeStamp"];
 
 /// The type the expanded name `{uri}local` denotes in the in-scope schema types of a schema-aware
-/// stylesheet compiled against `set`: a built-in one, or one of the set (D-7: the whole set).
+/// stylesheet compiled against `set`: a built-in one, or one of the set (every component of the set
+/// is in scope).
 ///
 /// §3.13: "A schema-aware XSLT processor additionally supports: All other built-in types defined in
-/// \[XML Schema Part 2\]" — in an XML Schema 1.1 context (M4g, an implementation-defined mechanism
+/// \[XML Schema Part 2\]" — in an XML Schema 1.1 context (an implementation-defined mechanism
 /// of the same section) that Part 2 is 1.1's, whose built-in types the set has: `xs:dateTimeStamp`
 /// beyond XSLT 2.0's list ([`XSD11_PART_2_ADDITIONS`]; not `xs:error`, a Structures type).
 pub(crate) fn in_scope_type(set: &SchemaSet, uri: &str, local: &str) -> Option<TypeKind> {

@@ -1,4 +1,4 @@
-//! How a source document enters a run: admission, validation (M4b, in
+//! How a source document enters a run: admission, validation (in
 //! `typed_sources.rs`), whitespace stripping (§4.4) and URI resolution (§16.1).
 
 use xsd_schema::document::BufferDocument;
@@ -22,7 +22,7 @@ impl<'a, 't> Transformation<'a, 't> {
     }
 
     /// [`load_document`](Self::load_document), validated as `validation` says rather than as the
-    /// run's default (M4 plan D-4).
+    /// run's default.
     ///
     /// `Strict` and `Lax` validate the document against the stylesheet's schema set — the schemas
     /// of its `SchemaContext`: the stylesheet's imports and the host's own
@@ -82,12 +82,12 @@ impl<'a, 't> Transformation<'a, 't> {
 
     /// [`admit`](Self::admit), reporting a document that cannot be parsed —
     /// or is not valid — with `parse_code`, and validating it as `validation`
-    /// says (M4 plan D-4; `typed_sources.rs`). (A re-entrant load keeps
-    /// XTDE1170, §9.1.)
+    /// says (`typed_sources.rs`). (A re-entrant load keeps
+    /// XTDE1170.)
     ///
     /// A typed tree is admitted by `admit_typed` (§4.3 annotation stripping
     /// and §4.4 whitespace stripping with its simple-content exemption); an
-    /// untyped one by [`strip_source`](Self::strip_source), as before (D-13).
+    /// untyped one by [`strip_source`](Self::strip_source).
     fn admit_with(
         &self,
         uri: Option<&str>,
@@ -273,7 +273,7 @@ impl<'a, 't> Transformation<'a, 't> {
     // ── §21.1 XTDE1665: the input may not be schema-typed ─────────────────
 
     /// Admits a tree the host put into the store (`DocumentStore::insert`) as the source tree of a
-    /// run, when it carries type annotations (M4 plan D-2, D-13).
+    /// run, when it carries type annotations.
     ///
     /// Every path a host-inserted tree enters the run by goes through here: as the source of
     /// [`transform_document`](Self::transform_document), and as the result of `doc()` /
@@ -283,7 +283,7 @@ impl<'a, 't> Transformation<'a, 't> {
     /// (§21.1: XTDE1665 "will not arise if the input-type-annotations attribute is set to strip") and
     /// refused with XTDE1665 otherwise; on a schema-aware processor it is taken as it is when it is
     /// bound to the stylesheet's own schema set, stripped under `strip` (§4.3), and stripped with a
-    /// warning when it is bound to another set (D-2: its annotations name components the stylesheet
+    /// warning when it is bound to another set (its annotations name components the stylesheet
     /// does not know). The stripped copy replaces it in the store, under its `DocId` and URI. The
     /// host's tree is not whitespace-stripped (§4.4), typed or not.
     pub(super) fn admit_stored(&self, id: DocId) -> Result<(), XsltError> {
@@ -315,7 +315,7 @@ impl<'a, 't> Transformation<'a, 't> {
     /// — `input-type-annotations` concerns source trees only, §4.3, §4.4); a schema-aware one takes a
     /// node of a tree bound to the stylesheet's schema set, and refuses one bound to another set
     /// (`XSLT2-INTERNAL`): its annotations cannot be read, and a stripped copy would be another node
-    /// (D-2 strips source trees only).
+    /// (only source trees are stripped).
     pub(super) fn check_parameter_annotations(&self, node: &Nav<'t>) -> Result<(), XsltError> {
         let doc = node.document();
         if !doc.has_type_annotations() {
@@ -489,10 +489,10 @@ impl<'a, 't> Transformation<'a, 't> {
         self.admit_with(Some(&absolute), &text, code, validation)
     }
 
-    /// How a document loaded by URI is validated (D-4): a mode the host set for the URI
+    /// How a document loaded by URI is validated: a mode the host set for the URI
     /// (`set_source_validation`, `register_source_with`); else, when `doc()` / `document()` reads a
-    /// stylesheet module of this stylesheet (`document('')`, or a module's URI), `Skip` (decision
-    /// D-V: a stylesheet module is not a source the host asked to validate); else the run's default.
+    /// stylesheet module of this stylesheet (`document('')`, or a module's URI), `Skip` (a
+    /// stylesheet module is not a source the host asked to validate); else the run's default.
     fn validation_of(&self, absolute: &str, by_stylesheet: bool) -> super::SourceValidation {
         if let Some(mode) = self.source_modes.borrow().get(absolute) {
             return *mode;

@@ -4,8 +4,8 @@
 //! This module is pure: it knows nothing of XPath values, trees or the
 //! dynamic context. It takes the integers of a place marker and the effective
 //! values of `format`, `lang`, `ordinal`, `letter-value`, `grouping-separator`
-//! and `grouping-size`, and returns the string. `xsl:number` (§12, M3c) is its
-//! first caller; `format-date()` and its siblings (§16.5.1, M3d) are the
+//! and `grouping-size`, and returns the string. `xsl:number` (§12) is its
+//! first caller; `format-date()` and its siblings (§16.5.1) are the
 //! second — "the first presentation modifier … may be any format token
 //! permitted in the format string of the `xsl:number` instruction", and the
 //! `t` / `o` modifiers ask for `letter-value="traditional"` / ordinal numbering
@@ -43,7 +43,7 @@
 //!   `A`, `a`, `I`, `i` the request is ignored, as §12.3 allows.
 //! - `lang`: English only. "If a language is requested that is not supported,
 //!   the processor uses the language that it would use if the lang attribute
-//!   were omitted", which is English (ROADMAP Q23).
+//!   were omitted", which is English.
 //! - `letter-value`: accepted and has no effect — in English the token alone
 //!   is never ambiguous (`a` is the alphabetic sequence, `i` the traditional
 //!   one, and each has only that one).

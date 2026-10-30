@@ -1,4 +1,4 @@
-//! XSLT 2.0 error codes (Appendix E of the specification, `xslt20.html`).
+//! XSLT 2.0 error codes (Appendix E of the specification).
 //!
 //! Generated from the spec text; one constant per code, with the spec's own wording as
 //! documentation. [`describe`] looks a code up at run time.

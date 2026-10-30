@@ -11,8 +11,7 @@ use std::collections::HashMap;
 /// > mappings for the same character. In this situation, the last character
 /// > mapping takes precedence.
 ///
-/// [`CharacterMap::insert`] is that "last one wins"; the order the mappings are
-/// inserted in is the compiler's business (`compile/output.rs`).
+/// The map holds the mapping that wins for each character.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CharacterMap {
     map: HashMap<char, String>,
@@ -20,12 +19,12 @@ pub struct CharacterMap {
 
 impl CharacterMap {
     /// Maps `c` to `string`, replacing an earlier mapping of `c`.
-    pub fn insert(&mut self, c: char, string: impl Into<String>) {
+    pub(crate) fn insert(&mut self, c: char, string: impl Into<String>) {
         self.map.insert(c, string.into());
     }
 
     /// Adds every mapping of `other`, which take precedence over these.
-    pub fn extend_from(&mut self, other: &CharacterMap) {
+    pub(crate) fn extend_from(&mut self, other: &CharacterMap) {
         for (c, s) in &other.map {
             self.map.insert(*c, s.clone());
         }
@@ -36,10 +35,12 @@ impl CharacterMap {
         self.map.get(&c).map(String::as_str)
     }
 
+    /// Whether the map maps no character.
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
 
+    /// How many characters the map maps.
     pub fn len(&self) -> usize {
         self.map.len()
     }

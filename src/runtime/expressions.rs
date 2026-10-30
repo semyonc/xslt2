@@ -98,7 +98,7 @@ impl<'a, 't> Transformation<'a, 't> {
     /// ([`set_clock`](Self::set_clock)). The implicit timezone is
     /// [`TransformOptions::implicit_timezone`](super::TransformOptions::implicit_timezone)
     /// when the host set it — the engine then gives the current instant in that
-    /// timezone (upstream C94) —, else the host's local offset at that instant.
+    /// timezone —, else the host's local offset at that instant.
     /// `None` only if the engine stops returning an `xs:dateTime`, in which
     /// case every evaluation keeps its own clock.
     fn clock(&self) -> &Option<(DateTimeValue, TimezoneOffset)> {

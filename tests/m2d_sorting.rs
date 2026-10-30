@@ -1367,7 +1367,9 @@ fn uca_collations_are_not_implemented_and_owned_by_m2k() {
         let error = eval(content).expect_err(content);
         assert!(error.is_not_implemented(), "{error}");
         assert!(
-            error.message.ends_with(" is not implemented (M2k)"),
+            error
+                .message
+                .ends_with(" is not implemented (icu-collation)"),
             "{:?}",
             error.message
         );

@@ -58,7 +58,9 @@ fn assert_m2k(result: Result<String, XsltError>, what: &str) {
     let error = result.expect_err(what);
     assert!(error.is_not_implemented(), "{what}: {error}");
     assert!(
-        error.message.ends_with(" is not implemented (M2k)"),
+        error
+            .message
+            .ends_with(" is not implemented (icu-collation)"),
         "{what}: {:?}",
         error.message
     );

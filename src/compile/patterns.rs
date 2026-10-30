@@ -112,8 +112,7 @@ fn reject_grouping_functions(whole: &XPathExpr, source: &str) -> Result<(), Xslt
 /// syntactically sound; what is left to decide is whether the outer structure
 /// is a Pattern (§5.5.2). No prefix is resolved and no predicate is compiled.
 /// A construct of the Pattern grammar that this processor does not implement
-/// is still a Pattern (none is left since M4c made the typed node tests
-/// work).
+/// is still a Pattern (none is left: the typed node tests work).
 fn has_pattern_shape(source: &str) -> bool {
     struct ShapeOnly;
     impl PatternSink for ShapeOnly {
@@ -175,9 +174,9 @@ impl PatternSink for Sink<'_, '_, '_, '_> {
     /// namespace is `xs:untyped` or a predefined type by its code — the
     /// predefined types of every static context (XPath 2.0 §2.5.1), a basic
     /// processor's included (§3.13) —, any other the key of a type of the
-    /// stylesheet's schema set (§3.13's in-scope schema types, M4 plan D-7).
+    /// stylesheet's schema set (§3.13's in-scope schema types).
     /// The names are interned in the stylesheet's name table, which in
-    /// schema-aware mode is the set's own (D-1), so the set's lookups and
+    /// schema-aware mode is the set's own, so the set's lookups and
     /// the matcher read them alike.
     ///
     /// The whole pattern went through the binder first (`compile_pattern`),
@@ -280,7 +279,7 @@ fn qualified(names: &NameTable, name: &QName) -> QualifiedName {
 /// XPath 2.0 §2.5.4.4: a SchemaElementTest matches a candidate whose name
 /// "matches the specified ElementName or matches the name of an element in a
 /// substitution group headed by an element named ElementName". The dispatch
-/// index (DESIGN §8.5) files a template rule by the names its last step can
+/// index files a template rule by the names its last step can
 /// match, so it needs these names; whether a node with one of them matches is
 /// still decided by `xsd-schema`'s matcher. A member is a global declaration
 /// whose substitution-group affiliations (`resolved_substitution_groups`,

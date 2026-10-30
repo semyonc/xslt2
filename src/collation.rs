@@ -1,5 +1,5 @@
-//! Collations: the registry every expression of a stylesheet sees, and the
-//! collations `xsl:sort` chooses (§13.1.3, §3.6.1; DESIGN §9.5).
+//! Collations: how a host adds its own, and which ones the processor has
+//! (§13.1.3, §3.6.1).
 //!
 //! > \[§13.1.3\] A collation is identified by a URI, but the manner in which
 //! > this URI is associated with an actual rule or algorithm is
@@ -10,32 +10,32 @@
 //! This processor recognizes, with no dependency:
 //!
 //! * the **codepoint** collation ([`CODEPOINT_COLLATION_URI`]), which the XPath
-//!   engine implements itself and never looks up through a resolver;
+//!   engine implements itself;
 //! * the **HTML ASCII case-insensitive** collation
-//!   ([`HTML_ASCII_CASE_INSENSITIVE_URI`], [`HtmlAsciiCaseInsensitive`]);
+//!   ([`HTML_ASCII_CASE_INSENSITIVE_URI`]);
 //! * every collation a host registers with
-//!   [`XsltFunctions::register_collation`](crate::XsltFunctions::register_collation).
-//!   A host collation should implement [`Collation::sort_key`]: under a
-//!   collation without one, `xsl:key` and `group-by` keep their strings in an
-//!   index ordered by `compare` (a binary search per lookup) instead of a
-//!   hash table, and `=` compares pairs (see `register_collation`).
+//!   [`XsltFunctions::register_collation`](crate::XsltFunctions::register_collation):
+//!   an implementation of the [`Collation`] trait under an absolute URI. A host
+//!   collation should implement [`Collation::sort_key`]: under a collation
+//!   without one, `xsl:key` and `group-by` keep their strings in an index
+//!   ordered by `compare` (a binary search per lookup) instead of a hash
+//!   table, and `=` compares pairs (see `register_collation`).
 //!
-//! [`CollationRegistry`] holds them and implements the engine's
-//! [`CollationResolver`]; the compiler hands it, together with the
-//! `[xsl:]default-collation` in force, to every `XPathContext` it builds, so
-//! `compare()`, `=`, `distinct-values()` and the rest see the same collations
-//! as `xsl:sort`.
-//!
-//! The registry lives in [`XsltFunctions`](crate::XsltFunctions) because that is
-//! the one caller-owned object every `XPathContext` of a stylesheet already
-//! borrows (its function catalog); the resolver has to be borrowed for exactly
-//! the same lifetime.
+//! The [`CollationRegistry`] of an [`XsltFunctions`](crate::XsltFunctions)
+//! ([`collations`](crate::XsltFunctions::collations)) holds them and is the
+//! XPath engine's [`CollationResolver`]: every expression of a stylesheet
+//! compiled against those functions, `xsl:sort`, `xsl:key` and
+//! `xsl:for-each-group` see the same collations, with the
+//! `[xsl:]default-collation` in force.
 //!
 //! `xsl:sort` without a `collation` attribute but with `lang` or `case-order`
-//! uses [`CaseOrderCollation`], this processor's implementation-defined answer
-//! to §13.1.3 in the absence of language-specific collation data (see there).
+//! uses this processor's implementation-defined answer to §13.1.3: strings
+//! ordered by their lower-case mapping, then — between strings that differ
+//! only in case — lower case first unless `case-order="upper-first"`, then by
+//! code points; the same for every `lang`, and accents get no special
+//! treatment.
 //!
-//! # The `icu-collation` cargo feature
+//! # The `icu-collation` Cargo feature
 //!
 //! The UCA collations of F&O 3.1 §5.3.3
 //! (`http://www.w3.org/2013/collation/UCA?…`) need the Unicode Collation
@@ -51,7 +51,7 @@
 //!   or `&` (`reorder` is not available in ICU4X 1.5: ignored unless the URI
 //!   says `fallback=no`, which makes the URI unrecognized);
 //! * `xsl:sort` with `lang` and/or `case-order` and no `collation` sorts with a
-//!   locale-tailored UCA collation instead of [`CaseOrderCollation`].
+//!   locale-tailored UCA collation instead of the built-in algorithm above.
 //!
 //! A parameter a UCA URI leaves out takes the **language's** default where
 //! CLDR tailors it: `UCA?lang=th` ignores spaces and punctuation up to the
@@ -62,24 +62,23 @@
 //! substring functions (`contains()`, `starts-with()`, `ends-with()`,
 //! `substring-before()`, `substring-after()`) match **collation-equal
 //! substrings cut at character boundaries** under a UCA collation — the
-//! leftmost minimal match of F&O 2.0 §7.5 / UTS #10 (`collation/uca.rs`
-//! documents what is matched and what character boundaries cannot express:
-//! contractions can be split, expansions cannot; `collation/uca/search.rs`
-//! how the search narrows the candidates with the collation data, and the
-//! work budget beyond which it raises FOCH0004). It has no sort key either,
-//! so `xsl:key` and `group-by` use an index ordered by `compare`, and `=`,
+//! leftmost minimal match of F&O 2.0 §7.5 / UTS #10, where contractions can be
+//! split and expansions cannot — and give up with FOCH0004 after a work budget
+//! of about a second on pathological input. It has no sort key either, so
+//! `xsl:key` and `group-by` use an index ordered by `compare`, and `=`,
 //! `distinct-values()` and `index-of()` compare its strings pairwise.
 //!
 //! **Enabling the feature changes results.** `xsl:sort lang="…"` and
 //! `case-order` without a `collation` attribute sort with the UCA instead of
-//! [`CaseOrderCollation`] — `('f', 'é', 'e')` sorted with `lang="en"` is
+//! the built-in algorithm — `('f', 'é', 'e')` sorted with `lang="en"` is
 //! `e, f, é` without the feature and `e, é, f` with it — and UCA URIs that
 //! were `XSLT2-NOTIMPL` work. Cargo unifies features across a build, so a
 //! dependency that switches `icu-collation` on switches it on for every crate
 //! in the build that uses this one.
 //!
 //! Without the feature a UCA URI is a feature this build lacks, reported as
-//! `XSLT2-NOTIMPL` rather than as an unknown collation.
+//! `XSLT2-NOTIMPL` (the message ends in `(icu-collation)`) rather than as an
+//! unknown collation.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -101,12 +100,12 @@ pub const HTML_ASCII_CASE_INSENSITIVE_URI: &str =
 /// need locale data: the `icu-collation` feature brings it.
 pub(crate) const UCA_COLLATION_PREFIX: &str = "http://www.w3.org/2013/collation/UCA";
 
-/// The owner of the UCA collations (`http://www.w3.org/2013/collation/UCA?…`),
-/// for the `XSLT2-NOTIMPL` they raise in a build without the `icu-collation`
-/// feature: roadmap milestone M2k, "ICU/UCA collations behind a cargo feature"
-/// (DESIGN §9.5). Spelled as a bare milestone code, the form `(M2k)` that the
-/// conformance harness attributes to an owner.
-pub(crate) const UCA_MILESTONE: &str = "M2k";
+/// What provides the UCA collations (`http://www.w3.org/2013/collation/UCA?…`),
+/// named in the `XSLT2-NOTIMPL` they raise in a build without it: the Cargo
+/// feature `icu-collation`. The message ends in `(icu-collation)`, which tells
+/// a user what to enable and the conformance harness whom to attribute the
+/// case to.
+pub(crate) const UCA_OWNER: &str = "icu-collation";
 
 /// Whether this build implements the UCA collations (the `icu-collation`
 /// cargo feature).
@@ -115,7 +114,7 @@ pub(crate) const UCA_COLLATIONS_AVAILABLE: bool = cfg!(feature = "icu-collation"
 /// The error for a collation URI the registry did not recognize, when the
 /// reason is that **this build** lacks the feature rather than that the URI
 /// names no collation: without the `icu-collation` feature, a URI of the UCA
-/// family is `XSLT2-NOTIMPL` (M2k), not the context's "unrecognized
+/// family is `XSLT2-NOTIMPL`, not the context's "unrecognized
 /// collation" error — that would claim a conformance the build does not have.
 ///
 /// With the feature every UCA URI the registry declines (`fallback=no` with a
@@ -129,7 +128,7 @@ pub(crate) fn uca_not_implemented(uri: &str) -> Option<XsltError> {
     }
     Some(XsltError::not_implemented(
         format!("the collation {uri}"),
-        UCA_MILESTONE,
+        UCA_OWNER,
     ))
 }
 
@@ -142,7 +141,7 @@ pub(crate) fn uca_not_implemented(uri: &str) -> Option<XsltError> {
 /// byte, a byte offset into the folded string is a byte offset into the
 /// original, which is what [`find`](Collation::find) has to return.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct HtmlAsciiCaseInsensitive;
+pub(crate) struct HtmlAsciiCaseInsensitive;
 
 impl Collation for HtmlAsciiCaseInsensitive {
     fn compare(&self, a: &str, b: &str) -> Ordering {
@@ -188,7 +187,7 @@ impl Collation for HtmlAsciiCaseInsensitive {
 
 /// Which case `xsl:sort` puts first among strings that differ only in case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CaseOrder {
+pub(crate) enum CaseOrder {
     /// `case-order="upper-first"`.
     UpperFirst,
     /// `case-order="lower-first"`, and the default when only `lang` is given.
@@ -225,8 +224,8 @@ pub enum CaseOrder {
 /// Accents and other secondary differences get no special treatment: `ä`
 /// sorts after `z`, by codepoint.
 #[derive(Debug, Clone, Copy)]
-pub struct CaseOrderCollation {
-    pub case_order: CaseOrder,
+pub(crate) struct CaseOrderCollation {
+    pub(crate) case_order: CaseOrder,
 }
 
 impl CaseOrderCollation {
@@ -279,15 +278,9 @@ pub struct CollationRegistry {
     uca: uca::UcaCollations,
 }
 
-impl Default for CollationRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl CollationRegistry {
     /// The built-in collations only: codepoint and HTML ASCII case-insensitive.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             host: HashMap::new(),
             html_ascii: Rc::new(HtmlAsciiCaseInsensitive),
@@ -304,7 +297,11 @@ impl CollationRegistry {
     /// effect anywhere — the call refuses it and returns `false`. Every other
     /// registration returns `true`; a later registration of the same URI
     /// replaces an earlier one.
-    pub fn register(&mut self, uri: impl Into<String>, collation: Rc<dyn Collation>) -> bool {
+    pub(crate) fn register(
+        &mut self,
+        uri: impl Into<String>,
+        collation: Rc<dyn Collation>,
+    ) -> bool {
         let uri = uri.into();
         if uri == CODEPOINT_COLLATION_URI {
             return false;

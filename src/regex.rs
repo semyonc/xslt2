@@ -38,7 +38,7 @@
 //! > resources consumed by the processing of a stylesheet.
 //!
 //! The engine's one limit replaces the 32 levels this crate used to impose
-//! before the engine had one (Wave B decision D6). What it costs in stack,
+//! before the engine had one. What it costs in stack,
 //! measured as the smallest thread stack (arm64, 4 KiB steps, a thread's own
 //! floor of 19 KiB included) that runs one phase at 32 / 64 levels:
 //!
@@ -55,7 +55,7 @@
 //! the guard allowed; on a thread with Rust's default 2 MiB stack the guard's
 //! default for such a thread (`OTHER_THREAD_STACK_LIMIT`, 1 MiB) leaves the
 //! other 1 MiB for it — under 0.5 MiB at the limit in a debug build — and for
-//! the evaluation between two checks (`tests/m2h_regex.rs`,
+//! the evaluation between two checks (the integration test
 //! `a_recursion_compiling_regexes_at_the_limit_ends_in_the_stack_guard_error`,
 //! which runs in both profiles).
 //! Real regular expressions nest a handful of levels deep: the deepest
@@ -148,6 +148,7 @@ impl CompiledRegex {
     }
 
     /// The effective value of `flags` this was compiled from.
+    #[cfg(test)]
     pub fn flags(&self) -> &str {
         &self.flags
     }

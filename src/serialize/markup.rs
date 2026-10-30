@@ -1130,7 +1130,7 @@ impl<'a, 'o> Writer<'a, 'o> {
     /// a character the encoding cannot hold has no reference to fall back on —
     /// §7.4.2: "otherwise (for example, in a script or style element or in a
     /// comment), the serializer MUST signal a serialization error
-    /// [err:SERE0008]".
+    /// \[err:SERE0008\]".
     fn raw_content(&mut self, text: &str) -> Result<(), XsltError> {
         for c in text.chars() {
             if is_c1_control(c) {
@@ -1208,7 +1208,7 @@ impl<'a, 'o> Writer<'a, 'o> {
     /// SERE0008 for an unrepresentable character where references are not
     /// recognized: names, comments, processing instructions (§5.1.2: "If a
     /// comment node contains the same character, a serialization error
-    /// [err:SERE0008] results").
+    /// \[err:SERE0008\] results").
     fn check_unescapable(&self, text: &str, context: &str) -> Result<(), XsltError> {
         super::check_representable(self.p.encoding, text, context)
     }
@@ -1216,7 +1216,7 @@ impl<'a, 'o> Writer<'a, 'o> {
     /// SERE0014 for a control character #x7F–#x9F of the tree with the HTML
     /// method, wherever it occurs — §7.3: "Certain characters, specifically
     /// the control characters #x7F-#x9F, are legal in XML but not in HTML. It
-    /// is a serialization error [err:SERE0014] to use the HTML output method
+    /// is a serialization error \[err:SERE0014\] to use the HTML output method
     /// when such characters appear in the instance of the data model. The
     /// serializer MUST signal the error." Text and attribute values check
     /// character by character as they are escaped (`character`, `raw_content`);

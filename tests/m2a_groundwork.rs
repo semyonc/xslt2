@@ -478,7 +478,7 @@ fn every_notimpl_names_its_sub_milestone() {
             r#"<xsl:template match="/" default-collation="http://www.w3.org/2013/collation/UCA?strength=secondary"><out/></xsl:template>"#
                 .to_string(),
             "the collation",
-            "M2k",
+            "icu-collation",
         ),
         // runtime/sort.rs: the same collation named by xsl:sort.
         #[cfg(not(feature = "icu-collation"))]
@@ -487,7 +487,7 @@ fn every_notimpl_names_its_sub_milestone() {
                 r#"<xsl:for-each select="(1, 2)"><xsl:sort collation="http://www.w3.org/2013/collation/UCA?lang=en"/></xsl:for-each>"#,
             ),
             "the collation",
-            "M2k",
+            "icu-collation",
         ),
     ];
     for (body, feature, owner) in cases {

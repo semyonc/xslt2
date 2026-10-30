@@ -6,6 +6,12 @@
 //! dynamic context of a function body (DESIGN §9.1), recursion depth (Q33),
 //! `function-available` and `use-when`, and the places a function can be called
 //! from.
+//!
+//! Two tests read the compiled stylesheet's function table or match a pattern
+//! directly, which the public API no longer offers:
+//! `a_function_set_reused_across_compilations_keeps_them_apart` is a unit test
+//! in `src/model/tests.rs`, `a_direct_pattern_match_is_under_the_stack_guard`
+//! one in `src/runtime/patterns.rs`.
 
 mod common;
 
@@ -13,9 +19,8 @@ use std::sync::Arc;
 
 use bumpalo::Bump;
 use xsd_schema::namespace::NameTable;
-use xsd_schema::navigator::DomNavigator;
 
-use xslt2::{Compiler, MemoryResolver, QName, TransformOptions, XsltError, XsltFunctions};
+use xslt2::{Compiler, MemoryResolver, TransformOptions, XsltError, XsltFunctions};
 
 const NS: &str = "http://www.w3.org/1999/XSL/Transform";
 
@@ -216,67 +221,6 @@ fn override_no_still_beats_the_backwards_compatible_fallback() {
            <xsl:template match="/"><out xsl:version="1.0"><xsl:value-of select="f:g()"/></out></xsl:template>"#,
     );
     assert_eq!(run(&main, "<doc/>").unwrap(), "<out>stylesheet</out>");
-}
-
-/// The table of stylesheet functions belongs to one compilation: a function
-/// set reused for a second stylesheet does not see the first one's functions,
-/// and each compiled stylesheet keeps calling its own (DESIGN §6.6: the function
-/// set is caller-owned and may serve many compilations). Stylesheets A and B
-/// mint the same handle numbers for different functions — A: `f:g#0`, `f:h#1`;
-/// B: `f:k#0`, `f:g#1` — and are run in the order A, B, A after both are
-/// compiled.
-#[test]
-fn a_function_set_reused_across_compilations_keeps_them_apart() {
-    xslt2::run_on_large_stack(TEST_STACK, || {
-        let functions = XsltFunctions::new();
-        let names = NameTable::new();
-        let first = Compiler::new(&names, &functions)
-            .compile_str(
-                &sheet(
-                    r#"<xsl:function name="f:g"><xsl:sequence select="'A:g0'"/></xsl:function>
-                       <xsl:function name="f:h"><xsl:param name="x"/><xsl:sequence select="concat('A:h1:', $x)"/></xsl:function>
-                       <xsl:template match="/"><out><xsl:value-of select="f:g(), f:h('x')"/></out></xsl:template>"#,
-                ),
-                "urn:first",
-            )
-            .unwrap();
-        let second = Compiler::new(&names, &functions)
-            .compile_str(
-                &sheet(
-                    r#"<xsl:function name="f:k"><xsl:sequence select="'B:k0'"/></xsl:function>
-                       <xsl:function name="f:g"><xsl:param name="x"/><xsl:sequence select="concat('B:g1:', $x)"/></xsl:function>
-                       <xsl:template match="/"><out><xsl:value-of select="f:k(), f:g('y')"/></out></xsl:template>"#,
-                ),
-                "urn:second",
-            )
-            .unwrap();
-        // Neither of them leaks into a third compilation.
-        let third = Compiler::new(&names, &functions).compile_str(
-            &sheet(r#"<xsl:template match="/"><out><xsl:value-of select="f:g()"/></out></xsl:template>"#),
-            "urn:third",
-        );
-        assert_eq!(third.err().map(|e| e.code), Some("XPST0017".to_string()));
-        let run_one = |compiled: &xslt2::CompiledStylesheet<'_>| {
-            let arena = Bump::new();
-            let outcome = compiled
-                .transformation(&arena, TransformOptions::default())
-                .transform_source("urn:in", "<doc/>")
-                .unwrap();
-            compiled
-                .serialize_primary(&outcome)
-                .map(common::body)
-                .unwrap()
-        };
-        assert_eq!(run_one(&first), "<out>A:g0 A:h1:x</out>");
-        assert_eq!(run_one(&second), "<out>B:k0 B:g1:y</out>");
-        assert_eq!(run_one(&first), "<out>A:g0 A:h1:x</out>");
-        assert_eq!(first.stylesheet_functions().len(), 2);
-        assert!(first.has_stylesheet_function(&QName::new("urn:f", "g"), Some(0)));
-        assert!(first.has_stylesheet_function(&QName::new("urn:f", "g"), None));
-        assert!(!first.has_stylesheet_function(&QName::new("urn:f", "g"), Some(1)));
-        assert!(second.has_stylesheet_function(&QName::new("urn:f", "g"), Some(1)));
-        assert!(!second.has_stylesheet_function(&QName::new("urn:f", "g"), Some(0)));
-    });
 }
 
 // ── Static errors ───────────────────────────────────────────────────────────
@@ -1245,58 +1189,6 @@ fn the_stack_limit_is_configurable_and_conservative_on_other_threads() {
         explicit_limit.message.contains("more than the 262144"),
         "{explicit_limit}"
     );
-}
-
-/// Q33, review note: a direct call of the public `Transformation::matches`
-/// evaluates a pattern's predicates — and the stylesheet functions they call —
-/// outside a run, so the stack guard must be on there too. On an ordinary
-/// 2 MiB thread, `r[f:g(1000)]` used to recurse past the end of the stack and
-/// abort the process; it now ends in the depth error, as the same stylesheet
-/// does through `transform_document`.
-#[test]
-fn a_direct_pattern_match_is_under_the_stack_guard() {
-    let main = sheet(
-        r#"<xsl:function name="f:g" as="xs:boolean">
-             <xsl:param name="n" as="xs:integer"/>
-             <xsl:sequence select="if ($n = 0) then true() else f:g($n - 1)"/>
-           </xsl:function>
-           <xsl:template match="r[f:g(1000)]">deep</xsl:template>"#,
-    );
-    let result = std::thread::Builder::new()
-        .stack_size(2 * 1024 * 1024)
-        .spawn(move || -> Result<bool, XsltError> {
-            let functions = XsltFunctions::new();
-            let names = NameTable::new();
-            let compiled = Compiler::new(&names, &functions).compile_str(&main, "urn:t")?;
-            let pattern = compiled
-                .templates()
-                .iter()
-                .find_map(|rule| rule.pattern)
-                .map(|id| compiled.pattern(id))
-                .expect("the r[f:g(1000)] rule");
-            let arena = Bump::new();
-            let run = compiled.transformation(&arena, TransformOptions::default());
-            let doc = run.load_document("urn:in", "<r/>")?;
-            let mut node = run
-                .store()
-                .borrow()
-                .get(doc)
-                .expect("loaded")
-                .doc
-                .create_navigator();
-            assert!(node.move_to_first_child(), "the r element");
-            // A second call, after the first has left its scope, is guarded
-            // just the same.
-            let first = run.matches(pattern, &node);
-            assert!(first.is_err(), "{first:?}");
-            run.matches(pattern, &node)
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-    let error = result.unwrap_err();
-    assert_eq!(error.code, "XSLT2-INTERNAL", "{error}");
-    assert!(error.message.contains("recursing without end"), "{error}");
 }
 
 /// Review note: §3.2 — "\[ERR XTSE0080\] It is a static error to use a reserved

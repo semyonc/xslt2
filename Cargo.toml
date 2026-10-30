@@ -11,11 +11,13 @@ documentation = "https://docs.rs/xslt2"
 readme = "README.md"
 keywords = ["xslt", "xml", "xpath", "transformation", "schema-aware"]
 categories = ["parser-implementations", "text-processing"]
-# The published package holds the library and its documentation only. The
-# tests stay in the repository: the conformance harness needs the external
-# W3C XSLT test suite, and the integration tests are development checks.
+# The published package holds the library, its documentation and the
+# examples. The tests stay in the repository: the conformance harness needs
+# the external W3C XSLT test suite, and the integration tests are development
+# checks.
 include = [
     "src/**",
+    "examples/**",
     "Cargo.toml",
     "README.md",
     "LICENSE-*",

@@ -3,7 +3,7 @@
 //!
 //! A module is parsed into a [`BufferDocument`] in the compiler's arena and
 //! walked with a navigator, which is what gives error locations, simplified
-//! stylesheets and `xsl:include` for free (design sketch §7.1). The arena is
+//! stylesheets and `xsl:include` for free. The arena is
 //! local to one compilation: the module trees are discarded once the
 //! [`CompiledStylesheet`](crate::CompiledStylesheet) exists.
 
@@ -160,7 +160,7 @@ impl StaticContext {
     }
 }
 
-/// Interns [`StaticContext`]s so that identical ones share an id (§7.2).
+/// Interns [`StaticContext`]s so that identical ones share an id.
 #[derive(Default)]
 pub struct StaticContexts {
     contexts: Vec<StaticContext>,
@@ -189,16 +189,6 @@ impl StaticContexts {
     pub fn len(&self) -> usize {
         self.contexts.len()
     }
-
-    /// Whether nothing has been interned.
-    pub fn is_empty(&self) -> bool {
-        self.contexts.is_empty()
-    }
-
-    /// Every interned context, in id order.
-    pub fn all(&self) -> &[StaticContext] {
-        &self.contexts
-    }
 }
 
 // ── Modules ──────────────────────────────────────────────────────────────
@@ -216,7 +206,7 @@ pub struct Module<'t> {
     line_starts: Vec<usize>,
     /// The module's text, as parsed: the source spans of `doc` are byte ranges
     /// of it. An inline schema of `xsl:import-schema` is cut out of it
-    /// (`crate::schema`, M4 plan D-9).
+    /// (`crate::schema`).
     pub(crate) text: String,
     /// The element node references §3.12 effectively excludes from this module.
     ///
@@ -356,8 +346,8 @@ pub enum DeclKind {
 /// the includer's).
 pub struct Unit<'t> {
     pub precedence: u32,
-    /// Lowest precedence among the modules this one imports, transitively
-    /// (§7.2). The imported subtree is `[subtree_min, precedence)`.
+    /// Lowest precedence among the modules this one imports, transitively.
+    /// The imported subtree is `[subtree_min, precedence)`.
     pub subtree_min: u32,
     /// Top-level declarations, in declaration order, each with its module.
     pub decls: Vec<(ModuleId, Nav<'t>, DeclKind)>,
@@ -370,6 +360,10 @@ pub struct ModuleSet<'t> {
     /// The principal module: the one the compilation started from.
     pub principal: ModuleId,
     /// Whether the principal module is a simplified stylesheet (§3.7).
+    #[allow(
+        dead_code,
+        reason = "kept with the module graph: whether the principal module is simplified"
+    )]
     pub simplified: bool,
     /// §4.3: "Stripping of type annotations takes place if at least one stylesheet module in the
     /// stylesheet specifies input-type-annotations="strip"".
@@ -1158,9 +1152,9 @@ pub fn base_uri_of(nav: &Nav<'_>, module_uri: &str) -> String {
 /// reports, and the element's `xml:base`, already in a base URI recorded for it (`xsl:copy`), is not
 /// applied twice.
 ///
-/// Not `DomNavigator::base_uri`, which is **unresolved** (upstream's written contract, `wave-b`
-/// batch (x), C7): `BufferDocNavigator` answers it with the raw value of the nearest `xml:base`, or
-/// the document's base URI when there is none — "the consumer resolves" (M4 review R1).
+/// Not `DomNavigator::base_uri`, which is **unresolved** (upstream's written contract):
+/// `BufferDocNavigator` answers it with the raw value of the nearest `xml:base`, or the
+/// document's base URI when there is none — "the consumer resolves".
 pub(crate) fn node_base_uri(nav: &Nav<'_>, fallback: &str) -> String {
     let mut top = nav.clone();
     while top.move_to_parent() {}

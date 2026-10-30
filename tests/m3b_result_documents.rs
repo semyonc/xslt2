@@ -478,7 +478,7 @@ fn a_secondary_result_encodes_in_its_own_encoding() {
         b"<a>\xE9&#8364;</a>"
     );
     let params = compiled.secondary_serialization_params(tree).unwrap();
-    assert_eq!(params.method, xslt2::serialize::ResolvedMethod::Xml);
+    assert_eq!(params.method, xslt2::output::ResolvedMethod::Xml);
 }
 
 // ═══ XTDE1460 ═════════════════════════════════════════════════════════════

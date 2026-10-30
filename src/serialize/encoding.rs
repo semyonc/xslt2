@@ -1,5 +1,5 @@
-//! The output encodings this serializer supports (lead decision Q28): UTF-8,
-//! UTF-16, US-ASCII and ISO-8859-1, implemented natively.
+//! The output encodings this serializer supports: UTF-8, UTF-16, US-ASCII and
+//! ISO-8859-1, implemented natively (no encoding library).
 //!
 //! Serialization §5.1.2: "Serializers are REQUIRED to support values of UTF-8
 //! and UTF-16. A serialization error \[err:SESU0007\] occurs if an output
@@ -21,28 +21,33 @@ use crate::error::XsltError;
 /// One supported output encoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
+    /// UTF-8.
     Utf8,
     /// UTF-16 with its byte order given by the byte order mark (big-endian
     /// when there is none).
     Utf16,
-    /// UTF-16BE and UTF-16LE: the byte order is part of the name, and Unicode
-    /// gives these two no byte order mark.
+    /// UTF-16BE: the byte order is part of the name, and Unicode gives it no
+    /// byte order mark.
     Utf16Be,
+    /// UTF-16LE: the byte order is part of the name, and Unicode gives it no
+    /// byte order mark.
     Utf16Le,
+    /// US-ASCII.
     UsAscii,
+    /// ISO-8859-1.
     Latin1,
 }
 
 /// Serialization's "requested output encoding is not supported" (§5.1.2,
 /// §7.4.2, §8.1.2).
-pub const SESU0007: &str = "SESU0007";
+pub(crate) const SESU0007: &str = "SESU0007";
 
 impl Encoding {
     /// The encoding an `encoding` parameter names, compared case-insensitively
     /// (IANA charset names are case-insensitive), or SESU0007.
     ///
     /// Besides the canonical names, the IANA aliases of the four are accepted.
-    pub fn from_name(name: &str) -> Result<Self, XsltError> {
+    pub(crate) fn from_name(name: &str) -> Result<Self, XsltError> {
         let lower = crate::whitespace::trim(name).to_ascii_lowercase();
         Ok(match lower.as_str() {
             "utf-8" | "utf8" => Encoding::Utf8,
@@ -68,7 +73,7 @@ impl Encoding {
     }
 
     /// Whether `c` can be written in this encoding as it stands.
-    pub fn can_represent(self, c: char) -> bool {
+    pub(crate) fn can_represent(self, c: char) -> bool {
         match self {
             Encoding::UsAscii => (c as u32) < 0x80,
             Encoding::Latin1 => (c as u32) < 0x100,
@@ -80,14 +85,14 @@ impl Encoding {
     /// parameter can ask for (Serialization §3: "If the encoding defines no
     /// Byte Order Mark, or if the Byte Order Mark is prohibited for the specific
     /// Unicode encoding … then this parameter is ignored").
-    pub fn has_byte_order_mark(self) -> bool {
+    pub(crate) fn has_byte_order_mark(self) -> bool {
         matches!(self, Encoding::Utf8 | Encoding::Utf16)
     }
 
     /// The `byte-order-mark` default of §20: "If the encoding is UTF-16, the
     /// default is yes; for UTF-8 it is implementation-defined, and for all
     /// other encodings it is no." This processor's UTF-8 default is no.
-    pub fn default_byte_order_mark(self) -> bool {
+    pub(crate) fn default_byte_order_mark(self) -> bool {
         self == Encoding::Utf16
     }
 
@@ -95,7 +100,7 @@ impl Encoding {
     /// as octets. Every character of `text` must be representable — the
     /// serializer has already turned the others into references or errors — so
     /// a character outside the encoding is an internal error.
-    pub fn encode(self, text: &str) -> Result<Vec<u8>, XsltError> {
+    pub(crate) fn encode(self, text: &str) -> Result<Vec<u8>, XsltError> {
         let narrow = |limit: u32| -> Result<Vec<u8>, XsltError> {
             text.chars()
                 .map(|c| {

@@ -52,7 +52,7 @@ pub struct SecondaryResult<'t> {
     /// The characters of the tree's text nodes written with
     /// `disable-output-escaping="yes"` (§20.2): the instruction's content is
     /// evaluated in final output state, so each tree has marks of its own.
-    pub disabled_escaping: EscapingMarks,
+    pub(crate) disabled_escaping: EscapingMarks,
     /// The effective output definition: the one `format` selects (the unnamed
     /// one when it is absent), overridden and supplemented by the serialization
     /// attributes written on the instruction (§19.1).
@@ -62,9 +62,7 @@ pub struct SecondaryResult<'t> {
     /// [`character_map`](OutputDefinition::character_map), after the selected
     /// definition's maps ("the character maps referenced in this instruction
     /// supplement and take precedence over those defined in the selected output
-    /// definition"), and as names in
-    /// [`use_character_maps`](OutputDefinition::use_character_maps) under the
-    /// key `(u32::MAX, 0)`, above every declaration, so that
+    /// definition"), and as names, after every declaration's, so that
     /// [`character_map_names`](OutputDefinition::character_map_names) lists
     /// them last — the order the map was built in, a later mapping winning.
     pub output: OutputDefinition,

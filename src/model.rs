@@ -1,11 +1,11 @@
-//! The compiled stylesheet: instruction tree (§7.4), declaration tables (§7.3)
-//! and the expression store every one of them points into.
+//! The compiled stylesheet: the instruction tree, the declaration tables and
+//! the expression store every one of them points into.
 //!
 //! Nothing here borrows the module trees the compiler walked: a
 //! [`CompiledStylesheet`] owns its instructions, its [`XPathExpr`]s and its
-//! patterns, and borrows only the caller's [`NameTable`] and function set
-//! (§6.6, M0b Q35). That is what lets the compiler drop its arena as soon as
-//! compilation finishes.
+//! patterns, and borrows only the caller's [`NameTable`] and function set.
+//! That is what lets the compiler drop its arena as soon as compilation
+//! finishes.
 
 use std::collections::HashMap;
 
@@ -30,12 +30,10 @@ use crate::stylesheet::{CompatMode, ModuleId, StaticContextId, StaticContexts};
 ///
 /// The static rules (XTSE1505, XTSE1520, XTSE1530, XTSE0020; XTSE1660 for a
 /// basic processor) are the checker's (`compile/checks.rs`). Every value is
-/// evaluated on every node constructor since M4f (`runtime/validate.rs`); a
-/// `type` naming one of the XPath 2.0 types §3.13 puts in scope
-/// (`xs:untypedAtomic`, `xs:anyAtomicType`, `xs:dayTimeDuration`,
-/// `xs:yearMonthDuration`) in either XML Schema version — upstream's
-/// `SchemaSet::xpath_type` (C72 / C92; M4g's workaround, `receiver::XPathType`,
-/// went in the Wave B follow-up).
+/// evaluated on every node constructor (`runtime/validate.rs`); a `type`
+/// naming one of the XPath 2.0 types §3.13 puts in scope (`xs:untypedAtomic`,
+/// `xs:anyAtomicType`, `xs:dayTimeDuration`, `xs:yearMonthDuration`) is found,
+/// in either XML Schema version, by `xsd-schema`'s `SchemaSet::xpath_type`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Validation {
     /// The new node and the nodes it contains are untyped (§19.2.1.1).
@@ -51,24 +49,6 @@ pub enum Validation {
     /// QName expanded with the `[xsl:]xpath-default-namespace` for an unprefixed
     /// one.
     Type(QName),
-}
-
-impl Validation {
-    /// Whether this is `strip`.
-    pub fn is_strip(&self) -> bool {
-        matches!(self, Self::Strip)
-    }
-
-    /// The `validation` value as written, or `type=…`.
-    pub fn describe(&self) -> String {
-        match self {
-            Self::Strip => "validation=\"strip\"".to_string(),
-            Self::Preserve => "validation=\"preserve\"".to_string(),
-            Self::Strict => "validation=\"strict\"".to_string(),
-            Self::Lax => "validation=\"lax\"".to_string(),
-            Self::Type(name) => format!("type=\"{name}\""),
-        }
-    }
 }
 
 /// Index into the expression table of a [`CompiledStylesheet`] (`exprs`).
@@ -101,21 +81,7 @@ pub struct RuleId {
     pub alternative: u32,
 }
 
-impl RuleId {
-    /// The rule made of a declaration's first (often only) alternative.
-    pub fn first(template: TemplateId) -> Self {
-        Self {
-            template,
-            alternative: 0,
-        }
-    }
-}
-
-/// Index into the attribute-set table of a [`CompiledStylesheet`] (`attribute_sets`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct AttrSetId(pub u32);
-
-/// Where a variable reference resolves to (§7.5).
+/// Where a variable reference resolves to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VarLocation {
     /// A global `xsl:variable`/`xsl:param`, by index into
@@ -129,7 +95,7 @@ pub enum VarLocation {
 ///
 /// `vars[i]` is where external slot `i` comes from, so the evaluator can bind
 /// only the slots the expression actually references
-/// (`XPathExpr::references_external_var`, §7.5).
+/// (`XPathExpr::references_external_var`).
 pub struct CompiledExpr {
     pub expr: XPathExpr,
     pub ctx: StaticContextId,
@@ -196,12 +162,6 @@ impl Avt {
 /// A sequence constructor (§5.7).
 #[derive(Default)]
 pub struct Body(pub Vec<Instruction>);
-
-impl Body {
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
 
 /// `select` or contained sequence constructor — the two ways an instruction
 /// says what its value is.
@@ -367,27 +327,16 @@ pub enum Grouping {
 ///
 /// A compiled regular expression is opaque: it tells the effective `regex`
 /// and `flags` it was compiled from, and nothing of the engine behind it
-/// (`regexml`, which is not part of this crate's API).
+/// (`regexml`, which is not part of this crate's API). The unit test
+/// `model::tests::a_fixed_regex_source_tells_its_effective_regex_and_flags`
+/// reads them.
 ///
-/// ```
-/// use xslt2::model::RegexSource;
-///
-/// fn effective(regex: &RegexSource) -> Option<(&str, &str)> {
-///     match regex {
-///         RegexSource::Fixed(compiled) => Some((compiled.pattern(), compiled.flags())),
-///         RegexSource::Computed { .. } => None,
-///     }
-/// }
-/// ```
+/// Neither this type nor the engine is reachable from outside the crate:
 ///
 /// ```compile_fail
+/// // The instruction tree, and the regular-expression engine behind it, are
+/// // not part of the public API.
 /// use xslt2::model::RegexSource;
-///
-/// fn engine(regex: &RegexSource) {
-///     if let RegexSource::Fixed(compiled) = regex {
-///         let _ = compiled.regex(); // crate-private
-///     }
-/// }
 /// ```
 pub enum RegexSource {
     /// Neither `regex` nor `flags` contains an expression: the regular
@@ -431,6 +380,10 @@ pub struct TypeCheck {
     /// The expected item type is an atomic type: the value is atomized first.
     pub atomic: bool,
     /// The item type, without its occurrence indicator, as written.
+    #[allow(
+        dead_code,
+        reason = "kept with the compiled check: the type as written"
+    )]
     pub item_type: String,
     /// The built-in atomic type the item type names, resolved in the static
     /// context of the `as` attribute — so `xsd:string`, and `double` under an
@@ -501,11 +454,10 @@ impl Instruction {
     }
 }
 
-/// The instruction set §7.4 lists, restricted to what M1 evaluates.
+/// The XSLT instructions.
 ///
-/// Constructs M1 compiles but does not run raise the internal
-/// `XSLT2-NOTIMPL` code at the point they are reached, never a panic; the ones
-/// M1 does not even compile are rejected by the compiler with the same code.
+/// A construct the processor recognizes but does not implement raises
+/// `XSLT2-NOTIMPL` where it is reached, never a panic.
 pub enum InstructionKind {
     ApplyTemplates {
         select: Option<ExprId>,
@@ -636,6 +588,10 @@ pub enum InstructionKind {
         slot: usize,
         value: VarValue,
         as_type: Option<TypeCheck>,
+        #[allow(
+            dead_code,
+            reason = "kept with the compiled instruction: the variable's name"
+        )]
         name: QName,
     },
     /// §17: "The content of the message may be specified by using either or
@@ -764,7 +720,7 @@ pub struct NumberInstruction {
     pub grouping_separator: Option<Avt>,
     pub grouping_size: Option<Avt>,
     /// Backwards-compatible behaviour is enabled for the instruction (§12.1,
-    /// DESIGN §9.10 row 7): only the first item of `value`, an empty `value`
+    /// §3.8): only the first item of `value`, an empty `value`
     /// is `NaN`, and a value that cannot be converted to an integer is
     /// formatted as `NaN` instead of raising XTDE0980.
     pub backwards_compatible: bool,
@@ -811,6 +767,10 @@ pub(crate) enum NumberFormatSource {
 /// One template rule or named template (§6, §10.1).
 pub struct TemplateRule {
     pub id: TemplateId,
+    #[allow(
+        dead_code,
+        reason = "kept with the compiled declaration: where and what it is"
+    )]
     pub name: Option<QName>,
     pub pattern: Option<PatternId>,
     /// The modes this rule belongs to; empty for a named template with no
@@ -826,14 +786,22 @@ pub struct TemplateRule {
     pub precedence: u32,
     /// The lowest import precedence among the modules this rule's module
     /// imports, transitively: `xsl:apply-imports` considers exactly the rules
-    /// whose precedence lies in `[subtree_min, precedence)` (§6.7, §7.2).
+    /// whose precedence lies in `[subtree_min, precedence)` (§6.7).
     pub subtree_min: u32,
     pub decl_order: u32,
     pub params: Vec<ParamDecl>,
     pub body: Body,
     pub as_type: Option<TypeCheck>,
     pub frame_size: usize,
+    #[allow(
+        dead_code,
+        reason = "kept with the compiled declaration: where and what it is"
+    )]
     pub module: ModuleId,
+    #[allow(
+        dead_code,
+        reason = "kept with the compiled declaration: where and what it is"
+    )]
     pub loc: Location,
 }
 
@@ -855,8 +823,20 @@ pub struct StylesheetFunction {
     pub body: Body,
     pub frame_size: usize,
     /// `override` (§10.3; default `yes`).
+    #[allow(
+        dead_code,
+        reason = "kept with the compiled declaration: its attributes as resolved"
+    )]
     pub override_vendor: bool,
+    #[allow(
+        dead_code,
+        reason = "kept with the compiled declaration: its attributes as resolved"
+    )]
     pub precedence: u32,
+    #[allow(
+        dead_code,
+        reason = "kept with the compiled declaration: its attributes as resolved"
+    )]
     pub module: ModuleId,
     pub loc: Location,
 }
@@ -900,8 +880,7 @@ pub struct Key {
     pub collation: String,
     /// §16.3.2: "A key … is processed in backwards compatible mode if any of
     /// the `xsl:key` elements in the definition of the key enables backwards
-    /// compatible behavior" — then every value is compared as a string
-    /// (DESIGN §9.10 row 10).
+    /// compatible behavior" — then every value is compared as a string.
     pub compat: bool,
     /// Whether the key specifier of some declaration may observe the current
     /// group or the current grouping key (§14.1, §14.2) of the `key()` call it
@@ -974,6 +953,10 @@ pub struct GlobalVar {
     pub required: bool,
     pub value: VarValue,
     pub as_type: Option<TypeCheck>,
+    #[allow(
+        dead_code,
+        reason = "kept with the compiled declaration: its import precedence"
+    )]
     pub precedence: u32,
     pub frame_size: usize,
     pub loc: Location,
@@ -995,6 +978,7 @@ pub struct GlobalVar {
 /// > or more xsl:attribute instructions, these instructions are evaluated …
 /// > These attribute nodes are appended to the result sequence.
 pub struct AttributeSet {
+    #[allow(dead_code, reason = "kept with the compiled declaration: its name")]
     pub name: QName,
     /// In the order §10.2 processes them: ascending import precedence, then
     /// declaration order.
@@ -1115,7 +1099,7 @@ pub(crate) struct DecimalFormats {
 pub struct CompiledStylesheet<'a> {
     pub(crate) names: &'a NameTable,
     pub(crate) functions: &'a XsltFunctions,
-    /// One [`XPathContext`] per interned [`StaticContextId`] (§7.2).
+    /// One [`XPathContext`] per interned [`StaticContextId`].
     pub(crate) contexts: Vec<XPathContext<'a>>,
     /// What a typed node test of a pattern (§5.5.3: `element(*, T)`,
     /// `schema-element(N)`, …) is matched in: the name table its names are
@@ -1129,7 +1113,6 @@ pub struct CompiledStylesheet<'a> {
     pub(crate) templates: Vec<TemplateRule>,
     pub(crate) named: HashMap<QName, TemplateId>,
     pub(crate) globals: Vec<GlobalVar>,
-    pub(crate) global_index: HashMap<QName, usize>,
     pub(crate) modes: ModeTable,
     pub(crate) attribute_sets: HashMap<QName, AttributeSet>,
     /// The keys (§16.3.1), indexed by [`KeyId`].
@@ -1157,7 +1140,7 @@ pub struct CompiledStylesheet<'a> {
     /// Compatibility mode of the principal module, for the §3.6 warning.
     pub(crate) principal_compat: CompatMode,
     /// In schema-aware mode (§21.2), the schema set of the caller's
-    /// `SchemaContext` (M4 plan D-1); `None` for a basic processor.
+    /// `SchemaContext`; `None` for a basic processor.
     pub(crate) schema: Option<&'a xsd_schema::SchemaSet>,
     /// The validation of the implicit final result tree: the principal
     /// module's `default-validation` (§3.6: "It also determines the
@@ -1165,7 +1148,7 @@ pub struct CompiledStylesheet<'a> {
     /// absence of an xsl:result-document instruction").
     pub(crate) final_validation: Validation,
     /// Some node constructor names `strict`, `lax` or a `type` (§19.2), so a run makes its
-    /// validator for the trees it builds; otherwise none is made (M4 plan D-12).
+    /// validator for the trees it builds; otherwise none is made.
     pub(crate) validates: bool,
     /// §4.3: some module says `input-type-annotations="strip"`, so the annotations of every source
     /// tree are stripped.
@@ -1173,7 +1156,8 @@ pub struct CompiledStylesheet<'a> {
 }
 
 impl<'a> CompiledStylesheet<'a> {
-    /// The name table every document of every run shares (§6.6).
+    /// The name table the stylesheet was compiled with, which every document
+    /// of every run of it shares.
     pub fn names(&self) -> &'a NameTable {
         self.names
     }
@@ -1203,7 +1187,7 @@ impl<'a> CompiledStylesheet<'a> {
     /// Whether the type annotations of source trees are stripped (§4.3: "Stripping of type
     /// annotations takes place if at least one stylesheet module in the stylesheet specifies
     /// input-type-annotations="strip"").
-    pub fn strips_input_annotations(&self) -> bool {
+    pub(crate) fn strips_input_annotations(&self) -> bool {
         self.strip_input_annotations
     }
 
@@ -1234,24 +1218,24 @@ impl<'a> CompiledStylesheet<'a> {
 
     /// The static context an expression, pattern or instruction was compiled
     /// in.
-    pub fn context(&self, id: StaticContextId) -> &XPathContext<'a> {
+    pub(crate) fn context(&self, id: StaticContextId) -> &XPathContext<'a> {
         &self.contexts[id.0 as usize]
     }
 
-    pub fn expr(&self, id: ExprId) -> &CompiledExpr {
+    pub(crate) fn expr(&self, id: ExprId) -> &CompiledExpr {
         &self.exprs[id.0 as usize]
     }
 
-    pub fn pattern(&self, id: PatternId) -> &Pattern {
+    pub(crate) fn pattern(&self, id: PatternId) -> &Pattern {
         &self.patterns[id.0 as usize]
     }
 
-    pub fn template(&self, id: TemplateId) -> &TemplateRule {
+    pub(crate) fn template(&self, id: TemplateId) -> &TemplateRule {
         &self.templates[id.0 as usize]
     }
 
     /// The declaration a rule belongs to.
-    pub fn rule(&self, id: RuleId) -> &TemplateRule {
+    pub(crate) fn rule(&self, id: RuleId) -> &TemplateRule {
         self.template(id.template)
     }
 
@@ -1260,7 +1244,7 @@ impl<'a> CompiledStylesheet<'a> {
     /// The `priority` attribute, if written, is the priority of every
     /// alternative; otherwise each alternative takes the default priority its
     /// own syntax gives it.
-    pub fn rule_priority(&self, id: RuleId) -> f64 {
+    pub(crate) fn rule_priority(&self, id: RuleId) -> f64 {
         let rule = self.template(id.template);
         if let Some(priority) = rule.explicit_priority {
             return priority;
@@ -1274,41 +1258,33 @@ impl<'a> CompiledStylesheet<'a> {
     }
 
     /// The key §6.4 sorts candidate rules by, all parts descending.
-    pub fn rule_rank(&self, id: RuleId) -> (u32, f64, u32) {
+    pub(crate) fn rule_rank(&self, id: RuleId) -> (u32, f64, u32) {
         let rule = self.template(id.template);
         (rule.precedence, self.rule_priority(id), rule.decl_order)
     }
 
-    pub fn templates(&self) -> &[TemplateRule] {
+    #[cfg(test)]
+    pub(crate) fn templates(&self) -> &[TemplateRule] {
         &self.templates
     }
 
-    pub fn named_template(&self, name: &QName) -> Option<TemplateId> {
+    pub(crate) fn named_template(&self, name: &QName) -> Option<TemplateId> {
         self.named.get(name).copied()
     }
 
-    pub fn globals(&self) -> &[GlobalVar] {
+    pub(crate) fn globals(&self) -> &[GlobalVar] {
         &self.globals
     }
 
-    pub fn global_index(&self, name: &QName) -> Option<usize> {
-        self.global_index.get(name).copied()
-    }
-
-    pub fn modes(&self) -> &ModeTable {
+    pub(crate) fn modes(&self) -> &ModeTable {
         &self.modes
     }
 
-    pub fn attribute_set(&self, name: &QName) -> Option<&AttributeSet> {
+    pub(crate) fn attribute_set(&self, name: &QName) -> Option<&AttributeSet> {
         self.attribute_sets.get(name)
     }
 
-    /// Every key the stylesheet declares (§16.3.1).
-    pub fn keys(&self) -> &[Key] {
-        &self.keys
-    }
-
-    pub fn key(&self, id: KeyId) -> &Key {
+    pub(crate) fn key(&self, id: KeyId) -> &Key {
         &self.keys[id.0 as usize]
     }
 
@@ -1325,18 +1301,19 @@ impl<'a> CompiledStylesheet<'a> {
     }
 
     /// The key whose declarations carry the expanded name `name`.
-    pub fn key_named(&self, name: &QName) -> Option<KeyId> {
+    pub(crate) fn key_named(&self, name: &QName) -> Option<KeyId> {
         self.key_index.get(name).copied()
     }
 
-    pub fn space_rules(&self) -> &[SpaceRule] {
+    pub(crate) fn space_rules(&self) -> &[SpaceRule] {
         &self.space_rules
     }
 
     /// Whether `uri` (an absolute URI; a fragment identifier is ignored) names the resource of one of
     /// this stylesheet's modules — what `document('')` reads (§16.1). The run's default source
-    /// validation does not apply to such a document (M4b decision D-V).
-    pub fn is_module_uri(&self, uri: &str) -> bool {
+    /// validation does not apply to such a document: a stylesheet module is not a source the
+    /// host asked to validate.
+    pub(crate) fn is_module_uri(&self, uri: &str) -> bool {
         let resource = |u: &str| {
             crate::resolver::resource_identity(
                 u.split_once('#').map_or(u, |(document, _)| document),
@@ -1348,31 +1325,32 @@ impl<'a> CompiledStylesheet<'a> {
             .any(|module| resource(module) == wanted)
     }
 
-    pub fn module_uri(&self, module: ModuleId) -> Option<&str> {
+    pub(crate) fn module_uri(&self, module: ModuleId) -> Option<&str> {
         self.module_uris.get(module.0 as usize).map(String::as_str)
     }
 
     /// Whether any mode of the stylesheet is named `mode`.
-    pub fn has_mode(&self, mode: &ModeKey) -> bool {
+    pub(crate) fn has_mode(&self, mode: &ModeKey) -> bool {
         self.modes.modes.contains_key(mode)
     }
 
     /// The stylesheet function an XPath function call was bound to, if the
     /// handle is one (§10.3).
-    pub fn stylesheet_function_of(
+    pub(crate) fn stylesheet_function_of(
         &self,
         handle: xsd_schema::xpath::functions::FunctionHandle,
     ) -> Option<StylesheetFunctionId> {
         self.function_handles.get(&handle).copied()
     }
 
-    pub fn stylesheet_function(&self, id: StylesheetFunctionId) -> &StylesheetFunction {
+    pub(crate) fn stylesheet_function(&self, id: StylesheetFunctionId) -> &StylesheetFunction {
         &self.functions_table[id.0 as usize]
     }
 
     /// Every stylesheet function in the static context of the stylesheet's
     /// expressions (§10.3).
-    pub fn stylesheet_functions(&self) -> &[StylesheetFunction] {
+    #[cfg(test)]
+    pub(crate) fn stylesheet_functions(&self) -> &[StylesheetFunction] {
         &self.functions_table
     }
 
@@ -1382,14 +1360,14 @@ impl<'a> CompiledStylesheet<'a> {
     /// then a call on `function-available` will return true when called with an
     /// argument that is a lexical QName that expands to this same
     /// expanded-QName").
-    pub fn has_stylesheet_function(&self, name: &QName, arity: Option<usize>) -> bool {
+    pub(crate) fn has_stylesheet_function(&self, name: &QName, arity: Option<usize>) -> bool {
         self.functions_table
             .iter()
             .any(|f| f.name == *name && arity.is_none_or(|a| a == f.arity()))
     }
 
     /// Whether a `[xsl:]version` less than 2.0 is in force at `ctx`.
-    pub fn is_backwards(&self, ctx: StaticContextId) -> bool {
+    pub(crate) fn is_backwards(&self, ctx: StaticContextId) -> bool {
         self.static_contexts.get(ctx).compat.is_backwards()
     }
 }
@@ -1409,7 +1387,8 @@ impl CompiledStylesheet<'_> {
 
     /// Serializes a run's primary result (§20), as characters: the encoding
     /// decides what is escaped and what the XML declaration says, and a byte
-    /// order mark is a leading U+FEFF (see [`crate::serialize`]).
+    /// order mark is a leading U+FEFF;
+    /// [`serialize_primary_to_bytes`](Self::serialize_primary_to_bytes) encodes.
     ///
     /// The tree created implicitly is serialized with the unnamed output
     /// definition (§20: "It is also used when serializing the final result
@@ -1537,7 +1516,10 @@ impl CompiledStylesheet<'_> {
     /// A character map by name, expanded (§20.1) — what an
     /// `xsl:result-document/@use-character-maps` would add to its output
     /// definition's map.
-    pub fn character_map(&self, name: &QName) -> Option<&crate::serialize::CharacterMap> {
+    pub(crate) fn character_map(&self, name: &QName) -> Option<&crate::serialize::CharacterMap> {
         self.character_maps.get(name)
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -12,8 +12,8 @@
 //! [`FunctionSet`] stores with it is never called, because a `CustomFn` is
 //! `Send + Sync + 'static` and cannot hold the borrowed engine state these
 //! functions need. The real implementations live in
-//! [`XsltEvaluator`](crate::runtime::XsltEvaluator), a `FunctionEvaluator`
-//! that holds the running transformation (M0b, Q8).
+//! `runtime::XsltEvaluator`, a `FunctionEvaluator` that holds the running
+//! transformation.
 
 use std::collections::{HashMap, HashSet};
 
@@ -162,12 +162,10 @@ pub struct XsltFunctions {
     names: HashMap<(&'static str, usize), XsltFn>,
     /// The handles that are in the catalog, so that a call compiles and
     /// reaches the evaluator, but are **not** available (§18.1.2): §3.8's
-    /// fallback error function. (Until M3d implemented them, the §16.4 and
-    /// §16.5 functions were registered here too, so that a call to one was a
-    /// missing feature rather than XPST0017.)
+    /// fallback error function.
     stubs: HashSet<FunctionHandle>,
     /// The collations every expression of a stylesheet compiled against this
-    /// set can name (§13.1.3, DESIGN §9.5). It lives here because this is the
+    /// set can name (§13.1.3). It lives here because this is the
     /// caller-owned object every `XPathContext` already borrows.
     collations: CollationRegistry,
 }
@@ -190,7 +188,10 @@ impl XsltFunctions {
     /// are built in. A host collation may replace the second, never the first:
     /// registering
     /// [`CODEPOINT_COLLATION_URI`](crate::collation::CODEPOINT_COLLATION_URI)
-    /// is refused and returns `false` (see [`CollationRegistry::register`]).
+    /// is refused and returns `false`, since the XPath engine implements that
+    /// collation itself and never asks a resolver for it. Every other
+    /// registration returns `true`; a later registration of the same URI
+    /// replaces an earlier one.
     ///
     /// `compare` must be a total order — consistent, antisymmetric and
     /// transitive — because `xsl:sort` hands it to the standard library's sort,
@@ -542,7 +543,7 @@ impl XsltFunctions {
 
     /// The catalog §3.12 gives a `use-when` expression: the same one with every
     /// XSLT-specific function removed (see [`XsltFn::in_use_when_scope`]).
-    pub fn use_when_catalog(&self) -> UseWhenCatalog<'_> {
+    pub(crate) fn use_when_catalog(&self) -> UseWhenCatalog<'_> {
         UseWhenCatalog { functions: self }
     }
 
@@ -559,7 +560,7 @@ impl XsltFunctions {
     /// `scope` is the processor's: a schema-aware one has a constructor for every built-in atomic
     /// type in a `use-when` expression too (§3.12: "the type definitions that would be available in
     /// the absence of any `xsl:import-schema` declaration").
-    pub fn is_available_in_use_when(
+    pub(crate) fn is_available_in_use_when(
         &self,
         namespace: &str,
         local: &str,
@@ -582,7 +583,7 @@ impl XsltFunctions {
     }
 
     /// Which XSLT function a handle stands for, if it is one of ours.
-    pub fn resolve(&self, handle: FunctionHandle) -> Option<XsltFn> {
+    pub(crate) fn resolve(&self, handle: FunctionHandle) -> Option<XsltFn> {
         self.by_handle.get(&handle).copied()
     }
 
@@ -598,7 +599,7 @@ impl XsltFunctions {
     ///
     /// `scope` decides which constructor functions exist (XPath 2.0 §3.10.4: one "for every atomic
     /// type in the in-scope schema types").
-    pub fn is_available(
+    pub(crate) fn is_available(
         &self,
         namespace: &str,
         local: &str,
@@ -623,8 +624,8 @@ impl XsltFunctions {
     /// skips every number this set has used: a stylesheet-function handle then
     /// resolves to nothing here — [`Self::resolve`] says `None` and the
     /// catalog's `get_signature` finds no entry — and the evaluator can tell
-    /// the two kinds apart. (A public `FunctionHandle` constructor, ROADMAP
-    /// §3.5, would make the scratch set unnecessary.)
+    /// the two kinds apart. (A public `FunctionHandle` constructor in
+    /// `xsd-schema` would make the scratch set unnecessary.)
     pub(crate) fn mint_handles(&self, n: usize) -> Vec<FunctionHandle> {
         let mut scratch: FunctionSet<RoXmlNavigator<'static>> = FunctionSet::new();
         let placeholder = || {
@@ -1051,9 +1052,9 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
 ///
 /// `function-available()` with one argument asks whether the function exists at
 /// *any* arity (§18.1.2), and the catalog can only be asked one arity at a time,
-/// so the range has to cover every signature that could answer yes. Scanning to
-/// 4 — as the helper did before M2c — made `function-available('format-date')`
-/// and `function-available('concat')` answer false for the 5-argument forms.
+/// so the range has to cover every signature that could answer yes. Scanning
+/// only to 4 would make `function-available('format-date')` and
+/// `function-available('concat')` miss the 5-argument forms.
 const MAX_ARITY: usize = 20;
 
 // ── Expanding the lexical QName these four functions are given ──────────────
@@ -1098,6 +1099,10 @@ impl NameScope<'_> {
 /// > namespace is used when expanding the first argument of the function
 /// > `element-available`. …
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "each variant names the namespace it gives"
+)]
 pub enum Unprefixed {
     /// §5.1's general rule: the name is in no namespace. `system-property()`
     /// (§16.6.5, which expands "as described in 5.1 Qualified Names").
@@ -1255,8 +1260,8 @@ pub fn system_property(local: &str, schema_aware: bool) -> &'static str {
 /// per XSLT 2.0 element) except those in `NOT_YET_IMPLEMENTED_INSTRUCTIONS`.
 /// The XSLT declarations and the subordinate elements (`xsl:sort`,
 /// `xsl:matching-substring`, …) are not instructions, so they answer false.
-/// (A supported instruction may still have an option a later milestone
-/// adds — a collation, a `type` — but the instruction itself runs.)
+/// (An instruction this processor runs may still have an option it does not
+/// support, but the instruction itself runs.)
 pub fn element_available(uri: &str, local: &str) -> bool {
     uri == crate::names::XSLT_NS
         && crate::compile::checks::is_instruction(local)
@@ -1265,9 +1270,8 @@ pub fn element_available(uri: &str, local: &str) -> bool {
 
 /// The XSLT 2.0 instructions this processor recognises but does not run yet:
 /// each would compile to an `XSLT2-NOTIMPL` instruction
-/// (`compile/instructions.rs`). Empty since M3c implemented `xsl:number`
-/// (`xsl:result-document` left the list with M3b); `tests/m2h_regex.rs` pins
-/// the answer for all 26 instructions.
+/// (`compile/instructions.rs`). Empty: every instruction runs; the
+/// integration tests pin the answer for all 26 instructions.
 const NOT_YET_IMPLEMENTED_INSTRUCTIONS: &[&str] = &[];
 
 /// §18.1.1: whether one of the processor's own functions of this name is
@@ -1307,7 +1311,7 @@ pub enum TypeScope<'s> {
     /// type — what a `use-when` expression sees (§3.12).
     BuiltIn,
     /// A schema-aware stylesheet compiled against this set: the built-in types
-    /// and every type of the set (M4 plan D-7).
+    /// and every type of the set.
     Schema(&'s xsd_schema::SchemaSet),
 }
 

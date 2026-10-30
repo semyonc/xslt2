@@ -598,7 +598,7 @@ impl<'a, 't> Transformation<'a, 't> {
     /// > value attribute of xsl:number cannot be converted to an integer, or if
     /// > the resulting integer is less than 0 (zero).
     ///
-    /// With backwards-compatible behaviour (DESIGN §9.10 row 7):
+    /// With backwards-compatible behaviour (§12.1):
     ///
     /// > all items in the atomized sequence after the first are discarded; If
     /// > the atomized sequence is empty, it is replaced by a sequence containing
@@ -1385,7 +1385,7 @@ mod tests {
     /// that defeats any table of fewer names). Before the follow-up each
     /// evaluation walked back to the previous element of its own name (about
     /// `elements × names` tests: 8 million here for 2,000 names); with its
-    /// marks kept for only 16 names (the M3c version), about `elements²`.
+    /// marks kept for only 16 names (an earlier version), about `elements²`.
     #[test]
     fn numbering_many_names_in_document_order_is_linear() {
         const ELEMENTS: usize = 4_000;
@@ -1696,7 +1696,7 @@ mod tests {
             .collect()
     }
 
-    /// Fixes review F1 (M3c follow-up review): the walks are found by their
+    /// The walks are found by their
     /// owner (`Walks`) and every walk past `SHORT_WALK` nodes is kept,
     /// however many parents are interleaved. With the 32 parents kept before,
     /// 33 sections numbered in turn walked each section from its first child
@@ -1727,7 +1727,7 @@ mod tests {
         }
     }
 
-    /// Fixes review F1: the `level="any"` walks are kept for every tree — 33
+    /// The `level="any"` walks are kept for every tree — 33
     /// and 50 documents numbered in turn (the `i`-th `e` of each, then the
     /// `i + 1`-th …). With the 32 trees kept before, 33 walked each tree from
     /// its root at every evaluation (`trees × elements² / 2` tests: 165,000
@@ -1793,7 +1793,7 @@ mod tests {
         );
     }
 
-    /// Fixes review F3: a census finds the pattern of a node by its kind and
+    /// A census finds the pattern of a node by its kind and
     /// expanded name in one lookup, however many namespaces share one local
     /// name — 2,000 `x` elements over 1,000 namespaces, each twice. It used to
     /// scan every namespace met under the local name (about `elements ×

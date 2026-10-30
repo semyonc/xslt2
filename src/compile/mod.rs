@@ -46,16 +46,16 @@ use crate::stylesheet::{static_context_of, CompatMode, Loader, ModuleSet, Static
 /// Compiles stylesheets against a caller-owned name table and function set.
 ///
 /// Both are borrowed, not owned: a `NameTable` interns the names of every
-/// document that takes part in a transformation (§6.6), and `XPathContext`
-/// keeps its function catalog as a reference, so a `CompiledStylesheet` that
-/// owned the set would be self-referential (M0b, Q35).
+/// document that takes part in a transformation, and the XPath engine keeps
+/// its function catalog as a reference, so a `CompiledStylesheet` that owned
+/// the function set would be self-referential. One `NameTable` and one
+/// `XsltFunctions` can serve any number of compilations.
 ///
 /// [`Compiler::new`] is a **basic** XSLT processor (§21.1: XTSE1650 for
 /// `xsl:import-schema`, XTSE1660 for `[xsl:]type` and a non-`strip`
 /// validation, XTDE1665 for typed input); [`Compiler::schema_aware`] is a
 /// **schema-aware** one (§21.2), compiling against a caller-owned
-/// [`SchemaContext`] (M4 plan D-1, D-6: a run-time choice, not a cargo
-/// feature).
+/// [`SchemaContext`] — a choice made at run time, not a Cargo feature.
 pub struct Compiler<'a> {
     names: &'a NameTable,
     functions: &'a XsltFunctions,
@@ -80,10 +80,10 @@ impl<'a> Compiler<'a> {
     ///
     /// The stylesheet's names are the context's: its schema set owns the name
     /// table, which the XPath binder looks schema types up by and which every
-    /// document of every transformation is built with (DESIGN §6.6). Every
-    /// XPath expression sees the set's types and declarations (§3.13, M4 plan
-    /// D-7). Compiling a stylesheet that imports something the context did not
-    /// load is refused (`XSLT2-INTERNAL`).
+    /// document of every transformation is built with. Every XPath expression
+    /// sees the set's types and declarations (§3.13). Compiling a stylesheet
+    /// that imports something the context did not load is refused
+    /// (`XSLT2-INTERNAL`).
     pub fn schema_aware(context: &'a SchemaContext, functions: &'a XsltFunctions) -> Self {
         Self {
             names: context.names(),
@@ -195,12 +195,12 @@ struct Builder<'a, 'm, 't> {
     /// `[xsl:]type` of its own.
     module_validation: Vec<Validation>,
     /// Some node constructor of the stylesheet names `strict`, `lax` or a `type` (§19.2): a
-    /// transformation then makes its validator for the trees it builds (M4 plan D-12).
+    /// transformation then makes its validator for the trees it builds.
     validates: std::cell::Cell<bool>,
     modules: &'m ModuleSet<'t>,
     catalogs: &'m CompileCatalogs<'a, 'm>,
     static_contexts: StaticContexts,
-    /// The static context of each [`StaticContextId`] as evaluation sees it,
+    /// The static context of each `StaticContextId` as evaluation sees it,
     /// with the caller's [`XsltFunctions`] as its catalog; these are kept in
     /// the compiled stylesheet.
     contexts: Vec<XPathContext<'a>>,
@@ -213,7 +213,6 @@ struct Builder<'a, 'm, 't> {
     templates: Vec<TemplateRule>,
     named: HashMap<QName, (TemplateId, u32)>,
     globals: Vec<GlobalVar>,
-    global_index: HashMap<QName, usize>,
     attribute_sets: HashMap<QName, AttributeSet>,
     /// The keys (§16.3.1) and their names.
     keys: Vec<Key>,
@@ -303,7 +302,6 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             templates: Vec::new(),
             named: HashMap::new(),
             globals: Vec::new(),
-            global_index: HashMap::new(),
             attribute_sets: HashMap::new(),
             keys: Vec::new(),
             key_index: HashMap::new(),
@@ -391,7 +389,6 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 .map(|(k, (id, _))| (k.clone(), *id))
                 .collect(),
             globals: std::mem::take(&mut self.globals),
-            global_index: std::mem::take(&mut self.global_index),
             modes,
             attribute_sets: std::mem::take(&mut self.attribute_sets),
             keys: std::mem::take(&mut self.keys),

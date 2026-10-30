@@ -1,4 +1,4 @@
-//! Evaluating the instruction tree (§7.4, §11): one `match` over
+//! Evaluating the instruction tree (§11): one `match` over
 //! [`InstructionKind`], pushing into a [`Receiver`].
 
 use xsd_schema::navigator::{DomNavigator, DomNodeType, NamespaceAxisScope};
@@ -801,7 +801,7 @@ impl<'a, 't> Transformation<'a, 't> {
 ///    requires **no** error, citing W3C bug 30180. So the rule holds where
 ///    `xs:anyURI` is XML Schema 1.0's — a basic processor and a schema-aware one
 ///    with an XML Schema 1.0 context (`error-0905a`) — and not in an XML Schema
-///    1.1 context (`xsd11`, M4g's option, `SchemaContextBuilder::xsd_version`),
+///    1.1 context (`xsd11`, `SchemaContextBuilder::xsd_version`),
 ///    whose `xs:anyURI` is the local `datatypes.html`'s: rule 1 alone
 ///    (`error-0905b`). (`xsd-schema`'s own `xs:anyURI` validation accepts `####`
 ///    in both versions.)

@@ -4,19 +4,21 @@
 //! Design sketch §9.2–§9.3. The instruction evaluator emits **raw** events in
 //! evaluation order; all the rules of XSLT 2.0 §5.7.1 live in one component,
 //! the normalizer, which wraps every tree-shaped destination. Because
-//! [`ResultBuilder`] and [`EventSerializer`] consume the *same* normalized
-//! stream, materialise-then-serialize and serialize-directly cannot disagree —
-//! architecture invariant 2.
+//! [`ResultBuilder`] and the test-only `EventSerializer` consume the *same*
+//! normalized stream, materialise-then-serialize and serialize-directly cannot
+//! disagree — the pipeline's invariant the unit tests check.
 //!
 //! [`SequenceCollector`] is the other destination: the `as=` cases, where an
-//! existing node keeps its identity instead of being copied (§6.3). The
+//! existing node keeps its identity instead of being copied. The
 //! distinction is drawn by *which* trait method an instruction calls —
 //! [`Receiver::append_item`] appends the item itself (`xsl:sequence`, §11.10)
 //! and [`Receiver::append_copy`] appends a new node that is a deep copy of it
 //! (`xsl:copy`, `xsl:copy-of`, §11.9) — never by the receiver guessing.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use xsd_schema::document::{
@@ -36,7 +38,13 @@ use crate::error::{codes, XsltError};
 use crate::runtime::validate::Validating;
 use crate::store::{DocId, DocumentStore};
 
-/// The navigator every receiver in this crate carries nodes of (Q22).
+/// A node of a transformation's documents: `xsd-schema`'s navigator over its
+/// in-memory document, positioned on one node.
+///
+/// A host meets it where nodes cross the API: a node-valued stylesheet
+/// parameter is an [`XPathValue`](crate::XPathValue) of `Nav`s
+/// (`XPathValue::from_node`), and [`DocumentStore::navigator`] gives one on a
+/// document node. `'t` is the lifetime of the transformation's arena.
 pub type Nav<'t> = BufferDocNavigator<'t>;
 
 /// An element or attribute name, in the shape [`BufferDocumentBuilder`] wants.
@@ -337,7 +345,7 @@ impl Annotations {
 /// > its parent element.
 ///
 /// So the **outermost** enclosing boundary whose validation is not `preserve`
-/// decides a node's annotation (M4 plan D-5): under a `strip` boundary every
+/// decides a node's annotation: under a `strip` boundary every
 /// node is untyped; when every enclosing boundary is `preserve`, a new element
 /// is `xs:anyType` and every other node keeps what it was given (a copied node
 /// its source's annotation, an attribute what its own `xsl:attribute`
@@ -499,7 +507,7 @@ pub trait Receiver<'t> {
     /// `xs:ID` attribute a copy with `validation="strip"` made untyped keeps
     /// its is-id property (§19.2.1.1: "The values of the is-id and is-idrefs
     /// properties are unchanged"), and so does an element that is an ID by
-    /// its own typed value (XDM 1.0 §6.2.4; upstream C62). Sent by a
+    /// its own typed value (XDM 1.0 §6.2.4). Sent by a
     /// [`ComplexContentNormalizer`] just after that attribute, or after the
     /// element's attributes for its own id. A [`ResultBuilder`] files the
     /// element under the id; the default implementation ignores it, which is
@@ -599,7 +607,7 @@ pub(crate) fn xtte1550(what: &str) -> XsltError {
 /// What a copy of the attribute `nav` keeps without its binding (§19.2.1.1: "The values of the
 /// is-id and is-idrefs properties are unchanged"; §11.9.1): the id it makes its element answer to,
 /// and its is-idrefs property — both read off its source tree, which upstream classified by the
-/// attribute's typed value with its element's in-scope namespaces (batch (t) fix round 1), not
+/// attribute's typed value with its element's in-scope namespaces, not
 /// classified again here. is-idrefs is the node flag (`DomNavigator::is_idrefs`). is-id: an
 /// attribute whose binding can make it an ID (`may_hold_id`) whose element answers to its value in
 /// the id index (the navigator has no `is_id`; the index files the attribute's claim for its
@@ -673,9 +681,9 @@ fn reaches_code(set: &SchemaSet, type_key: TypeKey, codes: &[XmlTypeCode], depth
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Kept {
     /// The id the node makes its element answer to in the id index: an attribute's `xs:ID` value,
-    /// or an element's own `xs:ID` typed value (upstream C62).
+    /// or an element's own `xs:ID` typed value.
     pub(crate) id: Option<String>,
-    /// The node has the is-idrefs property (upstream C54).
+    /// The node has the is-idrefs property.
     pub(crate) idrefs: bool,
 }
 
@@ -688,7 +696,7 @@ pub(crate) struct Kept {
 /// Validated **without** the node's namespaces (the public `validate_simple_type` takes none), so
 /// it is exact only for a type whose values hold no `xs:QName` / `xs:NOTATION` — a union with a
 /// QName member can be classified otherwise than validation with the node's in-scope namespaces
-/// does (batch (t) fix round 1, issue 2): `Validating` asks it only for such types, or when the run's
+/// does: `Validating` asks it only for such types, or when the run's
 /// own typed value is missing.
 pub(crate) fn kept_by_type(value: &str, type_key: TypeKey, set: &SchemaSet) -> Kept {
     let candidate = match type_key {
@@ -710,8 +718,8 @@ pub(crate) fn kept_by_type(value: &str, type_key: TypeKey, set: &SchemaSet) -> K
 
 /// What a copy of the element `nav` keeps without its binding: the id it answers to by its own
 /// typed value — read off its tree's id index, which upstream files such an element in by the
-/// typed value it has with its in-scope namespaces (C62); only an element whose binding can make it
-/// an ID is looked up (`may_hold_id`, or simple content) — and its is-idrefs property (C54, a node
+/// typed value it has with its in-scope namespaces; only an element whose binding can make it
+/// an ID is looked up (`may_hold_id`, or simple content) — and its is-idrefs property (a node
 /// flag: also kept by a tree that has it without a binding).
 pub(crate) fn kept_of_element(nav: &Nav<'_>) -> Kept {
     let idrefs = nav.is_idrefs();
@@ -1010,7 +1018,7 @@ struct Open<'t> {
 /// no prefix of their own, so that carrying it down a chain of elements
 /// without declarations costs a reference count per element: what a
 /// non-inheriting element withholds from its children is found in time
-/// proportional to the bindings in scope, not to its depth (review R1).
+/// proportional to the bindings in scope, not to its depth.
 type PrefixedScope = Arc<[(String, String)]>;
 
 /// The [`PrefixedScope`] of an element that writes `declared`, given that of
@@ -1133,9 +1141,7 @@ struct DocumentMark {
 ///
 /// Namespace fixup (§5.7.3) is delegated to upstream
 /// [`NamespaceFixup::declarations_for`], which implements the same rules for
-/// the XQuery constructor; M0b uses it unchanged, so the prototype has no
-/// fixup code of its own. `exclude-result-prefixes`, `inherit-namespaces` and
-/// `xsl:namespace-alias` are M1 work.
+/// the XQuery constructor; this crate has no fixup code of its own.
 pub struct ComplexContentNormalizer<'t, R: Receiver<'t>> {
     out: R,
     stack: Vec<Open<'t>>,
@@ -1232,12 +1238,6 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
             self.out.start_document()?;
         }
         Ok(())
-    }
-
-    /// The default `copy-namespaces` setting of this pipeline.
-    pub fn with_copy_namespaces(mut self, namespaces: CopyNamespaces) -> Self {
-        self.copy_namespaces = namespaces;
-        self
     }
 
     /// The destination, once the stream is finished.
@@ -1468,10 +1468,10 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
     /// > automatically copied to the children.
     ///
     /// Every prefixed binding in scope at the parent is withheld — including
-    /// those the parent itself inherited (review N5). The default namespace is
+    /// those the parent itself inherited. The default namespace is
     /// `no_default`'s business, set when the element was opened. The set is
     /// the parent's [`PrefixedScope`], computed once per element and carried
-    /// down from its own parent's (review N3, R1), so finding it costs time
+    /// down from its own parent's, so finding it costs time
     /// proportional to the bindings in scope, whatever the depth.
     ///
     /// **The element is a deep copy below the root of the copy** (§11.9.2).
@@ -1488,12 +1488,12 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
     ///   required by the namespace fixup process" — for each element's own
     ///   names, and §5.7.3 adds that "the namespace fixup process does not add
     ///   a namespace node to an element merely because its parent node in the
-    ///   result tree has such a namespace node" (review O1);
+    ///   result tree has such a namespace node";
     /// - with `copy-namespaces="yes"` ("all the namespace nodes of the
     ///   original element are copied to the new element"), the parent's copied
     ///   nodes the original element lacks — a child of an element built with
     ///   `inherit-namespaces="no"`, which a copy must not hand those bindings
-    ///   back to (review N1). The only way an element lacks a prefixed binding
+    ///   back to. The only way an element lacks a prefixed binding
     ///   its parent has is an undeclaration of its own (`undeclared`).
     ///
     /// An ordinary tree copied with `copy-namespaces="yes"` has neither, so
@@ -1575,8 +1575,8 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
     /// passed on the way is given its own on the way down — the parent's,
     /// shared, when it declares no prefix. Each container is computed at most
     /// once while it is open, so a chain of non-inheriting elements without
-    /// declarations costs O(1) per element (review R1: re-reading every open
-    /// ancestor's `declared` for each parent made it quadratic in the depth),
+    /// declarations costs O(1) per element (re-reading every open ancestor's
+    /// `declared` for each parent would make it quadratic in the depth),
     /// and nothing is computed where no element says
     /// `inherit-namespaces="no"`.
     fn prefixed_scope_at(&mut self, index: usize) -> PrefixedScope {
@@ -1760,7 +1760,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
     ///   validation (a document node opened with [`Boundary::Strict`], in
     ///   element content too: §5.7.1 replaces it by its children afterwards);
     ///   the source's bindings are not read;
-    /// - `lax` and `type` (M4f): as `strict`, with [`Boundary::Lax`] /
+    /// - `lax` and `type`: as `strict`, with [`Boundary::Lax`] /
     ///   [`Boundary::Type`]; `type="xs:untyped"` is [`Boundary::Untyped`] over
     ///   a copy made as `strip` makes it.
     ///
@@ -2152,7 +2152,7 @@ impl<'t, R: Receiver<'t>> Receiver<'t> for ComplexContentNormalizer<'t, R> {
 ///
 /// Every binding is built as it arrives: the annotation rule of §19.2.1.1
 /// ([`Boundary`]) is applied in front of it, by the validating receiver of the
-/// transformation's pipelines (`runtime::validate::Validating`, M4 plan D-5).
+/// transformation's pipelines (`runtime::validate::Validating`).
 pub struct ResultBuilder<'t> {
     builder: BufferDocumentBuilder<'t>,
     pending: Option<(Name, Option<NodeSchemaBinding>, bool)>,
@@ -2275,12 +2275,6 @@ impl<'t> ResultBuilder<'t> {
             .finalize()
             .map_err(|e| XsltError::internal(format!("could not finish a result tree: {e}")))?;
         Ok((doc, self.marks))
-    }
-
-    /// The node index of the element opened last, for the caller that needs to
-    /// point at it afterwards.
-    pub fn last_opened(&self) -> Option<u32> {
-        self.open.last().copied()
     }
 
     fn flush(&mut self) -> Result<(), XsltError> {
@@ -2483,6 +2477,7 @@ impl<'t> Receiver<'t> for ResultBuilder<'t> {
 /// scope written so far, and a prefixed undeclaration (`xmlns:p=""`, which a
 /// child of an `inherit-namespaces="no"` element carries in the tree) never is
 /// — upstream's `write_namespace_declarations` follows the same two rules.
+#[cfg(test)]
 #[derive(Default)]
 pub struct EventSerializer {
     out: String,
@@ -2502,6 +2497,7 @@ pub struct EventSerializer {
     marks: Vec<usize>,
 }
 
+#[cfg(test)]
 impl EventSerializer {
     /// An empty serializer.
     pub fn new() -> Self {
@@ -2566,6 +2562,7 @@ impl EventSerializer {
     }
 }
 
+#[cfg(test)]
 impl<'t> Receiver<'t> for EventSerializer {
     fn start_document(&mut self) -> Result<(), XsltError> {
         Ok(())
@@ -2665,6 +2662,7 @@ impl<'t> Receiver<'t> for EventSerializer {
     }
 }
 
+#[cfg(test)]
 fn push_qname(out: &mut String, prefix: &str, local: &str) {
     if !prefix.is_empty() {
         out.push_str(prefix);
@@ -2674,6 +2672,7 @@ fn push_qname(out: &mut String, prefix: &str, local: &str) {
 }
 
 /// Text escaping, matching `document::serialize::write_text`.
+#[cfg(test)]
 fn push_text(out: &mut String, text: &str) {
     for ch in text.chars() {
         match ch {
@@ -2687,6 +2686,7 @@ fn push_text(out: &mut String, text: &str) {
 }
 
 /// Attribute-value escaping, matching `document::serialize::write_attribute_value`.
+#[cfg(test)]
 fn push_attribute_value(out: &mut String, value: &str) {
     for ch in value.chars() {
         match ch {
@@ -2710,7 +2710,7 @@ pub fn serialize_document(doc: &BufferDocument<'_>) -> Result<String, XsltError>
 
 // ── SequenceCollector ────────────────────────────────────────────────────
 
-/// Collects the result of a sequence constructor evaluated with `as=` (§6.3).
+/// Collects the result of a sequence constructor evaluated with `as=`.
 ///
 /// [`append_item`](Receiver::append_item) keeps an existing node **by
 /// reference**, so its identity, parent, siblings and type annotation survive.
@@ -2742,7 +2742,7 @@ pub struct SequenceCollector<'s, 't> {
     pending_boundary: Option<Boundary>,
 }
 
-/// What a construction group in a sequence produces (§6.3).
+/// What a construction group in a sequence produces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GroupKind {
     /// A parentless element.
@@ -2759,8 +2759,7 @@ impl<'s, 't> SequenceCollector<'s, 't> {
     /// does not borrow-check, because the borrow would have to outlive the value
     /// that carries `'t` in its own type. The navigators the store hands out are
     /// `'t` however long the store itself is borrowed, which is what makes the
-    /// shorter borrow enough. (The M0b prototype's `ProtoFunctions::evaluator`
-    /// carried this note; it was replaced in M1.)
+    /// shorter borrow enough.
     pub fn new(store: &'s RefCell<DocumentStore<'t>>) -> Self {
         Self {
             store,
@@ -2778,7 +2777,7 @@ impl<'s, 't> SequenceCollector<'s, 't> {
 
     /// The collector of a transformation that validates constructed elements
     /// (§19.2.1.1): a `strict` boundary in one of its groups is validated with
-    /// `validator` — the transformation's one validator (M4 plan D-12).
+    /// `validator` — the transformation's one validator.
     pub(crate) fn with_validator(mut self, validator: Option<&'s SchemaValidator<'s>>) -> Self {
         self.validator = validator;
         self
@@ -2845,11 +2844,6 @@ impl<'s, 't> SequenceCollector<'s, 't> {
             out.text("", false)?;
         }
         Ok(())
-    }
-
-    /// The items collected so far.
-    pub fn items(&self) -> &[XmlItem<Nav<'t>>] {
-        &self.items
     }
 
     /// The collected sequence.
@@ -2921,7 +2915,7 @@ impl<'s, 't> SequenceCollector<'s, 't> {
 
     /// Builds a hidden document holding one parentless node and pushes it.
     ///
-    /// §6.3: a newly constructed node that lands in a *sequence* rather than
+    /// A newly constructed node that lands in a *sequence* rather than
     /// in element content is parentless. An attribute, comment, processing
     /// instruction or text node has no way to exist in a `BufferDocument`
     /// without a parent, so one is built around it and the navigator hides it.
@@ -2963,7 +2957,7 @@ impl<'s, 't> SequenceCollector<'s, 't> {
         self.push_holder(doc, locate)
     }
 
-    /// A parentless namespace node (§11.7, §6.3).
+    /// A parentless namespace node (§11.7).
     ///
     /// Unlike every other node kind this one does **not** go through the
     /// normalizer, and deliberately so: the holder element is an implementation
@@ -3366,3 +3360,6 @@ impl<'t> Receiver<'t> for SequenceCollector<'_, 't> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

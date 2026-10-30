@@ -52,8 +52,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     /// > expanded-QName and arity, and a higher import precedence.
     ///
     /// In schema-aware mode also for a winning stylesheet function that has the
-    /// name and arity of a user atomic type's constructor function (decision
-    /// D-A).
+    /// name and arity of a user atomic type's constructor function.
     pub(super) fn collect_functions(&mut self) -> Result<(), XsltError> {
         let modules = self.modules;
         let mut decls: Vec<FunctionDecl<'t>> = Vec::new();

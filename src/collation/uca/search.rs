@@ -50,7 +50,7 @@
 //!   ICU4X 1.5's data agrees: U+FFFF's CE32 is `FFFF0505`, and at primary
 //!   strength every other code point sorts below it in 78 tailorings,
 //!   shifted and not, numeric and not, with no expansion or offset weight
-//!   reaching it (`XSLT2_M2K_REVIEW2_FIXES.md`; `SearchData::new` re-checks
+//!   reaching it (checked once over 78 tailorings; `SearchData::new` re-checks
 //!   the CE32, and the contraction walks check that U+FFFF continues none).
 //!   So for a string `A` and a needle without U+FFFF, W1(`A`) is a prefix of
 //!   W1(`N`) exactly when `P` finds `A ≤ N` and `N < A + U+FFFF`.
@@ -132,8 +132,7 @@ use icu_provider::{DataLocale, DataPayload, DataProvider, DataRequest, KeyedData
 /// Calibrated on the slowest inputs measured (long runs of Vietnamese
 /// vowels with two marks, chained contractions) so that a search gives up
 /// after at most about a second in a release build; ordinary text of
-/// 100,000 characters uses a small fraction of it
-/// (`XSLT2_M2K_REVIEW2_FIXES.md`).
+/// 100,000 characters uses a small fraction of it.
 pub(super) const BUDGET: usize = 1 << 24;
 
 /// The character with the greatest primary weight (module docs).

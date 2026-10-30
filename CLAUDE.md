@@ -136,35 +136,44 @@ How the harness decides (read the module docs before changing it):
 
 ## Module map
 
+Public modules are marked **pub**; every other module is private to the crate, and the items the API needs from
+it are re-exported at the crate root.
+
 | Path | What it holds |
 |---|---|
-| `src/lib.rs` | The public re-exports and the crate example |
-| `src/error.rs`, `src/error/codes.rs` | `XsltError`, `ErrorKind`, `ErrorOrigin`; the Appendix E error codes; `codes_internal` |
+| `src/lib.rs` | The façade: the module declarations, the re-exports, and the crate documentation with its examples |
+| `src/error.rs`, `src/error/codes.rs` (**pub** `error`) | `XsltError`, `ErrorKind`, `ErrorOrigin`, `Location`; the Appendix E error codes (`error::codes`); `error::codes_internal` |
 | `src/names.rs` | `QName`, the XSLT namespace, the `yes` / `no` attribute spellings of §3.5 |
 | `src/whitespace.rs` | XML whitespace (§4): the only four characters XSLT calls whitespace |
-| `src/resolver.rs` | `Resolver`, `FileResolver`, `MemoryResolver`; URI resolution (RFC 3986) and decoding of non-UTF-8 resources |
+| `src/resolver.rs` (**pub**) | `Resolver`, `FileResolver`, `MemoryResolver`; URI resolution (RFC 3986), `path_to_uri` / `uri_to_path`, and decoding of non-UTF-8 resources |
 | `src/stylesheet.rs` | Loading modules (§3.10), import precedence, `use-when` (§3.12), stylesheet whitespace (§4.2), lexical static contexts (§5.4.1) |
 | `src/compile/` | `Compiler`: modules to declarations and instructions; `checks.rs` is the static-checking table, one row per XSLT element; one file per declaration or instruction family |
-| `src/model.rs` | `CompiledStylesheet`: the instruction tree (§7.4), the declaration tables (§7.3), serialization of results |
+| `src/model.rs`, `src/model/tests.rs` | `CompiledStylesheet`, `ModeKey`: the instruction tree, the declaration tables, serialization of results |
 | `src/pattern.rs` | Patterns (§5.5): the grammar, the default priorities of §6.4, the dispatch-index key |
 | `src/runtime/` | `Transformation`, `TransformOptions`, `Outcome`: the dynamic context (§5.4), template dispatch (§6), instruction evaluation, variables, sorting, keys, grouping, `xsl:analyze-string`, `xsl:number`, result documents, loading and validating sources, validating constructed nodes |
-| `src/receiver.rs` | The push pipeline: `Receiver`, `ComplexContentNormalizer` (§5.7.1), `ResultBuilder`, `SequenceCollector` |
-| `src/store.rs` | `DocumentStore`: the documents of a run, document identity by URI, `generate-id()` |
-| `src/output.rs` | `OutputDefinition`: `xsl:output` merged by import precedence, character maps (§20) |
-| `src/serialize/` | The serializer: the `xml`, `xhtml`, `html` and `text` methods, output encodings, character maps, `disable-output-escaping` |
+| `src/receiver.rs`, `src/receiver/tests/` | The push pipeline: `Receiver`, `ComplexContentNormalizer` (§5.7.1), `ResultBuilder`, `SequenceCollector`; `Nav`, the node type of the API; the pipeline's unit tests |
+| `src/store.rs`, `src/store/tests.rs` | `DocumentStore`: the documents of a run, document identity by URI, `generate-id()`; `DocId` |
+| `src/output.rs` (**pub**) | `OutputDefinition`: `xsl:output` merged by import precedence, character maps (§20); re-exports the resolved `SerializationParams` and their types |
+| `src/serialize/` | The serializer: the `xml`, `xhtml`, `html` and `text` methods, output encodings, character maps, `disable-output-escaping`; `SerializationParams` |
 | `src/numbering.rs` | Number to string conversion (§12.3), pure |
 | `src/format_number.rs` | `format-number` and `xsl:decimal-format` variables (§16.4), pure |
 | `src/format_date.rs` | `format-date`, `format-time`, `format-dateTime` (§16.5), pure |
 | `src/functions.rs` | `XsltFunctions`: the §16 function library as an XPath function catalog, and the `use-when` evaluator |
-| `src/collation.rs`, `src/collation/` | The collation registry, the collations of `xsl:sort lang` / `case-order`, the UCA collations of the `icu-collation` feature |
+| `src/collation.rs` (**pub**), `src/collation/` | The collation registry, the collations of `xsl:sort lang` / `case-order`, the UCA collations of the `icu-collation` feature |
 | `src/schema.rs` | The schema-aware mode: `SchemaContext`, `SchemaContextBuilder`, `xsl:import-schema` (§3.14) |
 | `src/regex.rs` | Regular expressions (§15) in `regexml`'s XPath 2.0 dialect |
-| `tests/*.rs`, `tests/common/` | Integration tests and their shared helpers |
+| `examples/` | `transform`, `schema_aware`, `in_memory`: small programs on the public API |
+| `tests/*.rs`, `tests/common/` | Integration tests (public API only) and their shared helpers |
 | `tests/xslts/` | The W3C conformance harness: `driver`, `catalog`, `filter`, `environment`, `runner`, `engine`, `compare`, `report`, `xpath30` |
 | `tools/suite_diff.py` | Per-case diff of two harness reports |
 
 ## Conventions
 
+- **The public API is the façade in `src/lib.rs`**: the root re-exports and the four public modules (`error`,
+  `collation`, `resolver`, `output`). Every other module is private; an item inside one may be `pub`, which only makes
+  it visible to the crate. A new public item is re-exported from `src/lib.rs` (or added to a public module) on purpose
+  and documented: `#![warn(missing_docs)]` is on, and the count is 0. A test that needs an internal item is a unit test
+  in the module that owns it, not an integration test.
 - **Error codes.** Every error carries a code: an Appendix E code of XSLT 2.0 (constants in `src/error/codes.rs`), or
   an XPath, F&O or serialization code passed through unchanged. `src/error/codes.rs` was generated from the
   specification, but the generator is not in the repository: keep its rustdoc escapes (`\[xsl:…\]`, `<URL>`) when

@@ -84,7 +84,7 @@ fn print_usage() {
     println!("      --schema-aware    Enable the schema_aware feature (runs SA cases)");
     println!("      --xsd11           With --schema-aware: XSD 1.1 is satisfied and every schema context is XML Schema 1.1");
     println!("      --strict          Recoverable errors are signalled (on-multiple-match=error)");
-    println!("      --stub            Run the M0 stub engine instead of the processor");
+    println!("      --stub            Run a stub engine that reports every case not implemented");
     println!("      --debug           Run the suite in a debug build (slow; normally skipped)");
     println!("      --skip NAME       Leave out test-sets whose name contains NAME (repeatable)");
     println!("      --lenient-xml     Compare assert-xml ignoring prefixes and namespace");

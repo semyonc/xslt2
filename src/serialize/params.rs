@@ -17,9 +17,13 @@ pub(crate) const XHTML_NS: &str = "http://www.w3.org/1999/xhtml";
 /// One of the four methods Serialization specifies, after §20's default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResolvedMethod {
+    /// The XML output method (Serialization §5).
     Xml,
+    /// The XHTML output method (Serialization §6).
     Xhtml,
+    /// The HTML output method (Serialization §7).
     Html,
+    /// The text output method (Serialization §8).
     Text,
 }
 
@@ -34,17 +38,22 @@ pub enum ResolvedMethod {
 /// accepts beside SERE0012.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Normalization {
+    /// `none`: no normalization.
     #[default]
     None,
+    /// Unicode Normalization Form C.
     Nfc,
+    /// Unicode Normalization Form D.
     Nfd,
+    /// Unicode Normalization Form KC.
     Nfkc,
+    /// Unicode Normalization Form KD.
     Nfkd,
 }
 
 impl Normalization {
     /// The form a `normalization-form` token names, or SESU0011.
-    pub fn parse(token: &str) -> Result<Self, XsltError> {
+    pub(crate) fn parse(token: &str) -> Result<Self, XsltError> {
         Ok(match whitespace::trim(token) {
             "none" => Normalization::None,
             "NFC" => Normalization::Nfc,
@@ -61,7 +70,7 @@ impl Normalization {
     }
 
     /// `text` in this normalization form.
-    pub fn apply(self, text: &str) -> String {
+    pub(crate) fn apply(self, text: &str) -> String {
         match self {
             Normalization::None => text.to_string(),
             Normalization::Nfc => text.nfc().collect(),
@@ -76,26 +85,45 @@ impl Normalization {
 /// default filled in.
 #[derive(Clone, Debug)]
 pub struct SerializationParams {
+    /// `method`: the output method, after §20's default.
     pub method: ResolvedMethod,
     /// The XML version (`xml`, `xhtml`) or HTML version (`html`).
     pub version: String,
+    /// `encoding`: the output encoding.
     pub encoding: Encoding,
     /// The encoding's name as the stylesheet wrote it, for the XML declaration
     /// and the content-type `meta` element.
     pub encoding_name: String,
+    /// `byte-order-mark`.
     pub byte_order_mark: bool,
+    /// `cdata-section-elements`; empty for the text method.
     pub cdata_section_elements: Vec<QName>,
+    /// `doctype-public`; `None` when absent.
     pub doctype_public: Option<String>,
+    /// `doctype-system`; `None` when absent.
     pub doctype_system: Option<String>,
+    /// `escape-uri-attributes`; `false` unless the method is `html` or
+    /// `xhtml`.
     pub escape_uri_attributes: bool,
+    /// `include-content-type`; `false` unless the method is `html` or
+    /// `xhtml`.
     pub include_content_type: bool,
+    /// `indent` (§20: "yes in the case of the html and xhtml output methods,
+    /// no in the case of the xml output method"); `false` for the text
+    /// method.
     pub indent: bool,
+    /// `media-type` (§20: by default `text/xml`, `text/html` for `html` and
+    /// `xhtml`, `text/plain` for `text`).
     pub media_type: String,
+    /// `normalization-form`.
     pub normalization: Normalization,
+    /// `omit-xml-declaration`.
     pub omit_xml_declaration: bool,
-    /// `None` is `omit`.
+    /// `standalone`; `None` is `omit`.
     pub standalone: Option<bool>,
+    /// `undeclare-prefixes`.
     pub undeclare_prefixes: bool,
+    /// The character map of `use-character-maps`, expanded (§20.1).
     pub character_map: CharacterMap,
 }
 
@@ -109,7 +137,7 @@ impl SerializationParams {
     /// output method"), and a value for a parameter the method does not use is
     /// dropped ("If a value is supplied for an attribute that is inapplicable to
     /// the output method, its value is not passed to the serializer").
-    pub fn resolve<N: DomNavigator>(
+    pub(crate) fn resolve<N: DomNavigator>(
         definition: &OutputDefinition,
         root: &N,
         context: TreeContext,

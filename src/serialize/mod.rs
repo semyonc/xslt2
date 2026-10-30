@@ -34,6 +34,8 @@ mod html;
 mod marks;
 mod markup;
 mod params;
+#[cfg(test)]
+mod tests;
 
 pub use charmap::CharacterMap;
 pub use encoding::Encoding;
@@ -50,6 +52,10 @@ use crate::output::OutputDefinition;
 /// code they classify as `ErrorKind::Serialization`.
 pub mod codes {
     /// Not well-formed output that the serializer cannot avoid (§5).
+    #[allow(
+        dead_code,
+        reason = "the table lists every code of Serialization Appendix B"
+    )]
     pub const SERE0003: &str = "SERE0003";
     /// `doctype-system` or `standalone` with a tree that is not a document
     /// with one element child (§5).
@@ -57,6 +63,10 @@ pub mod codes {
     /// A character the requested XML version does not permit (§5.1.1).
     pub const SERE0006: &str = "SERE0006";
     /// An unsupported encoding (§5.1.2).
+    #[allow(
+        dead_code,
+        reason = "the table lists every code of Serialization Appendix B"
+    )]
     pub const SESU0007: &str = super::encoding::SESU0007;
     /// An unrepresentable character where no character reference may stand
     /// (§5.1.2, §7.4.2, §8.1.2, §9).

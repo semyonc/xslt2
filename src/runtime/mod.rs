@@ -32,14 +32,9 @@ mod typed_sources;
 pub(crate) mod validate;
 mod variables;
 
-pub use content::SimpleDefault;
-pub use context::{Frame, XsltContext};
-pub use functions::XsltEvaluator;
+pub(crate) use context::{Frame, XsltContext};
 pub use results::SecondaryResult;
-pub(crate) use serialize::tree_context;
-pub use serialize::{
-    serialize_result, serialize_result_to_bytes, source_options, unknown_location,
-};
+pub(crate) use serialize::{serialize_result, serialize_result_to_bytes, tree_context};
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -68,14 +63,14 @@ pub struct TransformOptions {
     pub initial_mode: ModeKey,
     /// Signal recoverable errors instead of taking the spec's recovery action.
     pub strict_recoverable: bool,
-    /// A stack size for the host to pass to [`run_on_large_stack`] (Q33).
+    /// A stack size for the host to pass to [`run_on_large_stack`].
     ///
     /// The transformation does not read it: [`run_on_large_stack`] takes its
     /// size as an argument, and the stack guard learns the size of the thread
     /// from there (see [`Self::stack_limit`]).
     pub stack_size: usize,
     /// How deep template invocations and stylesheet-function calls may nest
-    /// before the run is abandoned with an `XSLT2-INTERNAL` error (Q33).
+    /// before the run is abandoned with an `XSLT2-INTERNAL` error.
     ///
     /// There is no tail-call elimination, so every nested call consumes host
     /// stack, and a runaway recursion would otherwise abort the process, which
@@ -104,7 +99,7 @@ pub struct TransformOptions {
     pub max_recursion_depth: usize,
     /// How many bytes of host stack the run may use, measured from the point
     /// where it starts, before it is abandoned with the same error as
-    /// [`Self::max_recursion_depth`] (Q33).
+    /// [`Self::max_recursion_depth`].
     ///
     /// Checked on entry to every template invocation (built-in template rules
     /// included) and every stylesheet-function call, so a deep recursion ends
@@ -168,7 +163,7 @@ pub struct TransformOptions {
     /// the primary result is `file:///o/out` itself; against `file:///o/out/`
     /// it is `file:///o/out/a.xml`.
     pub base_output_uri: Option<String>,
-    /// How a source document is validated when it enters the run (M4 plan D-4): the default for
+    /// How a source document is validated when it enters the run: the default for
     /// every source-tree loader — [`Transformation::transform_source`],
     /// [`transform_uri`](Transformation::transform_uri), `document()`, `doc()` and a registered
     /// source — which [`Transformation::transform_source_with`],
@@ -180,13 +175,14 @@ pub struct TransformOptions {
     /// stylesheet module of this stylesheet read with `document()` / `doc()` — `document('')`,
     /// which "refers to the document node of the containing stylesheet module" (§16.1) — which is
     /// read unvalidated unless the host sets a mode for its URI
-    /// ([`Transformation::set_source_validation`]; M4b decision D-V). Any other document the
+    /// ([`Transformation::set_source_validation`]): a stylesheet module is not a source the host
+    /// asked to validate. Any other document the
     /// stylesheet reads by URI is validated by the default, so with `Strict` a document that is
     /// not an instance of the schema set is an error (FODC0002); exempt one with
     /// `set_source_validation(uri, SourceValidation::Skip)`.
     pub source_validation: SourceValidation,
-    /// The implicit timezone of the run (XPath 2.0 §C.2's dynamic-context component, upstream
-    /// C94): what `implicit-timezone()` returns, the timezone of `current-dateTime()`, and the
+    /// The implicit timezone of the run (XPath 2.0 §C.2's dynamic-context component): what
+    /// `implicit-timezone()` returns, the timezone of `current-dateTime()`, and the
     /// timezone a date or time without one is compared and subtracted with — F&O 1.0 §10.4: "If
     /// either operand to a comparison function on date or time values does not have an
     /// (explicit) timezone then, for the purpose of the operation, an implicit timezone,
@@ -204,19 +200,19 @@ pub struct TransformOptions {
     /// A timezone is within -14:00 and +14:00 (XML Schema 1.1 Part 2 §3.3.7); a run given one
     /// outside that range fails with FODT0003. Not affected: the XPath expressions upstream
     /// evaluates during schema validation — XML Schema 1.1 assertions and type alternatives on
-    /// validated sources and constructed trees — which read the host's offset (upstream C103).
+    /// validated sources and constructed trees — which read the host's offset.
     pub implicit_timezone: Option<TimezoneOffset>,
 }
 
 /// Whether, and how, a source document is validated against the stylesheet's schema set when it
-/// enters a run (M4 plan D-4; [`TransformOptions::source_validation`]).
+/// enters a run ([`TransformOptions::source_validation`]).
 ///
 /// XSLT 2.0 leaves it to the processor: §2.8 "where the source document has undergone schema
 /// validity assessment, the XSLT processor has access to the type information associated with
 /// individual nodes", and F&O 1.0 §15.5.4 (`fn:doc`): "It is ·implementation-defined· whether DTD
 /// validation and/or schema validation is applied to the source document". The schemas are those
 /// of the stylesheet's `SchemaContext` — its `xsl:import-schema` declarations and the schemas the
-/// host added (§3.13's implementation-defined mechanism, D-2); `xsi:schemaLocation` hints in the
+/// host added (§3.13's implementation-defined mechanism); `xsi:schemaLocation` hints in the
 /// document are not followed. A document that is not valid is an error.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum SourceValidation {
@@ -230,7 +226,7 @@ pub enum SourceValidation {
     /// Lax validation: as strict for a document element that has a declaration (or an
     /// `xsi:type`); one that has neither is assessed laxly — no error for it, its declared
     /// descendants validated, and it is unbound (`xs:untyped`) in the typed tree (XML Schema 1.1
-    /// §5.2's lax wildcard validation, upstream C36 `ValidationRoot::Lax`).
+    /// §5.2's lax wildcard validation).
     Lax,
 }
 
@@ -251,17 +247,15 @@ impl Default for TransformOptions {
     }
 }
 
-/// The stack a transformation runs on by default (Q33).
+/// The stack a transformation runs on by default.
 ///
 /// A deeply recursive named template consumes host stack, and there is no
 /// tail-call elimination. Running the whole job on a thread with a large stack
-/// is the stopgap; see [`run_on_large_stack`]. Measured on this stack in a
-/// release build (M2e): the recursive named template of `tests/q33_depth.rs`
-/// uses about 7.5 KB per level, so the stack guard
-/// ([`TransformOptions::stack_limit`], about 224 MiB here) stops it with the
-/// depth error at about 31 000 levels; without the guard it overflowed between
-/// 35 000 and 36 000. (M1 measured 50 000 levels, about 5 KiB per call; the
-/// frames have grown since.)
+/// is the remedy; see [`run_on_large_stack`]. Measured on this stack in a
+/// release build: a recursive named template that does little else uses about
+/// 7.5 KB per level, so the stack guard ([`TransformOptions::stack_limit`],
+/// about 224 MiB here) stops it with the depth error at about 31 000 levels;
+/// without the guard it overflowed between 35 000 and 36 000.
 pub const DEFAULT_STACK_SIZE: usize = 256 * 1024 * 1024;
 
 /// The nesting depth a run allows by default
@@ -292,7 +286,7 @@ const MIN_STACK_RESERVE: usize = 1024 * 1024;
 thread_local! {
     /// For a thread [`run_on_large_stack`] started: the stack position where
     /// the thread began and its stack size, from which the stack guard derives
-    /// [`TransformOptions::stack_limit`] (Q33). `None` on every other thread.
+    /// [`TransformOptions::stack_limit`]. `None` on every other thread.
     static LARGE_STACK: std::cell::Cell<Option<(usize, usize)>> =
         const { std::cell::Cell::new(None) };
 }
@@ -308,11 +302,12 @@ fn stack_position() -> usize {
 }
 
 /// Runs `job` on a thread with `stack_size` bytes of stack and returns its
-/// result (Q33).
+/// result.
 ///
-/// The compiled stylesheet, the name table and the arena are all `!Send`, so
-/// the *whole* job — compile, load, transform, serialize — has to happen
-/// inside the closure; only owned, `Send` values cross the boundary.
+/// The compiled stylesheet borrows the name table and the arena, which are not
+/// `Sync`, so it is not `Send`: the *whole* job — compile, load, transform,
+/// serialize — has to happen inside the closure; only owned, `Send` values
+/// cross the boundary.
 ///
 /// The thread remembers its stack size, so a transformation run inside `job`
 /// knows how much stack it may use before it stops with the depth error
@@ -362,7 +357,11 @@ impl Drop for StackScope<'_> {
 
 /// One `xsl:message` (§17).
 pub struct Message {
+    /// The message: the document the instruction's `select` attribute and
+    /// content build, serialized as XML without an XML declaration.
     pub content: String,
+    /// Whether the instruction said `terminate="yes"`: the run then stopped
+    /// with the error XTMM9000 after this message.
     pub terminate: bool,
 }
 
@@ -410,7 +409,7 @@ pub struct Outcome<'t> {
     /// (§20.2) — the tree's "additional boolean property disable-escaping",
     /// which only the serializer reads. Empty when the stylesheet disabled no
     /// escaping.
-    pub disabled_escaping: crate::serialize::EscapingMarks,
+    pub(crate) disabled_escaping: crate::serialize::EscapingMarks,
     /// The run's base output URI ([`TransformOptions::base_output_uri`], less
     /// any fragment identifier, with its dot segments removed), which is the
     /// URI of the primary result. Absolute only if the option (or the
@@ -432,8 +431,9 @@ pub struct Outcome<'t> {
     /// page and a 4,096-entry namespace page per tree), and the arena keeps it
     /// until it is dropped; every secondary result is also kept here until the
     /// run ends. Tens of thousands of result documents therefore need
-    /// gigabytes (10,000 trivial ones ≈ 1.2 GB). A streaming handler that lets
-    /// the host serialize and drop each tree as it completes is planned (M5).
+    /// gigabytes (10,000 trivial ones ≈ 1.2 GB). This version has no streaming
+    /// handler that would let the host serialize and drop each tree as it
+    /// completes.
     pub secondary: Vec<SecondaryResult<'t>>,
     /// The effective output definition of a primary result an
     /// `xsl:result-document` created; `None` for the tree created implicitly,
@@ -455,8 +455,7 @@ impl<'t> Outcome<'t> {
     /// its URI is [`base_output_uri`](Self::base_output_uri), its tree
     /// [`primary`](Self::primary), and `result_document(&outcome.base_output_uri)`
     /// is `None`. (A tree of its own type rather than a [`SecondaryResult`]:
-    /// it keeps its marks in [`disabled_escaping`](Self::disabled_escaping) and
-    /// its output definition in `CompiledStylesheet::primary_output_definition`.)
+    /// its output definition is `CompiledStylesheet::primary_output_definition`.)
     pub fn result_document(&self, uri: &str) -> Option<&SecondaryResult<'t>> {
         if let Some(tree) = self.secondary.iter().find(|tree| tree.uri == uri) {
             return Some(tree);
@@ -491,7 +490,7 @@ pub struct Transformation<'a, 't> {
     sheet: &'a CompiledStylesheet<'a>,
     store: RefCell<DocumentStore<'t>>,
     globals: RefCell<Vec<GlobalSlot<'t>>>,
-    /// The key indexes (§16.3, DESIGN §9.7), one per key and document — and,
+    /// The key indexes (§16.3), one per key and document — and,
     /// for a key whose specifier may observe it, current group — built on
     /// first use.
     keys: RefCell<keys::KeyIndexes<'t>>,
@@ -532,7 +531,7 @@ pub struct Transformation<'a, 't> {
     /// How deep template invocation is nested right now, a function call
     /// counting `calls::FUNCTION_CALL_DEPTH`.
     depth: std::cell::Cell<usize>,
-    /// The stack guard of the current run (Q33).
+    /// The stack guard of the current run.
     stack: std::cell::Cell<StackGuard>,
     /// The current dateTime and implicit timezone of this transformation,
     /// fixed the first time an expression is evaluated (§5.4.3.2).
@@ -549,14 +548,14 @@ pub struct Transformation<'a, 't> {
     /// run's trees, which a typed source tree borrows.
     schema_set: Option<&'t xsd_schema::SchemaSet>,
     /// The validator source documents are validated with, made on first use
-    /// (M4b, D-12: one per transformation).
+    /// (one per transformation).
     validator: std::cell::OnceCell<xsd_schema::validation::SchemaValidator<'a>>,
     /// The validator constructed trees are validated with, made on first use: the source
     /// validator's flags and `ValidationFlags::XPATH_TYPES` (`construction_validator`).
     construction_validator: std::cell::OnceCell<xsd_schema::validation::SchemaValidator<'a>>,
     /// The value constraints the validation of constructed trees reads, kept for the run.
     value_constraints: validate::ValueConstraints,
-    /// The validation modes `register_source_with` recorded, by URI (D-4).
+    /// The validation modes `register_source_with` recorded, by URI.
     source_modes: RefCell<HashMap<String, SourceValidation>>,
     /// See [`Transformation::take_warnings`].
     warnings: RefCell<Vec<String>>,
@@ -662,13 +661,13 @@ impl<'a, 't> Transformation<'a, 't> {
 
     /// The warnings of the run so far: things the run did on its own that the host may want to
     /// know — a source tree typed against another schema set than the stylesheet's, whose
-    /// annotations were stripped (M4 plan D-2).
+    /// annotations were stripped.
     pub fn take_warnings(&self) -> Vec<String> {
         std::mem::take(&mut self.warnings.borrow_mut())
     }
 
-    /// Whether the run's schema context is an XML Schema 1.1 one (M4g,
-    /// `SchemaContextBuilder::xsd_version`): the built-in datatypes are then XML Schema 1.1's.
+    /// Whether the run's schema context is an XML Schema 1.1 one
+    /// (`SchemaContextBuilder::xsd_version`): the built-in datatypes are then XML Schema 1.1's.
     pub(crate) fn xsd11(&self) -> bool {
         self.schema_set.is_some_and(xsd_schema::SchemaSet::is_xsd11)
     }
@@ -707,9 +706,13 @@ impl<'a, 't> Transformation<'a, 't> {
 
     /// Runs the transformation over a source document already in the store.
     ///
-    /// A tree the host built and put into the store with type annotations is admitted first: taken
-    /// as it is, stripped, or refused (XTDE1665 on a basic processor) — see
-    /// `DocumentStore::insert` and M4 plan D-2, D-13.
+    /// A tree the host built and put into the store ([`DocumentStore::insert`]) with type
+    /// annotations is admitted first. On a basic processor it is refused (XTDE1665, §21.1), unless a
+    /// module says `input-type-annotations="strip"`; on a schema-aware one it is taken as it is when
+    /// it was validated against the stylesheet's schema set, stripped under
+    /// `input-type-annotations="strip"` (§4.3), and stripped with a warning
+    /// ([`take_warnings`](Self::take_warnings)) when it was validated against another set. An
+    /// untyped tree is taken as it is; none is whitespace-stripped (§4.4).
     pub fn transform_document(&self, source: DocId) -> Result<Outcome<'t>, XsltError> {
         self.admit_stored(source)?;
         let root = self.store.borrow().navigator(source);

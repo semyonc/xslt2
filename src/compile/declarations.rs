@@ -1,4 +1,4 @@
-//! The stylesheet declarations of §7.3: global variables and parameters,
+//! The stylesheet declarations: global variables and parameters,
 //! template rules, `xsl:output`, `xsl:strip-space`, `xsl:namespace-alias` and
 //! `xsl:attribute-set`, plus the two passes that walk the module graph.
 
@@ -192,7 +192,6 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         winners.sort_unstable();
         for (slot, index) in winners.iter().enumerate() {
             let (name, _, _, _) = &entries[*index];
-            self.global_index.insert(name.clone(), slot);
             self.scope.push(ScopeEntry {
                 name: name.clone(),
                 location: VarLocation::Global(slot),

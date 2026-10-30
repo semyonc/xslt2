@@ -12,8 +12,11 @@ use std::collections::BTreeMap;
 
 use crate::error::{codes, XsltError};
 use crate::names::{lexical_qname, parse_yes_no, resolve_qname, split_qname, QName};
-use crate::serialize::CharacterMap;
 use crate::whitespace;
+
+pub use crate::serialize::{
+    CharacterMap, Encoding, Normalization, ResolvedMethod, SerializationParams,
+};
 
 /// The output method (§20, Serialization §3 `method`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -21,9 +24,13 @@ pub enum OutputMethod {
     /// No `method` attribute: §20 chooses one from the tree being serialized.
     #[default]
     Unspecified,
+    /// `method="xml"`.
     Xml,
+    /// `method="xhtml"`.
     Xhtml,
+    /// `method="html"`.
     Html,
+    /// `method="text"`.
     Text,
     /// A prefixed QName: "the expanded-QName identifies the output method; the
     /// behavior in this case is not specified by this document" (§20). This
@@ -64,29 +71,41 @@ impl OutputMethod {
 /// precedence (`output-0312`).
 #[derive(Clone, Debug, Default)]
 pub struct OutputDefinition {
+    /// `method`.
     pub method: Setting<OutputMethod>,
+    /// `version`: the XML version (`xml`, `xhtml`) or HTML version (`html`).
     pub version: Setting<String>,
+    /// `encoding`, as written.
     pub encoding: Setting<String>,
+    /// `indent`.
     pub indent: Setting<bool>,
+    /// `omit-xml-declaration`.
     pub omit_xml_declaration: Setting<bool>,
-    /// `None` is `standalone="omit"`.
+    /// `standalone`; `None` is `standalone="omit"`.
     pub standalone: Setting<Option<bool>>,
+    /// `doctype-public`.
     pub doctype_public: Setting<String>,
+    /// `doctype-system`.
     pub doctype_system: Setting<String>,
+    /// `media-type`.
     pub media_type: Setting<String>,
+    /// `byte-order-mark`.
     pub byte_order_mark: Setting<bool>,
+    /// `escape-uri-attributes`.
     pub escape_uri_attributes: Setting<bool>,
+    /// `include-content-type`.
     pub include_content_type: Setting<bool>,
-    /// The token as written; checked against what the serializer supports when
-    /// it is used (SESU0011).
+    /// `normalization-form`: the token as written; checked against what the
+    /// serializer supports when it is used (SESU0011).
     pub normalization_form: Setting<String>,
+    /// `undeclare-prefixes`.
     pub undeclare_prefixes: Setting<bool>,
     /// The union of every declaration's `cdata-section-elements`.
     pub cdata_section_elements: Vec<QName>,
     /// `use-character-maps` of each declaration, keyed by (import precedence,
     /// declaration order) so that [`Self::character_map_names`] is in the
     /// order §20 concatenates them.
-    pub use_character_maps: BTreeMap<(u32, u32), Vec<QName>>,
+    pub(crate) use_character_maps: BTreeMap<(u32, u32), Vec<QName>>,
     /// The character map the names above expand to (§20.1), filled in once
     /// every `xsl:character-map` is known.
     pub character_map: CharacterMap,
@@ -114,7 +133,7 @@ impl<T> Default for Setting<T> {
 
 impl<T> Setting<T> {
     /// Records `value` unless a higher-precedence declaration already set one.
-    pub fn set(&mut self, value: T, precedence: u32) {
+    pub(crate) fn set(&mut self, value: T, precedence: u32) {
         if self.value.is_none() || precedence >= self.precedence {
             self.value = Some(value);
             self.precedence = precedence;
@@ -129,14 +148,16 @@ impl<T> Setting<T> {
     /// definition that has higher import precedence and that specifies an
     /// explicit value for the same attribute" — which is exactly the case where
     /// `precedence` has since moved above the recorded conflict.
-    pub fn conflicts(&self) -> bool {
+    pub(crate) fn conflicts(&self) -> bool {
         self.conflict == Some(self.precedence)
     }
 
+    /// The value, if a declaration (or the processor) set one.
     pub fn get(&self) -> Option<&T> {
         self.value.as_ref()
     }
 
+    /// Whether a value is set.
     pub fn is_set(&self) -> bool {
         self.value.is_some()
     }
@@ -144,7 +165,7 @@ impl<T> Setting<T> {
     /// A copy of this setting with a value that overrides any declaration
     /// (the API override of §20: "An implementation may allow the attributes
     /// of the `xsl:output` declaration to be overridden").
-    pub fn overridden(value: T) -> Self {
+    pub(crate) fn overridden(value: T) -> Self {
         Self {
             value: Some(value),
             precedence: u32::MAX,
@@ -154,6 +175,7 @@ impl<T> Setting<T> {
 }
 
 impl<T: Copy> Setting<T> {
+    /// The value, or `fallback` when none is set.
     pub fn get_or(&self, fallback: T) -> T {
         self.value.unwrap_or(fallback)
     }
@@ -162,7 +184,7 @@ impl<T: Copy> Setting<T> {
 impl<T: PartialEq> Setting<T> {
     /// Records `value`, remembering a disagreement with an equally-precedent
     /// declaration for §20's XTSE1560.
-    pub fn set_checked(&mut self, value: T, precedence: u32) {
+    pub(crate) fn set_checked(&mut self, value: T, precedence: u32) {
         if let Some(existing) = &self.value {
             if precedence == self.precedence && *existing != value {
                 self.conflict = Some(precedence);
@@ -180,7 +202,7 @@ impl OutputDefinition {
     /// `cdata-section-elements` and `use-character-maps` are exempt by the same
     /// rule — §20 unions them rather than overriding — and are not stored as
     /// [`Setting`]s at all, so they cannot appear.
-    pub fn conflicting_attribute(&self) -> Option<&'static str> {
+    pub(crate) fn conflicting_attribute(&self) -> Option<&'static str> {
         [
             ("method", self.method.conflicts()),
             ("version", self.version.conflicts()),
@@ -218,7 +240,7 @@ impl OutputDefinition {
 
     /// Adds a `cdata-section-elements` name unless it is already there (§20:
     /// "the union of the values").
-    pub fn add_cdata_section_element(&mut self, name: QName) {
+    pub(crate) fn add_cdata_section_element(&mut self, name: QName) {
         if !self.cdata_section_elements.contains(&name) {
             self.cdata_section_elements.push(name);
         }
@@ -345,7 +367,7 @@ pub(crate) fn apply_serialization_attribute(
 /// > the behavior in this case is not specified by this document.
 ///
 /// `resolve` maps a prefix to its namespace URI in the declaration's scope.
-pub fn parse_method(
+pub(crate) fn parse_method(
     value: &str,
     resolve: impl Fn(&str) -> Option<String>,
 ) -> Result<OutputMethod, XsltError> {

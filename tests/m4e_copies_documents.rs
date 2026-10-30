@@ -13,15 +13,12 @@ use std::sync::Arc;
 
 use bumpalo::Bump;
 use xsd_schema::document::{build_typed_document, BufferDocumentOptions};
-use xsd_schema::navigator::DomNavigator;
-use xsd_schema::xpath::XmlItem;
 use xsd_schema::SchemaSetBuilder;
 
 use xslt2::error::codes;
-use xslt2::receiver::{CopyNamespaces, CopyValidation};
 use xslt2::{
-    Compiler, ComplexContentNormalizer, MemoryResolver, Name, Outcome, Receiver, Resolver,
-    ResultBuilder, SchemaContext, SourceValidation, TransformOptions, XsltError, XsltFunctions,
+    Compiler, MemoryResolver, Outcome, Resolver, SchemaContext, SourceValidation, TransformOptions,
+    XsltError, XsltFunctions,
 };
 
 const NS: &str = "http://www.w3.org/1999/XSL/Transform";
@@ -1015,88 +1012,4 @@ fn the_outermost_boundary_decides_across_documents_elements_and_copies() {
         expected.len(),
         wrong.join("\n")
     );
-}
-
-/// §19.2.1.1, `strip`: "the new node and each of the contained nodes will have the type annotation
-/// xs:untyped if it is an element, or xs:untypedAtomic if it is an attribute … The values of the is-id
-/// and is-idrefs properties are unchanged" — whichever receiver chain builds the copy: the public
-/// pipeline (`ComplexContentNormalizer` over a `ResultBuilder`, no validating receiver) too. A
-/// `preserve` copy keeps the annotations there as well.
-#[test]
-fn a_strip_copy_is_untyped_through_the_public_pipeline() {
-    let set = SchemaSetBuilder::new()
-        .add_source(M4E_XSD, XSD_URI)
-        .unwrap()
-        .compile()
-        .unwrap()
-        .into_schema_set();
-    let arena = Bump::new();
-    let source = build_typed_document(
-        DOC.as_bytes(),
-        &arena,
-        &set,
-        BufferDocumentOptions::default(),
-    )
-    .unwrap();
-    assert!(source.has_type_annotations());
-    let mut row1 = source.create_navigator();
-    assert!(row1.move_to_first_child() && row1.move_to_first_child());
-    let mut row2 = row1.clone();
-    assert!(row2.move_to_next_sibling());
-    let mut id2 = row2.clone();
-    assert!(id2.move_to_first_attribute() && id2.local_name() == "id");
-    let mut root = source.create_navigator();
-    root.move_to_root();
-    for (validation, typed) in [
-        (CopyValidation::Strip, false),
-        (CopyValidation::Preserve, true),
-    ] {
-        // An attribute copied on its own, an element, a document node.
-        let mut out = ComplexContentNormalizer::new(
-            ResultBuilder::new(&arena, &set.name_table, Some(&set)).unwrap(),
-        );
-        out.start_document().unwrap();
-        out.start_element(&Name::local("x"), None, false).unwrap();
-        out.append_copy(&XmlItem::Node(id2.clone()), CopyNamespaces::All, validation)
-            .unwrap();
-        out.end_start_tag().unwrap();
-        out.append_copy(
-            &XmlItem::Node(row1.clone()),
-            CopyNamespaces::All,
-            validation,
-        )
-        .unwrap();
-        out.end_element().unwrap();
-        out.end_document().unwrap();
-        let doc = out.into_inner().finish().unwrap();
-        assert_eq!(doc.has_type_annotations(), typed, "{validation:?}");
-        assert!(doc.get_element_by_id("r1").is_some(), "{validation:?}: r1");
-        assert!(doc.get_element_by_id("r2").is_some(), "{validation:?}: r2");
-
-        let mut out = ComplexContentNormalizer::new(
-            ResultBuilder::new(&arena, &set.name_table, Some(&set)).unwrap(),
-        );
-        out.start_document().unwrap();
-        out.append_copy(
-            &XmlItem::Node(root.clone()),
-            CopyNamespaces::All,
-            validation,
-        )
-        .unwrap();
-        out.end_document().unwrap();
-        let doc = out.into_inner().finish().unwrap();
-        assert_eq!(
-            doc.has_type_annotations(),
-            typed,
-            "{validation:?}: document"
-        );
-        assert!(
-            doc.get_element_by_id("r2").is_some(),
-            "{validation:?}: document r2"
-        );
-        assert!(
-            doc.get_element_by_id("c1").is_some(),
-            "{validation:?}: document c1"
-        );
-    }
 }

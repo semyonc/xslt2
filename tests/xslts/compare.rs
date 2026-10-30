@@ -2289,6 +2289,8 @@ pub mod self_test {
             notimpl_owner("xsl:sort is not implemented (M4)"),
             Some("M4")
         );
+        let engine = xslt2::XsltError::not_implemented("the collation urn:x", "icu-collation");
+        assert_eq!(notimpl_owner(&engine.message), Some("icu-collation"));
         assert_eq!(notimpl_owner("engine not implemented"), None);
         assert_eq!(notimpl_owner("xsl:sort is not implemented (soon)"), None);
         assert_eq!(notimpl_owner("xsl:sort is not implemented ()"), None);

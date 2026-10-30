@@ -2,7 +2,7 @@
 //!
 //! The XPath engine binds the call to the handle the compiler minted for the
 //! winning `xsl:function` and hands it, with the evaluated arguments, to
-//! [`XsltEvaluator`](super::XsltEvaluator); this is where the body runs.
+//! `XsltEvaluator` (`runtime/functions.rs`); this is where the body runs.
 
 use xsd_schema::xpath::functions::XPathValue;
 
@@ -17,7 +17,7 @@ use crate::receiver::Nav;
 ///
 /// A function call nests deeper on the host stack than a template call: the
 /// XPath engine's own evaluation of the calling expression sits between the
-/// two instruction levels. Measured in a release build (Q33, M2e): a
+/// two instruction levels. Measured in a release build: a
 /// self-recursive function whose body is one `xsl:sequence` (`if ($n = 0) then
 /// 0 else f:down($n - 1) + 1`) uses about 16.5 KB of stack per call, a
 /// recursive named template whose `xsl:call-template` sits in an `xsl:choose`

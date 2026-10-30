@@ -540,8 +540,8 @@ fn secondary_result(
     })
 }
 
-fn method_name(method: xslt2::serialize::ResolvedMethod) -> &'static str {
-    use xslt2::serialize::ResolvedMethod::*;
+fn method_name(method: xslt2::output::ResolvedMethod) -> &'static str {
+    use xslt2::output::ResolvedMethod::*;
     match method {
         Xml => "xml",
         Xhtml => "xhtml",
@@ -1288,7 +1288,7 @@ pub fn self_test() -> usize {
             numbers: vec![1],
         })
         .is_err(),
-        "the probe: Greek alpha with letter-value is the token 1 (user decision)",
+        "the probe: Greek alpha with letter-value is the token 1",
     );
     check(
         range_numbers(Some("0 to 20")) == Ok((0..=20).collect())

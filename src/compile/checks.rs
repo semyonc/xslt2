@@ -32,8 +32,8 @@
 //! XTSE0260 reporting are all driven from the row. An element this processor
 //! does not implement yet still gets a row — the row is what makes it *legal*
 //! where the spec allows it, so the compiler can go on reporting
-//! `XSLT2-NOTIMPL` for it instead of a bogus static error. Later
-//! sub-milestones therefore only ever *add* rows and never touch the walk.
+//! `XSLT2-NOTIMPL` for it instead of a bogus static error. A new element
+//! therefore only ever *adds* a row and never touches the walk.
 //!
 //! # What is deliberately not here
 //!
@@ -73,7 +73,7 @@ pub(super) enum Category {
     Root,
     /// A top-level declaration: a child of `xsl:stylesheet`/`xsl:transform`.
     Declaration,
-    /// An instruction: allowed wherever a sequence constructor is (§2.6).
+    /// An instruction: allowed wherever a sequence constructor is (§5.7).
     Instruction,
     /// Both a declaration and an instruction (`xsl:variable`).
     Both,

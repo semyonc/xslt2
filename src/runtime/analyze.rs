@@ -3,7 +3,7 @@
 //! substrings, and the evaluation of `xsl:matching-substring` /
 //! `xsl:non-matching-substring` once per substring with that substring as the
 //! focus and — for a match — its captured substrings as the current captured
-//! substrings (§15.2; DESIGN §9.1).
+//! substrings (§15.2).
 //!
 //! The partition is `regexml`'s `Regex::analyze`, which yields the
 //! substrings in order: `AnalyzeEntry::NonMatch(text)` and

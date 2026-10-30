@@ -24,15 +24,10 @@ mod common;
 use std::sync::Arc;
 
 use bumpalo::Bump;
-use xsd_schema::document::{build_typed_document, BufferDocumentOptions};
-use xsd_schema::navigator::DomNavigator;
-use xsd_schema::xpath::XmlItem;
-use xsd_schema::SchemaSetBuilder;
 
-use xslt2::receiver::{CopyNamespaces, CopyValidation};
 use xslt2::{
-    Compiler, ComplexContentNormalizer, MemoryResolver, Name, Receiver, Resolver, ResultBuilder,
-    SchemaContext, SourceValidation, TransformOptions, XsltError, XsltFunctions,
+    Compiler, MemoryResolver, Resolver, SchemaContext, SourceValidation, TransformOptions,
+    XsltError, XsltFunctions,
 };
 
 const NS: &str = "http://www.w3.org/1999/XSL/Transform";
@@ -244,68 +239,6 @@ fn a_copied_attribute_keeps_is_idrefs() {
         ),
         "true ref refs"
     );
-}
-
-/// The same rule whichever receivers build the copy (M4e's fix round): the public pipeline, a
-/// `ComplexContentNormalizer` over a bare `ResultBuilder`, keeps the element ids and the is-idrefs
-/// property of a `strip` copy — and a `preserve` copy has them through its annotations.
-#[test]
-fn a_strip_copy_keeps_them_through_the_public_pipeline() {
-    let set = SchemaSetBuilder::new()
-        .add_source(XSD, XSD_URI)
-        .unwrap()
-        .compile()
-        .unwrap()
-        .into_schema_set();
-    let arena = Bump::new();
-    let source = build_typed_document(
-        DOC.as_bytes(),
-        &arena,
-        &set,
-        BufferDocumentOptions::default(),
-    )
-    .unwrap();
-    let mut root = source.create_navigator();
-    root.move_to_root();
-    for (validation, typed) in [
-        (CopyValidation::Strip, false),
-        (CopyValidation::Preserve, true),
-    ] {
-        let mut out = ComplexContentNormalizer::new(
-            ResultBuilder::new(&arena, &set.name_table, Some(&set)).unwrap(),
-        );
-        out.start_document().unwrap();
-        out.start_element(&Name::local("x"), None, false).unwrap();
-        out.end_start_tag().unwrap();
-        out.append_copy(
-            &XmlItem::Node(root.clone()),
-            CopyNamespaces::All,
-            validation,
-        )
-        .unwrap();
-        out.end_element().unwrap();
-        out.end_document().unwrap();
-        let doc = out.into_inner().finish().unwrap();
-        assert_eq!(doc.has_type_annotations(), typed, "{validation:?}");
-        for id in ["r1", "e1", "e2", "c1", "k1"] {
-            assert!(
-                doc.get_element_by_id(id).is_some(),
-                "{validation:?}: id {id}"
-            );
-        }
-        assert!(doc.get_element_by_id("s1").is_none(), "{validation:?}: s1");
-        let nav = doc.create_navigator();
-        let names = |id: &str| -> Vec<String> {
-            nav.find_nodes_by_idref(id)
-                .unwrap()
-                .iter()
-                .map(|n| n.local_name().to_string())
-                .collect()
-        };
-        assert_eq!(names("r1"), ["ref", "erefs"], "{validation:?}: r1");
-        assert_eq!(names("e1"), ["refs"], "{validation:?}: e1");
-        assert_eq!(names("r2"), ["eref"], "{validation:?}: r2");
-    }
 }
 
 // ── §19.2.1.1: nodes under a strip boundary ──────────────────────────────────────────────────

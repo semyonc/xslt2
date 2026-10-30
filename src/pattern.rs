@@ -25,6 +25,10 @@ use crate::whitespace;
 #[derive(Debug)]
 pub struct Pattern {
     pub alternatives: Vec<PathPattern>,
+    #[allow(
+        dead_code,
+        reason = "kept with the compiled pattern: its text as written"
+    )]
     pub source: String,
 }
 
@@ -144,7 +148,7 @@ pub enum NodeTest {
     /// name table, the type a [`TypeTest`](xsd_schema::types::TypeTest) of
     /// the in-scope schema types — and is what decides a match
     /// (`ItemType::matches_item`), so a pattern and an `instance of` agree on
-    /// every node, typed or untyped (M4 plan D-13).
+    /// every node, typed or untyped.
     TypedElement { name: Option<QName>, test: ItemType },
     /// `attribute(*, T)` and `attribute(N, T)` — an `AttributeTest` with a
     /// TypeName (XPath 2.0 §2.5.4.5): "matches an attribute node whose name is
@@ -157,7 +161,7 @@ pub enum NodeTest {
     /// declared with, and it is not nilled unless that declaration is
     /// nillable. `members` are the expanded names of the other global element
     /// declarations in `N`'s substitution group, transitively — the names the
-    /// dispatch index files the rule under besides `N` (DESIGN §8.5), so that
+    /// dispatch index files the rule under besides `N`, so that
     /// a name-keyed bucket cannot miss a member; `test` decides the match.
     SchemaElement {
         name: QName,

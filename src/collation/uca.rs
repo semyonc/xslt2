@@ -1,5 +1,5 @@
 //! The UCA collations of F&O 3.1 §5.3.3 on ICU4X 1.5 (`icu_collator`, compiled
-//! CLDR data) — the `icu-collation` cargo feature (DESIGN §9.5, milestone M2k).
+//! CLDR data) — the `icu-collation` Cargo feature.
 //!
 //! > \[F&O 3.1 §5.3.3\] This family of URIs use the scheme and path
 //! > `http://www.w3.org/2013/collation/UCA` followed by an optional query part.
@@ -1548,7 +1548,7 @@ mod tests {
     /// before it at primary strength — in the root collation and in
     /// tailorings that reorder scripts or tailor many characters. (A wider
     /// check — 78 tailorings, all of Unicode, shifted and numeric variants —
-    /// is in `XSLT2_M2K_REVIEW2_FIXES.md`.)
+    /// was run once, outside the test suite.)
     #[test]
     fn u_ffff_has_the_greatest_primary_weight() {
         for query in [

@@ -1,5 +1,5 @@
-//! The XSLT half of the dynamic context (§5.4, §9.1) and the variable frame
-//! the compiler numbered slots in (§7.5).
+//! The XSLT half of the dynamic context (§5.4) and the variable frame
+//! the compiler numbered slots in.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -12,7 +12,7 @@ use crate::model::{ModeKey, RuleId};
 use crate::names::QName;
 use crate::receiver::Nav;
 
-/// A variable frame: slot-indexed, as the compiler numbered them (§7.5).
+/// A variable frame: slot-indexed, as the compiler numbered them.
 #[derive(Default)]
 pub struct Frame<'t> {
     slots: Vec<Option<XPathValue<Nav<'t>>>>,
@@ -34,14 +34,6 @@ impl<'t> Frame<'t> {
 
     pub fn get(&self, slot: usize) -> Option<&XPathValue<Nav<'t>>> {
         self.slots.get(slot).and_then(Option::as_ref)
-    }
-
-    pub fn len(&self) -> usize {
-        self.slots.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
     }
 }
 
@@ -105,7 +97,7 @@ impl CapturedSubstrings {
     }
 }
 
-/// The XSLT half of the dynamic context (§5.4, §9.1).
+/// The XSLT half of the dynamic context (§5.4).
 #[derive(Clone)]
 pub struct XsltContext<'t> {
     /// The focus: context item, position and size.
@@ -195,7 +187,7 @@ impl<'t> XsltContext<'t> {
         }
     }
 
-    /// The transitions of §9.1 that replace the focus: `xsl:for-each`,
+    /// The transitions that replace the focus: `xsl:for-each`,
     /// `xsl:apply-templates` and the built-in rules all set `current()` to the
     /// new focus item.
     pub(super) fn with_focus(&self, item: XmlItem<Nav<'t>>, position: usize, size: usize) -> Self {
