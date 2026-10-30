@@ -350,7 +350,11 @@ impl SchemaImport {
 }
 
 /// Where the schema document of an import comes from (§3.14).
+///
+/// New variants may be added in a minor release (`#[non_exhaustive]`): a
+/// `match` on it outside this crate needs a wildcard arm.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ImportSource {
     /// `schema-location`, resolved against the base URI of the declaration.
     Location(String),

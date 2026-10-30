@@ -1102,6 +1102,7 @@ fn the_context_lists_the_declarations_it_loaded() {
                 ImportSource::Location(uri) => format!("location {uri}"),
                 ImportSource::Inline { system_id } => format!("inline {system_id}"),
                 ImportSource::NamespaceOnly => "namespace".to_string(),
+                other => panic!("an import source this test does not know: {other:?}"),
             };
             (import.namespace(), source, import.found())
         })

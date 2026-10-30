@@ -689,8 +689,7 @@ fn a_named_template_can_be_the_entry_point() {
         .with_initial_template(QName::local("nope"));
     let error = run
         .transform_source("urn:test:in.xml", "<doc/>")
-        .err()
-        .expect("an undeclared initial template is an error");
+        .expect_err("an undeclared initial template is an error");
     assert_eq!(error.code, "XTDE0040");
 }
 

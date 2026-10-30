@@ -453,8 +453,7 @@ fn the_message_for_a_parameter_of_another_set_has_no_run_of_spaces() {
         .transformation(&arena, TransformOptions::default())
         .with_param(xslt2::QName::local("p"), value)
         .transform_source(SOURCE, "<doc/>")
-        .err()
-        .expect("refused");
+        .expect_err("refused");
     assert_eq!(e.code, xslt2::error::codes_internal::INTERNAL, "{e}");
     assert!(!e.message.contains("  "), "{:?}", e.message);
 }

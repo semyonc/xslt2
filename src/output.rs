@@ -19,7 +19,11 @@ pub use crate::serialize::{
 };
 
 /// The output method (§20, Serialization §3 `method`).
+///
+/// New variants may be added in a minor release (`#[non_exhaustive]`): a
+/// `match` on it outside this crate needs a wildcard arm.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OutputMethod {
     /// No `method` attribute: §20 chooses one from the tree being serialized.
     #[default]
@@ -70,6 +74,7 @@ impl OutputMethod {
 /// parameter is not set (is "absent")", but it still overrides a value of lower
 /// precedence (`output-0312`).
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct OutputDefinition {
     /// `method`.
     pub method: Setting<OutputMethod>,

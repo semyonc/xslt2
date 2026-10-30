@@ -413,7 +413,11 @@ pub struct ParamDecl {
 }
 
 /// Which mode an `xsl:apply-templates` applies, or an `xsl:template` serves.
+///
+/// New variants may be added in a minor release (`#[non_exhaustive]`): a
+/// `match` on it outside this crate needs a wildcard arm.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum ModeKey {
     /// The unnamed mode.
     Default,
@@ -1153,6 +1157,26 @@ pub struct CompiledStylesheet<'a> {
     /// §4.3: some module says `input-type-annotations="strip"`, so the annotations of every source
     /// tree are stripped.
     pub(crate) strip_input_annotations: bool,
+    /// The resolver the stylesheet's modules were read through (`Compiler::with_resolver`), which
+    /// every transformation of it reads documents through unless it is given another
+    /// (`Transformation::with_resolver`).
+    pub(crate) resolver: std::sync::Arc<dyn crate::resolver::Resolver>,
+}
+
+impl std::fmt::Debug for CompiledStylesheet<'_> {
+    /// The principal module's base URI and counts of what was compiled; never the instruction
+    /// tree or the declaration tables. The resolver is a placeholder.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledStylesheet")
+            .field("base_uri", &self.base_uri)
+            .field("modules", &self.module_uris.len())
+            .field("templates", &self.templates.len())
+            .field("stylesheet_functions", &self.functions_table.len())
+            .field("global_variables", &self.globals.len())
+            .field("schema_aware", &self.schema.is_some())
+            .field("resolver", &crate::Opaque("<dyn Resolver>"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> CompiledStylesheet<'a> {

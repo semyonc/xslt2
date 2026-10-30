@@ -51,10 +51,11 @@ use crate::error::{codes, XsltError};
 use crate::model::*;
 use crate::names::{QName, XSLT_NS};
 use crate::receiver::{ComplexContentNormalizer, Nav, Receiver, ResultBuilder};
-use crate::resolver::{FileResolver, Resolver};
+use crate::resolver::Resolver;
 use crate::store::{DocId, DocumentStore};
 
 /// What a caller can change about one run.
+#[derive(Debug)]
 pub struct TransformOptions {
     /// `xsl:template name="…"` to start from, instead of matching the initial
     /// context node.
@@ -63,12 +64,6 @@ pub struct TransformOptions {
     pub initial_mode: ModeKey,
     /// Signal recoverable errors instead of taking the spec's recovery action.
     pub strict_recoverable: bool,
-    /// A stack size for the host to pass to [`run_on_large_stack`].
-    ///
-    /// The transformation does not read it: [`run_on_large_stack`] takes its
-    /// size as an argument, and the stack guard learns the size of the thread
-    /// from there (see [`Self::stack_limit`]).
-    pub stack_size: usize,
     /// How deep template invocations and stylesheet-function calls may nest
     /// before the run is abandoned with an `XSLT2-INTERNAL` error.
     ///
@@ -214,7 +209,11 @@ pub struct TransformOptions {
 /// of the stylesheet's `SchemaContext` — its `xsl:import-schema` declarations and the schemas the
 /// host added (§3.13's implementation-defined mechanism); `xsi:schemaLocation` hints in the
 /// document are not followed. A document that is not valid is an error.
+///
+/// New variants may be added in a minor release (`#[non_exhaustive]`): a
+/// `match` on it outside this crate needs a wildcard arm.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SourceValidation {
     /// Not validated: the tree is untyped (every element `xs:untyped`, every attribute
     /// `xs:untypedAtomic`), as on a basic processor.
@@ -236,7 +235,6 @@ impl Default for TransformOptions {
             initial_template: None,
             initial_mode: ModeKey::Default,
             strict_recoverable: false,
-            stack_size: DEFAULT_STACK_SIZE,
             max_recursion_depth: DEFAULT_MAX_RECURSION_DEPTH,
             stack_limit: None,
             base_uri: None,
@@ -356,6 +354,11 @@ impl Drop for StackScope<'_> {
 }
 
 /// One `xsl:message` (§17).
+///
+/// New fields may be added in a minor release (`#[non_exhaustive]`): the run
+/// makes messages, a program reads them.
+#[derive(Debug)]
+#[non_exhaustive]
 pub struct Message {
     /// The message: the document the instruction's `select` attribute and
     /// content build, serialized as XML without an XML declaration.
@@ -373,6 +376,7 @@ pub struct Message {
 /// `xsl:result-document` created a tree at the base output URI — that tree
 /// (§2.4). Every other tree an `xsl:result-document` created is in
 /// [`secondary`](Self::secondary).
+#[non_exhaustive]
 pub struct Outcome<'t> {
     /// The primary result tree; `None` only when the initial template's result
     /// was empty, `xsl:result-document` was evaluated, and none of those
@@ -441,6 +445,26 @@ pub struct Outcome<'t> {
     pub(crate) primary_output: Option<crate::output::OutputDefinition>,
 }
 
+impl std::fmt::Debug for Outcome<'_> {
+    /// The result trees by their URIs and the number of messages; a tree is a placeholder.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let secondary: Vec<&str> = self
+            .secondary
+            .iter()
+            .map(|tree| tree.uri.as_str())
+            .collect();
+        f.debug_struct("Outcome")
+            .field(
+                "primary",
+                &self.primary.map(|_| crate::Opaque("<document>")),
+            )
+            .field("base_output_uri", &self.base_output_uri)
+            .field("secondary", &secondary)
+            .field("messages", &self.messages.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'t> Outcome<'t> {
     /// The **secondary** result tree whose URI is `uri`: a URI as in
     /// [`SecondaryResult::uri`] (resolved, not relative to anything), compared
@@ -486,6 +510,13 @@ enum GlobalSlot<'t> {
 }
 
 /// One run of a compiled stylesheet.
+///
+/// It reads documents — `document()`, `doc()`, `unparsed-text()`,
+/// [`transform_uri`](Self::transform_uri) — through the resolver its
+/// stylesheet was compiled with
+/// ([`Compiler::with_resolver`](crate::Compiler::with_resolver), by default
+/// [`FileResolver`](crate::FileResolver)) unless it is given another
+/// ([`with_resolver`](Self::with_resolver)).
 pub struct Transformation<'a, 't> {
     sheet: &'a CompiledStylesheet<'a>,
     store: RefCell<DocumentStore<'t>>,
@@ -561,8 +592,44 @@ pub struct Transformation<'a, 't> {
     warnings: RefCell<Vec<String>>,
 }
 
+/// For `Debug`: the length of what a `RefCell` of the run holds, or `<borrowed>` while it is
+/// borrowed mutably.
+struct CellLen<'c, T>(&'c RefCell<T>, fn(&T) -> usize);
+
+impl<T> std::fmt::Debug for CellLen<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0.try_borrow() {
+            Ok(value) => write!(f, "{}", (self.1)(&value)),
+            Err(_) => f.write_str("<borrowed>"),
+        }
+    }
+}
+
+impl std::fmt::Debug for Transformation<'_, '_> {
+    /// The stylesheet's base URI, the options, how many parameters and documents the run has; the
+    /// resolver and the message sink are placeholders.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Transformation")
+            .field("stylesheet", &self.sheet.base_uri())
+            .field("options", &self.options)
+            .field("params", &CellLen(&self.params, HashMap::len))
+            .field("documents", &CellLen(&self.store, DocumentStore::len))
+            .field("resolver", &crate::Opaque("<dyn Resolver>"))
+            .field(
+                "message_sink",
+                &self
+                    .message_sink
+                    .as_ref()
+                    .map(|_| crate::Opaque("<closure>")),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a> CompiledStylesheet<'a> {
-    /// A run of this stylesheet over `arena`.
+    /// A run of this stylesheet over `arena`, reading documents through the
+    /// resolver the stylesheet was compiled with
+    /// ([`Transformation::with_resolver`] gives it another).
     pub fn transformation<'t>(
         &'a self,
         arena: &'t Bump,
@@ -589,7 +656,7 @@ impl<'a> CompiledStylesheet<'a> {
             number_memos: RefCell::new(HashMap::new()),
             messages: RefCell::new(Vec::new()),
             params: RefCell::new(HashMap::new()),
-            resolver: Arc::new(FileResolver),
+            resolver: Arc::clone(&self.resolver),
             options,
             initial_root: RefCell::new(None),
             terminated: RefCell::new(false),
@@ -616,7 +683,12 @@ impl<'a, 't> Transformation<'a, 't> {
         self
     }
 
-    /// Where `document()` and `doc()` read from.
+    /// Where this run reads `document()`, `doc()` and `unparsed-text()`
+    /// targets and [`transform_uri`](Self::transform_uri) sources from.
+    ///
+    /// The default is the resolver the stylesheet was compiled with
+    /// ([`Compiler::with_resolver`](crate::Compiler::with_resolver);
+    /// [`FileResolver`](crate::FileResolver) for a compiler given none).
     pub fn with_resolver(mut self, resolver: Arc<dyn Resolver>) -> Self {
         self.resolver = resolver;
         self

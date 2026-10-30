@@ -63,8 +63,21 @@ pub struct Compiler<'a> {
     schema: Option<&'a SchemaContext>,
 }
 
+impl std::fmt::Debug for Compiler<'_> {
+    /// Which processor it is (and, schema-aware, the XML Schema version of its context); the
+    /// resolver is a placeholder.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Compiler")
+            .field("schema_aware", &self.schema.is_some())
+            .field("xsd_version", &self.schema.map(SchemaContext::xsd_version))
+            .field("resolver", &crate::Opaque("<dyn Resolver>"))
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a> Compiler<'a> {
-    /// A compiler that reads modules from the file system.
+    /// A compiler that reads modules from the file system ([`FileResolver`];
+    /// see [`with_resolver`](Self::with_resolver)).
     pub fn new(names: &'a NameTable, functions: &'a XsltFunctions) -> Self {
         Self {
             names,
@@ -84,6 +97,12 @@ impl<'a> Compiler<'a> {
     /// sees the set's types and declarations (§3.13). Compiling a stylesheet
     /// that imports something the context did not load is refused
     /// (`XSLT2-INTERNAL`).
+    ///
+    /// Like [`new`](Self::new), it reads modules from the file system unless
+    /// it is given a resolver ([`with_resolver`](Self::with_resolver)): as a
+    /// rule the one the context was built with
+    /// ([`SchemaContextBuilder::with_resolver`](crate::SchemaContextBuilder::with_resolver)),
+    /// which the context does not keep.
     pub fn schema_aware(context: &'a SchemaContext, functions: &'a XsltFunctions) -> Self {
         Self {
             names: context.names(),
@@ -98,13 +117,25 @@ impl<'a> Compiler<'a> {
         self.schema.is_some()
     }
 
-    /// Where `xsl:include`, `xsl:import` and `document()` read from.
+    /// Where the stylesheet's modules are read from — the principal module of
+    /// [`compile_uri`](Self::compile_uri) and [`compile_file`](Self::compile_file),
+    /// and every `xsl:include` and `xsl:import` — and, by default, where every
+    /// transformation of a stylesheet this compiler compiles reads `document()`,
+    /// `doc()` and `unparsed-text()` targets and [`Transformation::transform_uri`]
+    /// sources ([`Transformation::with_resolver`] gives one run another).
+    ///
+    /// Without it the compiler reads from the file system ([`FileResolver`]).
+    ///
+    /// [`Transformation::transform_uri`]: crate::Transformation::transform_uri
+    /// [`Transformation::with_resolver`]: crate::Transformation::with_resolver
     pub fn with_resolver(mut self, resolver: Arc<dyn Resolver>) -> Self {
         self.resolver = resolver;
         self
     }
 
-    /// The resolver this compiler was given, for a transformation to reuse.
+    /// The resolver this compiler reads modules through, which the
+    /// transformations of the stylesheets it compiles start with
+    /// ([`with_resolver`](Self::with_resolver)).
     pub fn resolver(&self) -> Arc<dyn Resolver> {
         Arc::clone(&self.resolver)
     }
@@ -152,7 +183,7 @@ impl<'a> Compiler<'a> {
             // D-1: the context must have been built from this stylesheet.
             crate::schema::check_coverage(context, &modules)?;
         }
-        builder.build()
+        builder.build(Arc::clone(&self.resolver))
     }
 }
 
@@ -326,7 +357,8 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         }
     }
 
-    fn build(&mut self) -> Result<CompiledStylesheet<'a>, XsltError> {
+    /// The compiled stylesheet, which keeps `resolver` — the compiler's — for its transformations.
+    fn build(&mut self, resolver: Arc<dyn Resolver>) -> Result<CompiledStylesheet<'a>, XsltError> {
         // §3.4: the element table first, over every module, so that a misplaced
         // element or a content model the spec does not allow is reported even
         // when it stands in a subtree nothing would compile (M2c).
@@ -411,6 +443,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             final_validation: self.module_validation[self.modules.principal.0 as usize].clone(),
             validates: self.validates.get(),
             strip_input_annotations: self.modules.strip_input_annotations,
+            resolver,
         })
     }
 }

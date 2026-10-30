@@ -19,7 +19,11 @@
 use crate::error::XsltError;
 
 /// One supported output encoding.
+///
+/// New variants may be added in a minor release (`#[non_exhaustive]`): a
+/// `match` on it outside this crate needs a wildcard arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Encoding {
     /// UTF-8.
     Utf8,

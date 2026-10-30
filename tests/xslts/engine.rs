@@ -547,6 +547,9 @@ fn method_name(method: xslt2::output::ResolvedMethod) -> &'static str {
         Xhtml => "xhtml",
         Html => "html",
         Text => "text",
+        // `ResolvedMethod` is non-exhaustive: a method a later version adds is no method the
+        // assertions know.
+        _ => "other",
     }
 }
 

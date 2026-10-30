@@ -51,7 +51,11 @@ pub(crate) const XQT_ERRORS_NAMESPACE: &str = xsd_schema::xpath::error::XQT_ERRO
 /// [`XsltError::code`] consults this first. The code of an error raised by the
 /// stylesheet is a name the stylesheet chose, and a stylesheet may choose
 /// `XSLT2-NOTIMPL`, `XSLT2-INTERNAL` or `XTMM9000` as easily as `boom`.
+///
+/// New variants may be added in a minor release (`#[non_exhaustive]`): a
+/// `match` on it outside this crate needs a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ErrorOrigin {
     /// The processor raised it, so its code is one this implementation chose
     /// and [`ErrorKind::of_code`] classifies it.
@@ -66,7 +70,11 @@ pub enum ErrorOrigin {
 }
 
 /// Error family, derived from the code prefix (§2.9 Error Handling).
+///
+/// New variants may be added in a minor release (`#[non_exhaustive]`): a
+/// `match` on it outside this crate needs a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ErrorKind {
     /// `XTSE`: static error, detected while compiling the stylesheet.
     Static,
@@ -105,7 +113,12 @@ impl ErrorKind {
 }
 
 /// Where an error was raised in the stylesheet.
+///
+/// New fields may be added in a minor release (`#[non_exhaustive]`): outside
+/// this crate a location is made with [`Location::new`] or
+/// `Location::default()`, not a struct literal.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct Location {
     /// The base URI of the stylesheet module; `None` when the module has
     /// none.
@@ -129,6 +142,7 @@ impl Location {
 
 /// An XSLT error: spec code + message + optional stylesheet location.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct XsltError {
     /// Spec error code, e.g. `"XTSE0010"`; XPath codes pass through
     /// (`"XPTY0004"`). For an error raised by `fn:error` this is the **local

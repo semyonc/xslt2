@@ -97,6 +97,19 @@ pub struct DocumentStore<'t> {
     next_ordinal: u32,
 }
 
+impl std::fmt::Debug for DocumentStore<'_> {
+    /// How many documents the store holds and the URIs they are known by; never a tree.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut uris: Vec<&str> = self.by_uri.keys().map(|uri| &**uri).collect();
+        uris.sort_unstable();
+        f.debug_struct("DocumentStore")
+            .field("documents", &self.docs.len())
+            .field("uris", &uris)
+            .field("schema_aware", &self.schema_set.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'t> DocumentStore<'t> {
     /// A store over the transformation's arena and name table.
     pub(crate) fn new(arena: &'t Bump, names: &'t NameTable) -> Self {

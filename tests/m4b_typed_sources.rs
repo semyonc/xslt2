@@ -380,8 +380,7 @@ fn a_basic_processor_refuses_to_validate_a_source() {
         let e = compiled
             .transformation(&arena, TransformOptions::default())
             .transform_source_with(SOURCE, ORDERS, validation)
-            .err()
-            .expect("refused");
+            .expect_err("refused");
         assert_eq!(e.code, codes::XTDE1665, "{e}");
     }
     let arena = Bump::new();
@@ -828,10 +827,7 @@ fn a_parameter_typed_against_another_set_is_refused() {
     let run = compiled
         .transformation(&arena, TransformOptions::default())
         .with_param(xslt2::QName::local("p"), value);
-    let e = run
-        .transform_source(SOURCE, "<doc/>")
-        .err()
-        .expect("refused");
+    let e = run.transform_source(SOURCE, "<doc/>").expect_err("refused");
     assert_eq!(e.code, xslt2::error::codes_internal::INTERNAL, "{e}");
     assert!(e.message.contains("another schema set"), "{}", e.message);
 }

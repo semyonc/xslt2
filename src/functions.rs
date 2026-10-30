@@ -176,6 +176,17 @@ impl Default for XsltFunctions {
     }
 }
 
+impl std::fmt::Debug for XsltFunctions {
+    /// How many XSLT function signatures (a name and an arity) the catalog adds, and the
+    /// collations it recognizes.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XsltFunctions")
+            .field("signatures", &self.names.len())
+            .field("collations", &self.collations)
+            .finish_non_exhaustive()
+    }
+}
+
 impl XsltFunctions {
     /// Registers a host collation under an absolute collation URI, for every
     /// stylesheet compiled against this set afterwards: `xsl:sort

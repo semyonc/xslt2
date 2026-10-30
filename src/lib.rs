@@ -21,7 +21,7 @@
 //! | run it | [`CompiledStylesheet::transformation`] makes a [`Transformation`], set up by [`TransformOptions`] and by [`Transformation::with_param`], [`with_initial_template`](Transformation::with_initial_template), [`with_initial_mode`](Transformation::with_initial_mode) ([`ModeKey`]), [`with_resolver`](Transformation::with_resolver) and [`with_message_sink`](Transformation::with_message_sink); [`transform_source`](Transformation::transform_source), [`transform_uri`](Transformation::transform_uri), [`transform_document`](Transformation::transform_document) and [`transform_without_source`](Transformation::transform_without_source) run it |
 //! | read the results | [`Outcome`]: the primary result, the [`SecondaryResult`]s of `xsl:result-document`, the [`Message`]s of `xsl:message` |
 //! | serialize them | [`CompiledStylesheet::serialize_primary`], [`serialize_secondary`](CompiledStylesheet::serialize_secondary) and their `_to_bytes` forms; the output definitions and the resolved serialization parameters are in [`output`] |
-//! | read stylesheet modules and documents | the [`Resolver`] trait, [`FileResolver`] (the default), [`MemoryResolver`]; URI helpers in [`resolver`] |
+//! | read stylesheet modules and documents | the [`Resolver`] trait, [`FileResolver`] (the default), [`MemoryResolver`]: [`Compiler::with_resolver`] for the stylesheet's modules and every run of it, [`Transformation::with_resolver`] for one run; URI helpers in [`resolver`] |
 //! | validate against schemas | [`SchemaContext`], built by a [`SchemaContextBuilder`] ([`SchemaImport`], [`ImportSource`], [`XsdVersion`]); [`SourceValidation`] for the source documents |
 //! | handle errors | [`XsltError`] with its [`ErrorKind`], [`ErrorOrigin`] and [`Location`]; the error codes in [`error::codes`] and [`error::codes_internal`] |
 //! | add collations | [`XsltFunctions::register_collation`] and the [`collation`] module |
@@ -177,10 +177,12 @@
 //!
 //! ## Resources from memory
 //!
-//! The compiler reads `xsl:include` and `xsl:import` modules, and a
-//! transformation reads `document()` and `doc()` targets, through a
-//! [`Resolver`]. [`MemoryResolver`] serves text given in advance, and can fall
-//! back to another resolver for everything else.
+//! The compiler reads `xsl:include` and `xsl:import` modules through a
+//! [`Resolver`], and every transformation of the compiled stylesheet reads
+//! `document()` and `doc()` targets through the same one, unless it is given
+//! another ([`Transformation::with_resolver`]). [`MemoryResolver`] serves text
+//! given in advance, and can fall back to another resolver for everything
+//! else.
 //!
 //! ```
 //! use std::sync::Arc;
@@ -208,12 +210,11 @@
 //! let names = NameTable::new();
 //! let functions = XsltFunctions::new();
 //! let sheet = Compiler::new(&names, &functions)
-//!     .with_resolver(resolver.clone())
+//!     .with_resolver(resolver)
 //!     .compile_uri("http://example.com/xsl/main.xsl")?;
 //! let arena = xslt2::bumpalo::Bump::new();
 //! let outcome = sheet
-//!     .transformation(&arena, TransformOptions::default())
-//!     .with_resolver(resolver) // for document()
+//!     .transformation(&arena, TransformOptions::default()) // document() reads from `resolver` too
 //!     .transform_source("urn:example:in", "<doc/>")?;
 //! assert_eq!(sheet.serialize_primary(&outcome)?, "<out>EUR</out>");
 //! # Ok::<(), xslt2::XsltError>(())
@@ -293,7 +294,7 @@
 //! };
 //!
 //! // A static error: an xsl:template with neither `match` nor `name` (§6.1).
-//! let error = compile("<xsl:template/>").err().expect("a static error");
+//! let error = compile("<xsl:template/>").unwrap_err();
 //! assert_eq!(error.code, codes::XTSE0500);
 //! assert_eq!(error.kind(), ErrorKind::Static);
 //! assert!(error.location.is_some());
@@ -308,8 +309,7 @@
 //! let error = sheet
 //!     .transformation(&arena, TransformOptions::default())
 //!     .transform_source("urn:example:in", "<doc/>")
-//!     .err()
-//!     .expect("the stylesheet raises an error");
+//!     .unwrap_err();
 //! assert_eq!(error.origin(), ErrorOrigin::Raised);
 //! assert_eq!(error.error_qname(), Some(("urn:example:errors", "no-total")));
 //! # Ok::<(), xslt2::XsltError>(())
@@ -438,6 +438,7 @@
 //! - deep recursion needs a large stack (above).
 
 #![warn(missing_docs)]
+#![warn(missing_debug_implementations)]
 
 pub mod collation;
 mod compile;
@@ -490,3 +491,14 @@ pub use xsd_schema::types::TimezoneOffset;
 pub use xsd_schema::xpath::functions::XPathValue;
 /// The version of XML Schema a [`SchemaContext`] implements ([`SchemaContextBuilder::xsd_version`]).
 pub use xsd_schema::XsdVersion;
+
+/// A placeholder in a `Debug` implementation, for a field whose value is not
+/// shown — a closure, a `dyn` object, a document tree: its text, as it is
+/// (`<dyn Resolver>`).
+pub(crate) struct Opaque(pub(crate) &'static str);
+
+impl std::fmt::Debug for Opaque {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}

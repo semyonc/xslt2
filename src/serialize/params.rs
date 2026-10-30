@@ -15,7 +15,11 @@ use crate::whitespace;
 pub(crate) const XHTML_NS: &str = "http://www.w3.org/1999/xhtml";
 
 /// One of the four methods Serialization specifies, after §20's default.
+///
+/// New variants may be added in a minor release (`#[non_exhaustive]`): a
+/// `match` on it outside this crate needs a wildcard arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ResolvedMethod {
     /// The XML output method (Serialization §5).
     Xml,
@@ -36,7 +40,11 @@ pub enum ResolvedMethod {
 /// `fully-normalized` is not (it needs the "relevant construct" analysis of XML
 /// 1.1 §2.13), so it is SESU0011 — which §5.1.8 allows, and which `output-0193`
 /// accepts beside SERE0012.
+///
+/// New variants may be added in a minor release (`#[non_exhaustive]`): a
+/// `match` on it outside this crate needs a wildcard arm.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Normalization {
     /// `none`: no normalization.
     #[default]
@@ -83,7 +91,11 @@ impl Normalization {
 
 /// The parameters one result tree is serialized with (Serialization §3), every
 /// default filled in.
+///
+/// New fields may be added in a minor release (`#[non_exhaustive]`): the
+/// stylesheet's output definitions make them, a program reads them.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SerializationParams {
     /// `method`: the output method, after §20's default.
     pub method: ResolvedMethod,

@@ -31,6 +31,7 @@ use crate::whitespace;
 /// Serialize it with `CompiledStylesheet::serialize_secondary` (or
 /// `serialize_secondary_to_bytes`), which applies [`output`](Self::output) and
 /// the tree's `disable-output-escaping` marks.
+#[non_exhaustive]
 pub struct SecondaryResult<'t> {
     /// The URI that identifies the tree: the effective value of `href`
     /// (whitespace-trimmed), resolved against the base output URI by RFC 3986
@@ -66,6 +67,17 @@ pub struct SecondaryResult<'t> {
     /// [`character_map_names`](OutputDefinition::character_map_names) lists
     /// them last — the order the map was built in, a later mapping winning.
     pub output: OutputDefinition,
+}
+
+impl std::fmt::Debug for SecondaryResult<'_> {
+    /// The tree's URI and its output method; the tree is a placeholder.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecondaryResult")
+            .field("uri", &self.uri)
+            .field("document", &crate::Opaque("<document>"))
+            .field("method", &self.output.method.get())
+            .finish_non_exhaustive()
+    }
 }
 
 /// What a run keeps about its final result trees.

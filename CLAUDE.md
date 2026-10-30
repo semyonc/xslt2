@@ -172,8 +172,11 @@ it are re-exported at the crate root.
 - **The public API is the façade in `src/lib.rs`**: the root re-exports and the four public modules (`error`,
   `collation`, `resolver`, `output`). Every other module is private; an item inside one may be `pub`, which only makes
   it visible to the crate. A new public item is re-exported from `src/lib.rs` (or added to a public module) on purpose
-  and documented: `#![warn(missing_docs)]` is on, and the count is 0. A test that needs an internal item is a unit test
-  in the module that owns it, not an integration test.
+  and documented: `#![warn(missing_docs)]` is on, and the count is 0. Every public type implements `Debug`
+  (`#![warn(missing_debug_implementations)]`; a manual impl shows URIs, counts and options, never a tree, and ends in
+  `finish_non_exhaustive()`). Public enums, and public structs whose fields a program only reads, are
+  `#[non_exhaustive]`; `TransformOptions` is not, because hosts build it with `..Default::default()`. A test that
+  needs an internal item is a unit test in the module that owns it, not an integration test.
 - **Error codes.** Every error carries a code: an Appendix E code of XSLT 2.0 (constants in `src/error/codes.rs`), or
   an XPath, F&O or serialization code passed through unchanged. `src/error/codes.rs` was generated from the
   specification, but the generator is not in the repository: keep its rustdoc escapes (`\[xsl:…\]`, `<URL>`) when

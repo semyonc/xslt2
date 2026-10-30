@@ -59,14 +59,15 @@ fn main() -> Result<(), XsltError> {
     let names = NameTable::new();
     let functions = XsltFunctions::new();
     let sheet = Compiler::new(&names, &functions)
-        .with_resolver(resolver.clone())
+        .with_resolver(resolver)
         .compile_uri("http://example.com/shop/main.xsl")?;
 
+    // Every run reads `document()` through the resolver the stylesheet was
+    // compiled with.
     for currency in ["EUR", "CHF"] {
         let arena = xslt2::bumpalo::Bump::new();
         let outcome = sheet
             .transformation(&arena, TransformOptions::default())
-            .with_resolver(resolver.clone())
             .with_param(QName::local("currency"), XPathValue::from(currency))
             .transform_source("urn:example:order", ORDER)?;
         print!("{}", sheet.serialize_primary(&outcome)?);
