@@ -1,414 +1,282 @@
 # xslt2
 
-Schema-aware XSLT 2.0 processor in Rust, built on the
-[`xsd-schema`](../xsd-schema) validator and its XPath 2.0 engine.
+`xslt2` is an XSLT 2.0 processor written in Rust, basic and schema-aware (XSLT 2.0 §21). It compiles stylesheets,
+runs them over XML documents, and serializes the results with the `xml`, `xhtml`, `html` and `text` output methods.
+It is built on [**xsd-schema**](https://github.com/semyonc/xsd-schema), an XML Schema 1.0 / 1.1 validator with an
+XPath 2.0 engine, which supplies the XPath evaluation, the data model and the validation. xsd-schema passes 39,461 of
+the 39,510 W3C XSD 1.0 tests, 2,313 of 2,319 XSD 1.1 tests and all 8,047 XQTS XPath 2.0 tests.
 
-Status: **M4 — schema-aware**, in progress (M1–M3 done; M4a, schema loading and the schema-aware mode, M4b,
-typed source documents, M4c, typed patterns, M4d, validation of constructed elements and attributes, M4e, copies
-and document-level validation, and M4f, type-driven and lax validation, done — see "Schema-aware mode" below). Stylesheets are loaded,
-compiled and run: the module graph with import precedence, the lexical static contexts of §5.4.1,
-template rules with the §6.4 priorities and conflict resolution, the built-in rules,
-`xsl:apply-imports` and `xsl:next-match`, variables and parameters (tunnel included), attribute
-value templates, attribute sets, the node constructors, `xsl:copy`/`xsl:copy-of`, `xsl:message`,
-`xsl:sort` / `xsl:perform-sort` with collations, `xsl:function`, `xsl:key` with `key()` and the `id()` /
-`key()` patterns, `xsl:for-each-group`, `xsl:analyze-string` with `regex-group()`, the XML, XHTML, HTML and text
-output methods with character maps and `disable-output-escaping`, `xsl:result-document` (secondary results are
-returned in memory, `Outcome::secondary`; nothing is written to disk), and `xsl:number` (every level, Unicode
-decimal-digit families, seventeen sequences of consecutive Unicode characters — circled, parenthesized, `1.`-style
-digits and the like —, English words and ordinals), `format-number` with `xsl:decimal-format` (exact
-`xs:decimal` / `xs:integer` digits, the shortest round-trip digits of a double or float, round-half-to-even), and
-`format-date`, `format-time` and `format-dateTime` (English names, the Gregorian `AD` and `ISO` calendars; any other
-language or calendar falls back to these with a `[Language: en]` / `[Calendar: AD]` prefix, as §16.5.2 requires).
-A `version="1.0"` stylesheet, module or element runs with the backwards-compatible behaviour of §3.8 (XPath 1.0
-compatibility mode, first-item attribute value templates and `xsl:value-of`, string-compared keys, …), and when the
-principal module's `xsl:stylesheet` says `version="1.0"` an XHTML result created implicitly is written with the
-`xml` method (§20). A module or element with a version above 2.0 runs with the forwards-compatible behaviour of §3.9:
-XSLT elements XSLT 2.0 does not allow at the top level are ignored with their content, unknown attributes are
-ignored, an XSLT element XSLT 2.0 does not allow in a sequence constructor is replaced by its `xsl:fallback`
-children (or is the static error without one), and an XPath static error in an expression or attribute value
-template is reported only if the expression is evaluated — except a call to a function that is not available, which
-stays static (§18.1.1), and errors in patterns. No extension instruction is implemented: one with `xsl:fallback`
-children evaluates them, one without is XTDE1450 when — and only when — it is evaluated, and `element-available()`
-answers false for it.
+## Install
+
+```toml
+[dependencies]
+xslt2 = "0.1"
+xsd-schema = "0.3"   # the name table a basic compiler borrows
+bumpalo = "3"        # the arena a transformation builds its trees in
+```
+
+[`xsd-schema` 0.3](https://crates.io/crates/xsd-schema) and `bumpalo` 3 come from crates.io. The minimum supported
+Rust version is 1.85. The API documentation is on [docs.rs](https://docs.rs/xslt2).
+
+## Quick start
+
+A stylesheet and a source document given as strings:
 
 ```rust
 use xsd_schema::namespace::NameTable;
 use xslt2::{Compiler, TransformOptions, XsltFunctions};
 
-let names = NameTable::new();
-let functions = XsltFunctions::new();
-let sheet = Compiler::new(&names, &functions).compile_file("report.xsl".as_ref())?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let names = NameTable::new();
+    let functions = XsltFunctions::new();
+    let sheet = Compiler::new(&names, &functions).compile_str(
+        r#"<xsl:stylesheet version="2.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+             <xsl:template match="/">
+               <total><xsl:value-of select="sum(//item/@price)"/></total>
+             </xsl:template>
+           </xsl:stylesheet>"#,
+        "urn:example:sheet", // the stylesheet's base URI
+    )?;
 
-let arena = bumpalo::Bump::new();
-let run = sheet.transformation(&arena, TransformOptions::default());
-let outcome = run.transform_uri("file:///tmp/in.xml")?;
-println!("{}", sheet.serialize_primary(&outcome)?);
-# Ok::<(), xslt2::XsltError>(())
+    let arena = bumpalo::Bump::new();
+    let run = sheet.transformation(&arena, TransformOptions::default());
+    let outcome = run.transform_source(
+        "urn:example:order",
+        r#"<order><item price="2.5"/><item price="4"/></order>"#,
+    )?;
+    assert_eq!(
+        sheet.serialize_primary(&outcome)?,
+        r#"<?xml version="1.0" encoding="UTF-8"?><total>6.5</total>"#
+    );
+    Ok(())
+}
 ```
+
+Files, and the extra result documents a stylesheet writes with `xsl:result-document`:
+
+```rust
+use std::path::Path;
+use xsd_schema::namespace::NameTable;
+use xslt2::{Compiler, TransformOptions, XsltFunctions};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let names = NameTable::new();
+    let functions = XsltFunctions::new();
+    let sheet = Compiler::new(&names, &functions).compile_file(Path::new("report.xsl"))?;
+
+    let arena = bumpalo::Bump::new();
+    let options = TransformOptions {
+        // The base output URI: `xsl:result-document href="…"` resolves against it.
+        base_output_uri: Some("file:///data/out/".into()),
+        ..Default::default()
+    };
+    let run = sheet.transformation(&arena, options);
+    let outcome = run.transform_uri("file:///data/in.xml")?;
+    println!("{}", sheet.serialize_primary(&outcome)?);
+    for result in &outcome.secondary {
+        // Every other result tree, in the order the instructions ran, under its absolute URI.
+        println!("{}: {}", result.uri, sheet.serialize_secondary(result)?);
+    }
+    Ok(())
+}
+```
+
+Nothing is written to disk: the transformation returns its result trees, and the caller serializes and stores them
+(`serialize_primary_to_bytes` and `serialize_secondary_to_bytes` apply the output encoding). The messages of
+`xsl:message` are in `outcome.messages`.
+
+## What is supported
+
+- **Stylesheets**: the module graph of `xsl:include` and `xsl:import` with import precedence, `use-when`, simplified
+  stylesheet modules, the static checks of every XSLT 2.0 element, and the error codes of the specification.
+- **Templates**: template rules with the §6.4 default priorities and conflict resolution, the built-in rules, modes,
+  `xsl:apply-imports`, `xsl:next-match`, named templates, variables and parameters (tunnel parameters included).
+- **Instructions**: the node constructors, literal result elements, attribute sets, attribute value templates,
+  `xsl:copy` / `xsl:copy-of`, `xsl:message`, `xsl:sort` / `xsl:perform-sort` with collations, `xsl:function`,
+  `xsl:key` with `key()` and the `id()` / `key()` patterns, `xsl:for-each-group`, `xsl:analyze-string` with
+  `regex-group()`, `xsl:result-document`, and `xsl:number` (every level, the decimal-digit families of Unicode,
+  seventeen sequences of consecutive Unicode characters such as circled and parenthesized digits, English words and
+  ordinals).
+- **Functions**: the XSLT 2.0 function library of §16 on top of the XPath 2.0 functions, including `format-number`
+  with `xsl:decimal-format` and `format-date`, `format-time` and `format-dateTime`.
+- **Output**: the `xml`, `xhtml`, `html` and `text` methods with character maps and `disable-output-escaping`, in
+  UTF-8, UTF-16, US-ASCII and ISO-8859-1.
+- **Backwards compatibility** (§3.8): a `version="1.0"` stylesheet, module or element runs with XPath 1.0
+  compatibility mode, first-item attribute value templates and `xsl:value-of`, and the 1.0 rules for `xsl:number`,
+  `xsl:sort` and keys; when the principal module says `version="1.0"`, an XHTML result created implicitly is written
+  with the `xml` method (§20).
+- **Forwards compatibility** (§3.9): in a module or element whose version is above 2.0, XSLT elements that 2.0 does
+  not allow at the top level are ignored with their content, unknown attributes are ignored, an unknown instruction
+  is replaced by its `xsl:fallback` children (or is the static error without one), and an XPath static error is
+  reported only if the expression is evaluated — except a call to a function that is not available, and errors in
+  patterns.
+- **Schema-aware processing** (§21.2): the next section.
 
 ## Schema-aware mode
 
-`Compiler::new` is a *basic* XSLT processor (§21.1: `xsl:import-schema` is XTSE1650, `[xsl:]type` and a
-`[xsl:]validation` / `default-validation` other than `strip` are XTSE1660). A *schema-aware* compilation (§21.2) is
-two steps: a caller-owned `SchemaContext`, built before the stylesheet compiles from a pre-scan of its
-`xsl:import-schema` declarations (by location, by namespace only — the XML and XLink namespaces' schemas are built in
-—, or inline), and `Compiler::schema_aware(&context, &functions)`, which compiles against the context's schema set
-and its name table:
+`Compiler::new` is a basic processor (§21.1): `xsl:import-schema` is XTSE1650, `[xsl:]type` and a `[xsl:]validation`
+or `default-validation` other than `strip` are XTSE1660. A schema-aware compilation is two steps: a caller-owned
+`SchemaContext`, built from a pre-scan of the stylesheet's `xsl:import-schema` declarations (by location, by namespace
+only, or inline; the schemas of the XML and XLink namespaces are built in) together with any schemas of the host's
+own, and `Compiler::schema_aware`, which compiles against that context's one schema set:
 
 ```rust
-let functions = XsltFunctions::new();
-let context = SchemaContext::builder()
-    .with_resolver(resolver.clone())
-    .stylesheet_file("report.xsl".as_ref(), &functions)?
-    .build()?;                                   // XTSE0215, XTSE0220 (and the module errors) here
-let sheet = Compiler::schema_aware(&context, &functions)
-    .with_resolver(resolver)
-    .compile_file("report.xsl".as_ref())?;
+use std::path::Path;
+use xslt2::{Compiler, SchemaContext, SourceValidation, TransformOptions, XsltFunctions};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let functions = XsltFunctions::new();
+    let context = SchemaContext::builder()
+        .stylesheet_file(Path::new("report.xsl"), &functions)? // its xsl:import-schema declarations
+        .schema_file(Path::new("orders.xsd"))                   // a schema of the host's own
+        .build()?;                                              // XTSE0220 for an invalid schema
+    let sheet = Compiler::schema_aware(&context, &functions).compile_file(Path::new("report.xsl"))?;
+
+    let arena = bumpalo::Bump::new();
+    let options = TransformOptions {
+        source_validation: SourceValidation::Strict, // also for doc() and document()
+        ..Default::default()
+    };
+    let run = sheet.transformation(&arena, options);
+    let outcome = run.transform_uri("file:///data/orders.xml")?;
+    println!("{}", sheet.serialize_primary(&outcome)?);
+    Ok(())
+}
 ```
 
-The imported types are in scope for every XPath expression and `as` attribute (`cast as`, `castable as`,
-`instance of`, constructor functions of user-defined atomic types), `type-available()` and
-`system-property('xsl:is-schema-aware')` answer as a schema-aware processor, and the static rules of `[xsl:]type`
-and `[xsl:]validation` (XTSE1505, XTSE1520, XTSE1530, XTSE0020) apply.
+- **Types in expressions**: the imported types are in scope for every XPath expression and `as` attribute (`cast as`,
+  `castable as`, `instance of`, the constructor functions of user-defined atomic types), and `type-available()` and
+  `system-property('xsl:is-schema-aware')` answer as a schema-aware processor's.
+- **Typed source documents**: `TransformOptions::source_validation` (`Skip`, the default, `Strict` or `Lax`) applies to
+  every source-tree loader, and `transform_source_with` or `set_source_validation` sets it per document. A validated
+  document is parsed and typed in one pass; its nodes atomize to typed values (keys, sort keys and grouping keys
+  compare typed values), whitespace in element-only content is not in the tree, defaulted attributes and element
+  default values are present (XDM 1.0 §6.2.4), `id()` and `idref()` find typed IDs and IDREFs, and an invalid document
+  is an error naming the offending nodes. `input-type-annotations="strip"` strips every source tree (§4.3).
+- **Validating what the stylesheet constructs**: `[xsl:]validation` (`strict`, `lax`, `preserve`, `strip`) and
+  `[xsl:]type` on literal result elements, `xsl:element`, `xsl:attribute`, `xsl:copy`, `xsl:copy-of`, `xsl:document`
+  and `xsl:result-document`, and `default-validation` (§19.2). Elements are validated as the tree is built, nested
+  validations innermost first; a document node is validated as a document (§19.2.2: one element child, and ID / IDREF
+  checks). The errors are XTTE1510, XTTE1512, XTTE1515, XTTE1540, XTTE1545, XTTE1550 and XTTE1555.
+- **Typed patterns**: `element(*, T)`, `element(N, T)`, `element(N, T?)`, `attribute(*, T)`, `attribute(N, T)`,
+  `schema-element(N)` (with its substitution group), `schema-attribute(N)` and `document-node(…)` in every pattern,
+  with the §6.4 priorities; a node matches exactly when `instance of` the same test is true.
+- **XML Schema 1.1**: a context is XML Schema 1.0, the version XSLT 2.0 refers to, unless built with
+  `SchemaContextBuilder::xsd_version(XsdVersion::V1_1)`. Then every schema document of the context is read as XML
+  Schema 1.1 (`xs:assert`, `xs:alternative`, open content …), validation evaluates assertions, and
+  `xs:dateTimeStamp` is in scope.
 
 **Implementation-defined choices** (§3.13 allows "mechanisms that allow additional schema components to be added to
-the in-scope schema components"): the host's own schemas join the stylesheet's imports in the one schema set (below),
-and the set can be XML Schema 1.1 (below). Every component of the set is in scope, so a name is usable even when no
-`xsl:import-schema` names its namespace (§3.14's rule that names are "not imported transitively" is not enforced). A
-`schema-location` whose document has another target namespace than the declaration is XTSE0220 — unless the set
-already has a schema document of that namespace (a host schema, an earlier import), in which case the location is a
-hint that is passed over (`SchemaImport::found()` is false; XML Schema 1.1 Part 1 §4.2.6.2 lets an application
-"ignore all but the first <import> for a given namespace"). The rule depends on order — an earlier import counts only
-when it was loaded first — and a document that an earlier import's own `xs:import` brings in does not count. Every
-location passed over, and every location that cannot be read (§3.14: "not intrinsically an error"), is reported in
-`SchemaContext::warnings()`.
-
-**Typed source documents** (M4b). The host can add schemas of its own to the context (§3.13's implementation-defined
-mechanism) and ask for source documents to be validated against the one schema set, as a default for every
-source-tree loader or per document:
-
-```rust
-let context = SchemaContext::builder()
-    .with_resolver(resolver.clone())
-    .stylesheet_file("report.xsl".as_ref(), &functions)?
-    .schema_file("orders.xsd".as_ref())          // a host schema, in scope for the stylesheet too
-    .build()?;
-let sheet = Compiler::schema_aware(&context, &functions).with_resolver(resolver).compile_file("report.xsl".as_ref())?;
-let arena = bumpalo::Bump::new();
-let options = TransformOptions { source_validation: SourceValidation::Strict, ..Default::default() };
-let run = sheet.transformation(&arena, options);        // doc() / document() validate too
-let outcome = run.transform_source_with("file:///in.xml", &xml, SourceValidation::Strict)?;
-```
-
-A validated document is parsed and typed in one pass; its nodes atomize to typed values (so keys, sort keys and
-grouping keys compare typed values; a union-typed node to the value of its member type), whitespace in element-only
-content is not in the tree (XDM 1.0 §6.7.4), defaulted attributes are attributes of their element and an empty
-element that takes its `default` / `fixed` value has it as its text (XDM 1.0 §6.2.4), an element whose typed value is
-an `xs:ID` is found by `id()` as an `xs:ID` attribute is, `idref()` finds the elements and attributes whose typed value
-holds an `xs:IDREF`, and an invalid document is an error naming the offending nodes. `Skip` (the default) leaves
-documents untyped, exactly as before. `input-type-annotations="strip"` strips the annotations of every source tree
-(§4.3; the defaults stay, and what `id()` and `idref()` find is unchanged), and `xsl:strip-space` spares elements with
-simple content (§4.4). A valid attribute or simple-content element has its whitespace normalized as its type says
-(XDM 1.0 §6.2.4, §6.3.4). A stylesheet module read with `document('')` is not validated by the transformation-wide
-default; `set_source_validation(uri, …)` sets the mode of any one URI.
-
-**Typed patterns** (M4c). Every pattern — `match` of `xsl:template` and `xsl:key`, `count` / `from` of `xsl:number`,
-`group-starting-with` / `group-ending-with` — may use the XPath 2.0 kind tests that name schema components:
-`element(*, T)`, `element(N, T)`, `element(N, T?)`, `attribute(*, T)`, `attribute(N, T)`, `schema-element(N)` (which
-matches the members of `N`'s substitution group too), `schema-attribute(N)`, and `document-node(…)` around an
-element test. A node matches exactly when `instance of` with the same test is true (XPath 2.0 §2.5.4: the type
-annotation must be the type or derive from it, a nilled element needs `T?`, an unvalidated element is `xs:untyped`
-and an unvalidated attribute `xs:untypedAtomic`), and the default priorities are §6.4's (0 for `element(*, T)` /
-`attribute(*, T)`, 0.25 for the forms with a name and for `schema-element` / `schema-attribute`; a `?` changes
-nothing). A type or declaration the stylesheet's schemas do not have is XPST0008; a basic processor accepts the
-built-in types (`element(*, xs:untyped)` matches every element of its untyped trees). Template rules of
-`schema-element(N)` are indexed under every name of the substitution group, so dispatch stays a hash lookup; a rule
-that matches by type only (`element(*, T)`) is tried for every element, like `*[…]`. `document-node(E)` matches a
-document node with exactly one element child, comments and processing instructions besides (XPath 2.0 §2.5.4.2).
-(The union member-type limit, C69, is fixed upstream on `wave-b` `cfe061e`.)
-
-**Constructed nodes** (M4d). `validation="strict"` on a literal result element or `xsl:element` validates the new
-element against the top-level declaration of its name, through `xsd-schema`'s streaming validation as the tree is
-built (§19.2.1.1): no such declaration is XTTE1512, an invalid element XTTE1510 (with nested validations, the innermost
-failure is the one reported); the validation annotates the element and everything in it, creates defaulted attributes
-and an empty element's default value (a QName in one is written with a prefix the element binds to its namespace,
-declared on it where none is — for an element's own default, below), sets
-nilled, makes the text of a valid simple-content element and the value of
-a valid attribute their normalized values, drops whitespace text in element-only content, and checks identity
-constraints but not ID uniqueness or dangling IDREFs (§19.2.1.3). Nested validations run innermost first, each
-validating what the ones inside it produced, and what they produced stays when the annotations go: `strip` around a
-validated element removes its annotations, not its defaults or normalized values. An element constructed in the
-content of `xsl:value-of`, `xsl:attribute`, `xsl:comment`, `xsl:processing-instruction` or `xsl:namespace`, or in an
-`xsl:message`, is validated the same way, and contributes its typed value (§5.7.2). `type`, `validation="strict"`
-and `validation="lax"` on `xsl:attribute` validate the new attribute (§19.2.1.1, §19.2.1.2): against the named type,
-or against the top-level declaration of the attribute's name (its type and its `fixed` value; with `lax`, no
-declaration means no validation); an invalid value is XTTE1540 / XTTE1510 / XTTE1515, a name with no top-level
-declaration under `strict` XTTE1512, a type built from `xs:QName` or `xs:NOTATION` XTTE1545. The valid attribute is annotated with the type and its string
-value is the normalized value. Whether an annotation stays is decided by the constructors around the node — the
-outermost one whose validation is not `preserve` decides: under `strip` (the default) everything is untyped (an
-`xs:ID` attribute or element still identifies its element for `id()`, an `xs:IDREF` one is still found by
-`idref()`), under `preserve` a new element is `xs:anyType` and what
-it contains keeps its annotations, under `strict` the validation's annotations stand. A variable's temporary tree is a
-`preserve` document (typed nodes sequenced into it keep their annotations, nilled and ids), and `default-validation`
-applies per module and, for the principal module, to the implicit final result tree. Upstream items it needed —
-the current `xml.xsd` (C71) and the defaults of local attribute declarations (C74) — are fixed on `wave-b` `cfe061e`.
-
-**Copies and documents** (M4e). `xsl:copy-of` applies its `validation` to each element, attribute and document node
-it selects (§11.9.2): `preserve` keeps every annotation, nilled, is-id and is-idrefs of what it copies; `strip` makes
-the copy untyped but keeps is-id and is-idrefs (an `xs:ID` attribute or element still identifies its element for
-`id()`, an `xs:IDREF` / `xs:IDREFS` one is still found by `idref()`); `strict` validates the copy
-of an element against the top-level declaration of its name — its descendants re-annotated by that validation —, of
-an attribute as `xsl:attribute validation="strict"` does, and of a document node as a document. `xsl:copy` of an
-element with `preserve` makes it `xs:anyType` (what its content constructs keeps its annotations), of an attribute
-keeps its annotation, and `strict` validates the new node. A `preserve` copy of a node whose typed value contains an
-`xs:QName` or `xs:NOTATION` is XTTE0950 with `copy-namespaces="no"`, and for an attribute copied without its parent
-always (§11.9.1). **Document-level validation** (§19.2.2) — `validation="strict"` on `xsl:document`,
-`xsl:result-document`, or a copy of a document node, in element content too: the document node must have exactly one
-element child, no text child, and any comments and processing instructions (XTTE1550); the element is validated
-against its top-level declaration (XTTE1512 / XTTE1510) and, unlike element-level validation, ID uniqueness and
-IDREF targets are checked (XTTE1555). The documents of variables and of `xsl:message` are not validated (an element
-validated in a message still is), and the implicit final result tree never is (`default-validation` is `preserve` or
-`strip`). The upstream limits the catalog met here — a union-typed node's member type (C79), an element typed `xs:ID`
-in the id index (C62), `fn:idref` (C54) — are fixed on `wave-b` `d5f2a8e`.
-
-**Type-driven and lax validation** (M4f). `[xsl:]type` on a literal result element, `xsl:element`, `xsl:copy`,
-`xsl:copy-of`, `xsl:document` and `xsl:result-document` validates the element against the named type, whatever its
-name and whether or not a declaration of the name exists (§19.2.1.2: the type is the "processor-stipulated type
-definition"); for a document node, its single element child (§19.2.2). An `xsi:type` on the element overrides the
-type only when it is validly derived from it (and not blocked); an abstract type needs a concrete `xsi:type`; the
-element is never nilled. Not valid is XTTE1540. A copied attribute is validated against the type with String Valid
-(a complex type is XTTE1540). `type="xs:untyped"` makes the element and its content untyped. `validation="lax"` on
-the same instructions validates an element against its top-level declaration when there is one; otherwise the element
-is not validated (`xs:anyType`; an `xsi:type` on it does not change that) but its attributes and children are, again
-laxly — an undeclared child is not validated either, whatever its `xsi:type` says, and a declared one is validated
-against its declaration; anything invalid is XTTE1515. On a document node `lax` and `type` are document-level validation (XTTE1550,
-XTTE1555 as for `strict`). Both use `xsd-schema`'s validation-root modes (C36, `ValidationRoot::{Type, Lax}`).
-`SourceValidation::Lax` for a source whose root has no declaration now runs too (lax wildcard validation; the root is
-unbound in the typed tree). The XPath 2.0 types of §3.13 work in an XML Schema 1.0 context too (below); `fn:idref`
-(C54), elements typed `xs:ID` in the id index (C62) and a union's member type (C79) are fixed on `wave-b` `d5f2a8e`.
-
-**XML Schema 1.1** (M4g). XSLT 2.0 refers to XML Schema 1.0, and a context is 1.0 unless asked otherwise:
-`SchemaContextBuilder::xsd_version(XsdVersion::V1_1)` builds its one schema set as an XML Schema 1.1 set — an
-implementation-defined extension (§3.13: "An implementation may define mechanisms that allow additional schema
-components to be added to the in-scope schema components"). Every schema document of the context (imported, inline,
-host) is then read as XML Schema 1.1 (`xs:assert`, `xs:alternative`, open content …), validation of sources and of
-constructed nodes is XML Schema 1.1 assessment with assertions evaluated (`ValidationFlags::PROCESS_ASSERTIONS`, upstream
-B9), and the set's built-in types include the XPath 2.0 types of §3.13 (`xs:anyAtomicType`, `xs:dayTimeDuration`,
-`xs:yearMonthDuration`) and `xs:dateTimeStamp`, which is then in scope with its constructor function (§3.13: "All
-other built-in types defined in [XML Schema Part 2]"; `xs:error` is a type of XML Schema 1.1 Part 1, not Part 2, and is
-not in scope). One version per context (M4 plan D-3); the XPath engine is the same.
-
-**The XPath 2.0 types in `[xsl:]type`.** `xs:untypedAtomic`, `xs:anyAtomicType`, `xs:dayTimeDuration` and
-`xs:yearMonthDuration` are in scope for every XSLT 2.0 processor (§3.13). `xsd-schema` has them as components of every
-schema set, of an XML Schema 1.0 set too (`SchemaSet::xpath_type`; its schema documents still cannot name them), so an
-element, document or attribute given one is validated against the type and annotated with it in either version:
-`element(*, xs:untypedAtomic)`, `data()`, `lt`, arithmetic, `sum` / `avg` / `min` / `max`, `xsl:sort` and typed
-patterns answer as XPath defines them. An attribute typed `xs:untypedAtomic` is exactly an unvalidated one. In a
-constructed tree an `xsi:type` may name them too (validation with `ValidationFlags::XPATH_TYPES`): under
-`xs:anyAtomicType` the other three replace it, `xs:anySimpleType` (its base type) does not (XTTE1540). A source
-document is validated as XML Schema validates it: there `xsi:type="xs:untypedAtomic"` does not resolve. (From M4g
-until the Wave B follow-up this crate worked around the missing components — stand-in types, a warning, the durations
-refused in a 1.0 context.)
-
-**An element default that needs a namespace declaration.** When the `default` or `fixed` value an empty element takes
-is a QName (or NOTATION, or a list or union holding one) whose namespace no prefix in scope binds, the prefix (`ns_dN`)
-is declared on the element, in the tree and for every validation outside the one that supplied the value. The value is
-known before the content (`xsd-schema`'s `element_value_constraint_for_type`), but whether the element takes it only at
-its end — and a namespace declaration on an element that then gets content would be a namespace node §5.7.3 does not
-allow ("a namespace node must not be added to the tree unless the namespace node is necessary"). So the start tag of
-exactly such an element is held until the element ends (its content is text, comments and processing instructions; an
-element child releases it); every other start tag goes on at once.
-
-**The implicit timezone** (`TransformOptions::implicit_timezone`): the timezone of `implicit-timezone()`,
-`current-dateTime()`, and of every comparison and subtraction of a date or time without one — in expressions and in the
-processor's own sorting, keys and grouping. Unset, it is the host's local offset, read once per transformation (§5.4.3:
-"current dateTime, implicit timezone … must be stable"). XML Schema 1.1 assertions evaluated during validation do not
-see it (they read the host's offset; upstream C103).
-
-**Deep recursion.** Recursive templates and stylesheet functions use the native stack. A run checks
-how much stack it has used and stops with a depth error instead of overflowing. On a thread
-whose stack size it cannot know — any thread the host started — it allows itself only
-`OTHER_THREAD_STACK_LIMIT` (1 MiB): safe on a default 2 MiB thread, but enough for only about a hundred
-nested template calls in a release build. For deep recursion, run the whole job (compile,
-transform, serialize — the compiled stylesheet and the arena are `!Send`) on a large stack with
-`xslt2::run_on_large_stack(xslt2::DEFAULT_STACK_SIZE, || …)` (256 MiB), or set
-`TransformOptions::stack_limit` for a thread whose stack size you know.
+the in-scope schema components"): the host's schemas join the stylesheet's imports in the one schema set, and the set
+may be XML Schema 1.1. Every component of the set is in scope, even when no `xsl:import-schema` names its namespace. A
+`schema-location` whose document has another target namespace than the declaration is XTSE0220, unless the set
+already has a schema document of that namespace, in which case the location is passed over as a hint. Every location
+passed over, and every location that cannot be read, is reported in `SchemaContext::warnings()`.
 
 ## Cargo features
 
-`icu-collation` (off by default) adds ICU4X 1.5's `icu_collator` with its compiled CLDR data (UCA 15.1) —
-the ICU4X line `regexml` already brings in, so nothing is built twice — and with it the UCA collations of
-F&O 3.1 §5.3.3, `http://www.w3.org/2013/collation/UCA?lang=…;strength=…` and the other parameters
-ICU4X 1.5 supports (all but `reorder`; `-u-` collation keywords in `lang` too), plus locale-tailored
-`xsl:sort lang` / `case-order`. ICU4X 1.5 exposes no collation elements, so under a UCA collation
-`contains()` and the other substring functions match collation-equal substrings cut at character
-boundaries (a contraction such as Slovak `ch` can be split, an expansion such as `ß` cannot). The
-search reads the collation data to tell which characters' weights cannot depend on their neighbours and
-narrows the candidates with it, so ordinary text of 100,000 characters is searched in milliseconds; a long
-run of characters that chain into contractions or prefix contexts (Danish `aaaa…`, Japanese `カーカー…`)
-is searched candidate by candidate within a work budget of about a second, beyond which the function
-raises FOCH0004 rather than answer late. `xsl:sort case-order` with a `lang` asking for primary or
-secondary strength (`-u-ks-level1`, `-u-ks-level2`) switches on a case level, so case is ordered as asked
-while accents stay as the language wants them. Without the feature the built-in collations are
-codepoint and HTML ASCII case-insensitive (plus any the host registers), a UCA URI reports
-`XSLT2-NOTIMPL`, and `xsl:sort lang` / `case-order` use a dependency-free case-order collation.
+`icu-collation` (off by default) adds ICU4X 1.5's `icu_collator` with its compiled CLDR data, and with it the UCA
+collations of F&O 3.1 §5.3.3 (`http://www.w3.org/2013/collation/UCA?lang=…;strength=…` and the other parameters
+ICU4X 1.5 supports: all but `reorder`; `-u-` collation keywords in `lang` too) and locale-tailored `xsl:sort lang` /
+`case-order`. A parameter a UCA URI leaves out takes the language's CLDR default (`UCA?lang=th` ignores spaces and
+punctuation, `UCA?lang=fr-CA` compares accents backwards, `UCA?lang=da` sorts upper case first). Under a UCA collation
+`contains()` and the other substring functions match collation-equal substrings cut at character boundaries, and give
+up with FOCH0004 after a work budget of about a second on pathological input.
 
-A parameter a UCA URI leaves out takes the language's default where CLDR tailors one: `UCA?lang=th`
-ignores spaces and punctuation up to the tertiary level (Thai is `alternate=shifted`), `UCA?lang=fr-CA`
-compares accents backwards, `UCA?lang=da` sorts upper case first.
+**Enabling the feature changes existing results**, not only adds new ones: `xsl:sort lang="…"` or `case-order`
+without a `collation` attribute then sorts with the language's UCA tailoring instead of the built-in case-order
+collation — `('f', 'é', 'e')` with `lang="en"` sorts `e, f, é` without the feature and `e, é, f` with it. Cargo
+unifies features across a build, so if any crate in a build enables `icu-collation` on `xslt2`, every user of
+`xslt2` in that build gets it.
 
-**Enabling the feature changes existing results**, not only adds new ones: `xsl:sort lang="…"` or
-`case-order` without a `collation` attribute sorts with the language's UCA tailoring instead of the
-case-order collation — `('f', 'é', 'e')` with `lang="en"` sorts `e, f, é` without the feature and
-`e, é, f` with it. Cargo unifies features across a build, so if any crate in a build enables
-`icu-collation` on `xslt2`, every user of `xslt2` in that build gets it.
+## Known limits
 
-```bash
-cargo test --features icu-collation
-cargo test --release --features icu-collation --test xslts -- -s ../../xslt30-test --skip unicode-90
-```
+- **Results stay in memory.** Secondary result documents are returned in `Outcome::secondary` and nothing is written
+  to disk. Every result tree and every temporary tree costs about 118 KB of the transformation's arena however small
+  it is, kept until the arena is dropped, so tens of thousands of result documents need gigabytes.
+- **No extension instructions.** An extension instruction with `xsl:fallback` children evaluates them; one without is
+  XTDE1450 when, and only when, it is evaluated; `element-available()` answers false for it.
+- **English and Gregorian formatting.** `xsl:number` writes words and ordinals in English whatever `lang` says (the
+  §12.3 fallback). `format-date`, `format-time` and `format-dateTime` write English names in the Gregorian `AD` and
+  `ISO` calendars; any other language or calendar falls back to these with a `[Language: en]` or `[Calendar: AD]`
+  prefix, as §16.5.2 requires.
+- **Collations without `icu-collation`.** The built-in collations are the Unicode codepoint collation and HTML ASCII
+  case-insensitive, plus any the host registers; a UCA collation URI is the error `XSLT2-NOTIMPL`, and
+  `xsl:sort lang` / `case-order` use a built-in case-order collation.
+- **Output encodings.** UTF-8, UTF-16, US-ASCII and ISO-8859-1; any other is SESU0007.
+- **Deep recursion.** Templates and stylesheet functions recurse on the native stack. A run measures the stack it
+  uses and stops with an error instead of overflowing; on a thread whose stack size it cannot know it allows itself
+  1 MiB (`OTHER_THREAD_STACK_LIMIT`), about a hundred nested template calls in a release build. Run a deeply
+  recursive job whole (compile, transform, serialize) inside
+  `xslt2::run_on_large_stack(xslt2::DEFAULT_STACK_SIZE, || …)` (256 MiB), or set `TransformOptions::stack_limit` for a
+  thread whose stack you know.
+- **The `unicode-90` test-set** is left out of the figures below: it checks regular-expression character classes
+  against every code point and runs for about 25 minutes, and its cases compare Unicode 9.0 data with the regex
+  engine's Unicode 15.1 tables, the same version difference that excludes the `regex-classes` cases.
 
 ## Conformance
 
-The XSLT 2.0 test suite (XSLTS 1.0.4) was never published; the public W3C XSLT 3.0 suite
-(https://github.com/w3c/xslt30-test, checked out at `../../xslt30-test`) marks the cases an
-XSLT 2.0 processor must run (`spec` = `XSLT20+`, `XSLT20`, `XSLT10+`, or absent).
+The XSLT 2.0 test suite was never published. The cases of the public
+[W3C XSLT 3.0 test suite](https://github.com/w3c/xslt30-test) that apply to an XSLT 2.0 processor (`spec` dependency
+`XSLT10+`, `XSLT20`, `XSLT20+`, `XSLT10 XSLT20`, or none) are the measure. Suite commit `fddf1cf`, the `unicode-90`
+test-set left out (`--skip unicode-90`):
 
-Whole applicable suite, minus the 1,460-case `unicode-90` set (see below):
+| | basic | basic, `icu-collation` | schema-aware | schema-aware, XML Schema 1.1 |
+|---|---:|---:|---:|---:|
+| XSLT 2.0-applicable | 6,619 | 6,619 | 6,619 | 6,619 |
+| excluded (documented) | 64 | 64 | 76 | 76 |
+| not run (a dependency not satisfied) | 763 | 763 | 200 | 201 |
+| runnable | 5,792 | 5,792 | 6,343 | 6,342 |
+| pass | **5,762** | **5,764** | **6,313** | **6,312** |
+| fail | 25 | 25 | 25 | 25 |
+| wrongError | 0 | 0 | 0 | 0 |
+| harnessError | 3 | 3 | 3 | 3 |
+| notImplemented (`XSLT2-NOTIMPL`) | 2 | 0 | 2 | 2 |
+| pass rate (pass / runnable) | 99.48% | 99.52% | 99.53% | 99.53% |
+| headline (basic profile, non-regex) | 4,287 / 4,313 = 99.40% | 4,289 / 4,313 = 99.44% | 4,271 / 4,297 = 99.39% | 4,271 / 4,297 = 99.39% |
+| cases that need a schema-aware processor | — | — | 567 / 567 | 569 / 569 |
 
-| | |
-|---|---|
-| XSLT 2.0-applicable | 6,619 |
-| excluded (documented in `tests/xslts/filter.rs`) | 64 |
-| runnable (dependencies satisfied) | 5,792 |
-| pass | 5,760 |
-| fail / wrongError / harnessError | 27 / 0 / 3 |
-| not implemented (`XSLT2-NOTIMPL`: M2k without its feature) | 2 |
-| pass rate over runnable | 99.45% |
-| headline (basic profile, non-regex families) | 4,285 / 4,313 = **99.35%** |
+- **Headline**: the runnable cases that need no optional feature (no schema-awareness, backwards compatibility or
+  serialization), outside the regular-expression and Unicode test-sets (`regex`, `regex-classes`, `regex-syntax`,
+  `regex-syntax-xslt20`), which exercise the regex engine more than XSLT.
+- The 25 failures and the 3 harness errors are the same cases in all four runs. The harness errors are cases whose
+  initial context item is a node inside the source document, where the public API starts only at a document node.
+  The 2 notImplemented cases use a UCA collation, which needs `icu-collation`.
+- **Excluded**: cases whose expected result is wrong for a conformant XSLT 2.0 processor (XSLT 3.0 syntax or
+  behaviour in a 2.0 stylesheet, results that §4.2, §4.4, §5.7.3 or §6.6 rule out), or pins a choice the specification
+  leaves to the implementation, including 32 regular-expression cases that pin an older Unicode version. Every entry
+  of `EXCLUDED` in [`tests/xslts/filter.rs`](https://github.com/semyonc/xslt2/blob/main/tests/xslts/filter.rs) quotes the text that makes it so; the schema-aware runs add 12 schema-aware
+  cases.
+- **Not run** in the basic run: 584 cases that need a schema-aware processor, 61 that need DTD processing, 44 that
+  need XML 1.1, 18 that need the `xsl-stylesheet` processing instruction, 12 that expect a recoverable error to be
+  signalled (`on-multiple-match=error`; this processor recovers by default), and 44 whose other dependencies (optional
+  features, implementation-defined choices) this processor does not match.
+- `assert-xml` is compared as the catalog defines it, by Canonical-XML equivalence: prefixes and in-scope namespaces
+  are significant unless the assertion says `ignore-prefixes="true"`. The harness pins the implicit timezone to UTC,
+  the catalog's assumption.
 
-With `--features icu-collation` the two M2k cases pass too: 5,762. (Figures since M4g's fix round 1, 2026-10-25, are
-taken with the harness's implicit timezone pinned to UTC; before, under the host's CEST, `date-012` failed: 5,759 and
-5,761.)
-
-**Schema-aware run** (`--schema-aware`: the 584 cases that need a schema-aware processor become runnable and the 16
-that need a basic one are not run; every case is compiled schema-aware, against the stylesheet's imports and the
-environment's schemas, and every source is validated as the catalog says): 6,313 of 6,343 runnable pass, the
-schema-aware profile 567 of 567 — `validation-0108`, which needs `xs:untypedAtomic` as a type of an XML Schema 1.0 set,
-passes since the Wave B follow-up (upstream C72; on `xsd-schema` `wave-b` `9b2be85`, 2026-10-27; 566 after M4g, 12
-schema-aware cases excluded with citations in `tests/xslts/filter.rs`, pending the user's decision; 562 after M4g
-part 1, 561 after the batch (t) follow-up, 537 after M4f, 420 after M4e, 377 after M4d, 274 after M4c, 217 after M4b,
-120 after M4a, 51 before), and every basic case keeps its status; the 2 not implemented are M2k's. With `--xsd11`
-(every schema context XML Schema 1.1, the `XSD_1.1` cases runnable): 6,312 of 6,342, the profile 569 of 569. An exclusion applies
-only to a case the configuration runs, so the default run is unchanged by them. An `assert` over a primary result tree that carries type annotations is evaluated on the tree
-itself (the catalog: "with the document node of the result document as the context item"; a re-parse of the
-serialization would be untyped), every other one over the re-parse.
-
-`assert-xml` is compared the way the catalog defines it — Canonical-XML equivalence: element and
-attribute prefixes and the in-scope namespaces of every element are significant unless the
-assertion says `ignore-prefixes="true"`. `--lenient-xml` switches that off for triage; a failure
-that exists only under the strict comparison starts with `assert-xml namespace mismatch:`
-(`attribute-0004`, which pins an invented prefix that §5.7.3 leaves implementation-dependent, is excluded). Figures
-were first taken on 2026-09-19, after the M1 review fixes (`../../XSLT2_M1_REVIEW_FIXES.md`) and the M2a groundwork
-(`../../XSLT2_M2A_REPORT.md`), which re-labelled 114 cases from "fail" to "not implemented": they
-need `format-number` / `format-date`, which were stubs until M3d. They are measured against the
-sibling `../xsd-schema` checkout with its current additive XPath fixes (navigation, `/` evaluation,
-operator errors, regex dialect, string literals, linear general comparison): 3,977 → 4,160; M2b
-(namespace correctness) and M2c (one table-driven static-checking pass, `src/compile/checks.rs`) then
-took it to 4,297, and two further upstream fixes (`fn:deep-equal` on namespace nodes, atomization of a
-namespace node) to 4,299. The 0.2.1 release fixes, M2i (core defects in what M1 delivered,
-`../../XSLT2_M2I_REPORT.md`) and M2j (harness fixes and documented exclusions, `../../XSLT2_M2J_REPORT.md`)
-took it to 4,369 of 5,725 on 2026-10-04: 26 cases whose expectation is wrong for an XSLT 2.0 processor are
-excluded with the spec text that says so, and 3 are harness errors until the public API can start a
-transformation at a node other than the document. M2d (sorting: `xsl:sort`, `xsl:perform-sort` and the collation
-registry, `../../XSLT2_M2D_REPORT.md`) took it to 4,522, and M2e (`xsl:function`, `../../XSLT2_M2E_REPORT.md`; four
-more documented exclusions) to 4,628, and M2f (`xsl:key`, `key()`, `id()` / `key()` patterns,
-`../../XSLT2_M2F_REPORT.md`) to 4,786 of 5,721 on 2026-10-04; M2l (pattern predicates decided per candidate, a
-performance change) kept it there, and M2g (`xsl:for-each-group`, `../../XSLT2_M2G_REPORT.md`; two more documented
-exclusions) took it to 4,864 of 5,719 on 2026-10-08, and M2h (`xsl:analyze-string`, `regex-group()`,
-`../../XSLT2_M2H_REPORT.md`) to 5,013 of 5,690 on 2026-10-10 — 29 `misc/regex-classes` general-category cases are
-excluded because their reference results pin Unicode 3.1 / 5.2 / 6.0 and the regex backend implements Unicode 15.1.
-On 2026-10-11 the harness began to evaluate assertions about the result tree as the catalog defines them —
-on a serialization with the default parameters (method xml, indent no), not on the stylesheet's indented
-output (`../../XSLT2_HARNESS_RESULT_TREE_REPORT.md`): 5,014 of 5,689 (`for-each-group-081a` passes;
-`for-each-group-085` is excluded — its expected result drops source whitespace that §6.6 and §4.4 keep). M3a
-(serialization: the `xml`, `xhtml`, `html` and `text` methods, character maps, `disable-output-escaping`,
-`../../XSLT2_M3A_REPORT.md`) took it to 5,181 of 5,688 the same day (`character-map-026`, an XSLT 3.0 case, is
-excluded), M3b (`xsl:result-document`, `../../XSLT2_M3B_REPORT.md`) to 5,286 on 2026-10-12, and M3c
-(`xsl:number`, `../../XSLT2_M3C_REPORT.md`) to 5,455 on 2026-10-13, and its follow-up (seventeen numbering sequences of
-consecutive code points; the harness now asks the processor about the `combinations_for_numbering` dependency and
-its `range`, `../../XSLT2_M3C_FOLLOWUP_REPORT.md`) to 5,560 of 5,793 the same day. M3d (`format-number`,
-`xsl:decimal-format`, `format-date` / `-time` / `-dateTime`, `../../XSLT2_M3D_REPORT.md`) took it to 5,747 on
-2026-10-14: every one of the 187 cases the formatting functions held back passes (5,748 on `xsd-schema` 0.2.3). M3e
-(backwards-compatible attribute value templates, adjacent text nodes merged in simple content, extension instructions
-and forwards-compatible processing, `../../XSLT2_M3E_REPORT.md`) took it to 5,755 of 5,792 on 2026-10-15
-(`next-match-039`, whose expected result is XSLT 3.0's, is excluded); every remaining failure has an owner in that
-report. `xsd-schema` Wave B batch (a) (the `wave-b` branch: `xs:QName` / `xs:NOTATION` values convert to their
-lexical form) took it to 5,758 on 2026-10-18 (`element-0308`, `message-0306`, `type-0143`), and M4a (schema loading and
-the schema-aware mode, `../../XSLT2_M4A_REPORT.md`) to 5,759 on 2026-10-20: `import-schema-191`, which expects a basic
-processor to reject `xsl:import-schema` with XTSE1650.
-
-The sixteen test-sets M1 targets:
-
-| test-set | runnable | pass | fail | wrongErr | harnessErr | notImpl | rate |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| template | 6 | 6 | 0 | 0 | 0 | 0 | 100.0% |
-| built-in-templates | 4 | 4 | 0 | 0 | 0 | 0 | 100.0% |
-| choose | 54 | 53 | 0 | 0 | 0 | 1 | 98.1% |
-| call-template | 35 | 34 | 0 | 0 | 1 | 0 | 97.1% |
-| lre | 26 | 26 | 0 | 0 | 0 | 0 | 100.0% |
-| variable | 101 | 101 | 0 | 0 | 0 | 0 | 100.0% |
-| include | 14 | 13 | 1 | 0 | 0 | 0 | 92.9% |
-| apply-templates | 36 | 36 | 0 | 0 | 0 | 0 | 100.0% |
-| element | 19 | 18 | 1 | 0 | 0 | 0 | 94.7% |
-| version | 33 | 33 | 0 | 0 | 0 | 0 | 100.0% |
-| param | 25 | 25 | 0 | 0 | 0 | 0 | 100.0% |
-| attribute | 21 | 21 | 0 | 0 | 0 | 0 | 100.0% |
-| copy | 70 | 68 | 2 | 0 | 0 | 0 | 97.1% |
-| sequence | 87 | 87 | 0 | 0 | 0 | 0 | 100.0% |
-| message | 26 | 24 | 2 | 0 | 0 | 0 | 92.3% |
-| output | 137 | 137 | 0 | 0 | 0 | 0 | 100.0% |
-
-`output` passes in full since M3a (serialization) and M3b (`xsl:result-document`).
+## Running the conformance harness
 
 ```bash
-cargo test --test xslts --release                       # whole applicable suite
-cargo test --test xslts --release -- -g value-of -f     # one test-set, failures only
-cargo test --test xslts --release -- --stub             # the M0 stub engine
-cargo test --test xslts --release -- --report /tmp/x.xml
-cargo test --test xslts --release -- -l                 # list test-sets and counts
-cargo test --test xslts --release -- --self-test        # the harness's own checks
+git clone https://github.com/w3c/xslt30-test ../../xslt30-test    # where the harness looks; -s PATH for elsewhere
+cargo test --release --test xslts -- --skip unicode-90                      # basic
+cargo test --release --features icu-collation --test xslts -- --skip unicode-90
+cargo test --release --test xslts -- --skip unicode-90 --schema-aware       # schema-aware
+cargo test --release --test xslts -- --skip unicode-90 --schema-aware --xsd11
+cargo test --release --test xslts -- --skip unicode-90 --report new.xml      # W3C results format
+python3 tools/suite_diff.py old.xml new.xml                                  # per-case differences
+cargo test --release --test xslts -- --help                                  # every option
 ```
 
-The harness runs with the implicit timezone pinned to UTC, the value the catalog assumes ("we currently assume that an
-absent timezone means UTC"): every case's transformation gets `TransformOptions::implicit_timezone` UTC, and the
-harness also sets `TZ=UTC` for its process, as a guard for the XPath evaluated outside a transformation (the harness's
-own `assert`s, XML Schema 1.1 assertions during validation, `use-when`); `--host-timezone` keeps the host's for both.
-Without the pin a case such as `date-012`, which compares an `xs:dateTime` without a timezone with one at `+02:00`,
-would pass or fail by where and when the suite runs.
+Always build the harness with `--release` (a debug build skips it) and pass `--skip unicode-90` (see Known limits).
+The suite path is relative to this crate's root: `../../xslt30-test`. `--schema-aware` runs the cases that need a
+schema-aware processor and compiles every case with one; `--xsd11` adds the cases that need XML Schema 1.1 and builds
+every schema context as 1.1. `tools/suite_diff.py` lists every case whose status or failure message differs between two
+reports.
 
-`unicode-90` is left out of the figures above with `--skip unicode-90`. Its 1,444 XSLT 2.0 cases check a
-Unicode general category against every code point: `$validrange[not(. = $c)]` compares each of the
-1.1 million legal code points with the category's code points read from a source of up to 51 MB. That
-general comparison used to take 30–60 s per case; `xsd-schema` now builds the comparison index once and
-reuses it across the evaluations of a loop-invariant operand (Wave A, A-5), and caches compiled regular
-expressions (A-6), so 37 of the 38 `Ll` cases take 0.2–5 s each. The set is still skipped because of its size and one shape: the
-cache lives for one XPath evaluation, and six of the 38 modes call `matches()` from an `xsl:if` inside an
-`xsl:for-each` over up to 1.1 million code points — one evaluation, and so one compilation of the pattern, per
-item. With the pattern of `fn-matches20` (four `\P{…}` escapes, two of them in classes, and a back-reference) that is about 60 µs per item,
-90% of it compiling (`unicode90-Ll-020`: 64 s; the same million calls inside one expression, `unicode90-Ll-009`,
-take 1 s). That is a performance limit, not a conformance answer (M3e report; Wave B P11). The other 16 cases use
-XPath 3.0 syntax and are excluded. The set is in the `misc/regex` family, outside the headline denominator.
+## Licence
 
-Dependency policy: `tests/xslts/filter.rs`. Assertion semantics: `tests/xslts/compare.rs`
-(`assert` XPaths are evaluated with the `xsd-schema` engine over the re-parsed result). The
-engine adapter is `tests/xslts/engine.rs`, and it uses only the public API.
-
-## Design and reference material (workspace root, outside this repository)
-
-- `xslt_doc/XSLT2_DESIGN.md` — the architecture (start here)
-- `xslt_doc/XSLT2_ROADMAP.md` — current status, milestones M0–M5, working method, open questions Q1–Q43
-- `xslt_doc/XSLT2_LOG.md` — review history; `XSLT2_DESIGN_SKETCH.md` is the frozen original these three replaced
-- `XSLT2_M1_REPORT.md` — what M1 built, the classified failures, the upstream changes
-- `XSLT2_FEASIBILITY.md` — the original feasibility memo
-- `xslt20.html` — W3C XSLT 2.0 (Second Edition), the source of truth; cite sections as §N.N
+Licensed under either of the Apache License, Version 2.0
+([LICENSE-APACHE](https://github.com/semyonc/xslt2/blob/main/LICENSE-APACHE)) or the MIT licence
+([LICENSE-MIT](https://github.com/semyonc/xslt2/blob/main/LICENSE-MIT)), at
+your option (`MIT OR Apache-2.0`).
