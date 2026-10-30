@@ -233,7 +233,7 @@ impl<'a, 't> Transformation<'a, 't> {
             }
             GlobalSlot::Unevaluated => {}
         }
-        // Q33: a global's value may read another global — or call `key()`,
+        // A global's value may read another global — or call `key()`,
         // whose build may read a third — with no template invocation or
         // function call in between, so a long enough chain would overflow the
         // stack. After the circularity test, so that XTDE0640 stays XTDE0640;

@@ -414,7 +414,7 @@ impl XsltFunctions {
 
         // ── §16.4 format-number, §16.5 the date formatting functions ─────
         //
-        // Implemented by `runtime/format.rs` (M3d).
+        // Implemented by `runtime/format.rs`.
 
         // §16.4:
         //   format-number($value as numeric?, $picture as xs:string)
@@ -1020,9 +1020,9 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
             // consulted and there is nothing to report — `empty(doc(()))` is
             // true in a `use-when` expression as it is anywhere else.
             //
-            // (F&O is not available locally; this is the wording from memory,
-            // corroborated by XQTS 1.0.2 `fn-doc-4`, whose whole query is
-            // `fn:count(fn:doc(()))` with the expected result `0`.)
+            // (F&O 1.0 Second Edition §15.5.4: "If $uri is the empty sequence,
+            // the result is an empty sequence." XQTS 1.0.2 `fn-doc-4` agrees:
+            // its whole query is `fn:count(fn:doc(()))`, expected `0`.)
             XsltFn::Doc if args.first().is_none_or(XPathValue::is_empty) => Ok(XPathValue::empty()),
             // §3.12: "Statically known documents: None" and "Available
             // documents: None", so `fn:doc` can never find its document. F&O
@@ -1038,8 +1038,8 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
                 ),
             )
             .into_xpath_error()),
-            // F&O `fn:doc-available`: "If `$uri` is the empty sequence, this
-            // function returns false" (from memory) — and with no available
+            // F&O §15.5.5 `fn:doc-available`: "If $uri is an empty sequence,
+            // this function returns false." — and with no available
             // documents at all, false is the answer for every other argument
             // too, so one arm covers both.
             XsltFn::DocAvailable => Ok(XPathValue::boolean(false)),

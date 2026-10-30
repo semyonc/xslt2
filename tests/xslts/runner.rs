@@ -1,6 +1,6 @@
 #![allow(dead_code)] // the model is consumed by the engine adapter, not yet by the stub
 //! The engine boundary of the harness: what one test run needs (`TestRun`), what it produces
-//! (`RunOutput`), the `Engine` trait, and the M0 `StubEngine` that implements nothing.
+//! (`RunOutput`), the `Engine` trait, and the `StubEngine` that implements nothing.
 //!
 //! When the processor exists, `XsltEngine` implements `Engine` here and the rest of the
 //! harness is untouched. Engine panics are caught per test so one bug cannot end the run.
@@ -25,7 +25,7 @@ pub struct TestRun<'a> {
     /// Test-set directory: base for relative URIs and `xsl:result-document` hrefs.
     pub base_dir: PathBuf,
     pub schema_aware: bool,
-    /// `--schema-aware --xsd11`: the schema context is built as an XML Schema 1.1 one (M4g).
+    /// `--schema-aware --xsd11`: the schema context is built as an XML Schema 1.1 one.
     pub xsd11: bool,
     pub strict_recoverable: bool,
 }
@@ -109,7 +109,7 @@ pub struct RunOutput {
     pub messages: Vec<String>,
     /// The error that ended the transformation, if any.
     pub error: Option<XsltError>,
-    /// The engine does not implement what the test needs (M0: everything).
+    /// The engine does not implement what the test needs (the stub: everything).
     pub not_implemented: bool,
     /// The harness could not run the case as the catalog specifies it (an unsupported catalog
     /// construct, a catalog parameter it cannot evaluate, …). Never an engine error: an

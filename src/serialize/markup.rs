@@ -5,7 +5,7 @@
 //! cannot overflow the Rust stack.
 //!
 //! **Escaping** (§4 "character expansion", rule e; implementation-dependent
-//! details chosen to match what the suite's expected files show):
+//! details chosen to match what the W3C XSLT test suite's expected files show):
 //!
 //! | Context | Written as |
 //! |---|---|
@@ -579,7 +579,7 @@ impl<'a, 'o> Writer<'a, 'o> {
     ///   syntax, for example `<br />` … MUST include a space before the
     ///   trailing `/>`"; any other element is written `<p></p>`, which is what
     ///   §6 requires of the XHTML elements ("MUST NOT use the minimized form")
-    ///   and what the suite's expected files show for the others.
+    ///   and what the W3C XSLT test suite's expected files show for the others.
     /// * HTML (§7.1): "The HTML output method MUST NOT output an end-tag for an
     ///   empty element if the element type has an empty content model"; any
     ///   other HTML element gets its end tag.

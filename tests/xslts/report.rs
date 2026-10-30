@@ -1,7 +1,7 @@
 //! Result bookkeeping and reporting: per test-set, per feature family, per execution profile,
 //! not-run reasons, and the W3C results XML (`http://www.w3.org/2012/11/xslt30-test-results`).
 //!
-//! The headline number is the basic-profile, non-regex pass rate (design sketch §2.6): the two
+//! The headline number is the basic-profile, non-regex pass rate: the two
 //! regex families are 27% of the applicable cases and exercise `regexml`, not XSLT.
 
 use std::collections::BTreeMap;
@@ -175,8 +175,8 @@ impl Report {
         (pass, runnable)
     }
 
-    /// The `notImplemented` cases grouped by the roadmap sub-milestone their
-    /// message names — the unlock ceiling of each (ROADMAP §2). The engine's
+    /// The `notImplemented` cases grouped by the owner their message names —
+    /// what implementing each would unlock. The engine's
     /// `XSLT2-NOTIMPL` message always ends in `is not implemented (<owner>)`;
     /// anything else is grouped under `unattributed`, which should stay empty.
     pub fn not_implemented_by_owner(&self) -> BTreeMap<String, usize> {
@@ -355,23 +355,19 @@ impl Report {
 }
 
 /// The owner in a `… is not implemented (<owner>)` message: a Cargo feature
-/// of the processor, lowercase words joined by `-` (`icu-collation`), or a
-/// tag of `M` followed by alphanumerics.
+/// of the processor, lowercase words joined by `-` (`icu-collation`).
 pub fn notimpl_owner(message: &str) -> Option<&str> {
     let inner = message
         .strip_suffix(')')?
         .rsplit_once(" is not implemented (")?
         .1;
-    let tag = inner.starts_with('M')
-        && inner.len() > 1
-        && inner[1..].chars().all(|c| c.is_ascii_alphanumeric());
     let feature = inner.contains('-')
         && inner.split('-').all(|w| {
             !w.is_empty()
                 && w.chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
         });
-    (tag || feature).then_some(inner)
+    feature.then_some(inner)
 }
 
 fn print_row(name: &str, c: &Counts) {

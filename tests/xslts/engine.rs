@@ -101,7 +101,7 @@ struct Job {
 }
 
 /// Whether an environment `<schema>` of this `role` goes into the schema context of a
-/// schema-aware run (M4b).
+/// schema-aware run.
 ///
 /// The catalog (`admin/catalog-schema.xsd`): "An element which provides information about a schema
 /// to be used to validate a source document", with the roles `source-reference`,
@@ -111,11 +111,10 @@ struct Job {
 /// schema's directives, not on its own.
 ///
 /// A `stylesheet-import` one is the schema the stylesheet imports (`xsl:import-schema`), and it
-/// goes in too (M4b report, decision D-N): where the stylesheet's own import names the same
+/// goes in too: where the stylesheet's own import names the same
 /// document the context loads it once, and `import-schema-185a` / `b` / `c` find their
 /// namespace's components only there (their `schema-location` does not exist). Measured: of the
-/// 431 schema-aware cases with such a schema, these three change (to M4f's fence) and nothing
-/// else.
+/// 431 schema-aware cases with such a schema, these three are the only ones the role decides.
 fn context_schema(role: Option<&str>) -> bool {
     matches!(
         role,
@@ -123,8 +122,8 @@ fn context_schema(role: Option<&str>) -> bool {
     )
 }
 
-/// The version of XML Schema the schema context of a schema-aware run implements (M4g; M4 plan
-/// D-3: one version per context, 1.0 by default): **1.1** with `--xsd11` — the catalog's `XSD_1.1`
+/// The version of XML Schema the schema context of a schema-aware run implements (one version per
+/// context, 1.0 by default): **1.1** with `--xsd11` — the catalog's `XSD_1.1`
 /// feature is then satisfied, and the cases that need it expect XML Schema 1.1 behaviour (W3C XSD
 /// 1.1 namespace fixup in `import-schema-164`, assertions in `strip-space-009`, type alternatives
 /// in `validation-1301`) — and also when one of the environment's schemas that go into the
@@ -160,7 +159,7 @@ fn context_version(run: &TestRun) -> XsdVersion {
 /// value) does not settle it; the seven applicable cases with a `source-reference` schema and no
 /// `validation` attribute do: two expect typed values from their source (`type-functions-0101`,
 /// `-0401`: "arguments coming from typed nodes in input source"), and the other five give the same
-/// result either way (M4b report, decision D-M).
+/// result either way.
 fn source_validation(
     validation: Option<&str>,
     has_source_schema: bool,
@@ -344,7 +343,7 @@ impl Job {
         let functions = XsltFunctions::new();
         let resolver = self.resolver();
 
-        // Schema-aware (M4 plan D-1): the context first — a pre-scan of the stylesheet's
+        // Schema-aware: the context first — a pre-scan of the stylesheet's
         // `xsl:import-schema` declarations, loaded into one schema set — then the stylesheet,
         // compiled with the set's name table. A basic run keeps its own table.
         let basic_names = NameTable::new();
@@ -467,7 +466,7 @@ impl Job {
 /// `output/@serialize`): "Determines whether or not serialization takes place. The default is
 /// no." Otherwise the transformation succeeded and produced a tree, which is what the case's
 /// tree assertions are about: the failure is kept in `serialization_error`, where only a
-/// serialization assertion sees it (M3a, harness-review backlog item F8).
+/// serialization assertion sees it.
 fn primary_result(
     compiled: &xslt2::CompiledStylesheet<'_>,
     outcome: &xslt2::Outcome<'_>,
@@ -581,7 +580,7 @@ fn failure(e: XsltError) -> RunOutput {
 
 /// Evaluates a `<param select="…">` from the catalog.
 ///
-/// §2.4 of the design sketch: the expression has no context item; an `as`
+/// The expression has no context item; an `as`
 /// attribute is honoured by casting through `treat as`, which is enough for
 /// the literal values the suite uses. An error is the harness's (the catalog:
 /// "It should not raise an error as param evaluation is API dependent
@@ -771,7 +770,7 @@ pub fn self_test() -> usize {
     let dir = Path::new("/suite/tests/fn/accessor");
     let file_uri = |p: &str| xslt2::resolver::path_to_uri(Path::new(p));
 
-    // B11: a relative catalog `uri` is resolved against the test-set file …
+    // a relative catalog `uri` is resolved against the test-set file …
     check(
         resolve_catalog_uri("accessor-004.xml", dir)
             == Ok(file_uri("/suite/tests/fn/accessor/accessor-004.xml")),
@@ -806,7 +805,7 @@ pub fn self_test() -> usize {
         check(resolve_catalog_uri(refused, dir).is_err(), refused);
     }
 
-    // E-C11: the inline principal source is named after the test-set file; other inline sources
+    // The inline principal source is named after the test-set file; other inline sources
     // keep distinct synthetic names inside the test-set directory; a `uri` wins over both.
     let set = TestSet {
         name: "accessor".into(),
@@ -876,7 +875,7 @@ pub fn self_test() -> usize {
         "other inline sources",
     );
 
-    // M4b: in a schema-aware run each source is validated as its `validation` says (`skip` and no
+    // in a schema-aware run each source is validated as its `validation` says (`skip` and no
     // value: not at all); a basic run validates nothing.
     let validated = |validation: &str, role: Option<&str>| ResolvedSource {
         validation: Some(validation.to_string()),
@@ -961,7 +960,7 @@ pub fn self_test() -> usize {
         job_of(Vec::new(), schemas(), false).schemas.is_empty(),
         "a basic run has no schema context",
     );
-    // M4g: the context is XML Schema 1.1 with `--xsd11`, or when a schema that goes into it
+    // the context is XML Schema 1.1 with `--xsd11`, or when a schema that goes into it
     // declares `xsd-version="1.1"`; 1.0 otherwise (a `secondary` 1.1 schema does not count: it
     // is loaded through another one's directives).
     let versioned = |role: Option<&str>, version: Option<&str>| ResolvedSchema {
@@ -991,7 +990,7 @@ pub fn self_test() -> usize {
         "the schema context's XML Schema version: --xsd11, or a context schema of xsd-version 1.1",
     );
 
-    // P1-1: the inline principal is the *base* of its document, not the resource at the test-set
+    // the inline principal is the *base* of its document, not the resource at the test-set
     // file's URI. The resolver the compiler and the transformation share must not serve it
     // there (the probe's test-set file does not exist, so the honest answer is "unavailable"),
     // while the other catalog sources stay reachable by their URIs.
@@ -1072,7 +1071,7 @@ pub fn self_test() -> usize {
         "the default form has no XML declaration",
     );
 
-    // M3a (F8): a stylesheet serialization that fails ends the run only when the case asks
+    // A stylesheet serialization that fails ends the run only when the case asks
     // for serialization; otherwise the tree is kept for the tree assertions and the failure for
     // the serialization assertions.
     let failing = |serialize: bool| {
@@ -1140,13 +1139,13 @@ pub fn self_test() -> usize {
         "an XHTML result of a 1.0 stylesheet is recorded as the xml method",
     );
 
-    // M3b: the base output URI is the test-set directory, so a relative href lands inside it,
+    // the base output URI is the test-set directory, so a relative href lands inside it,
     // where `assert-result-document`'s relative `uri` expects it.
     check(
         job.base_output_uri == format!("{}/", file_uri("/suite/tests/fn/accessor")),
         "the base output URI is the test-set directory",
     );
-    // M3b: each secondary result in the same two forms as the primary, under the same F8
+    // each secondary result in the same two forms as the primary, under the same F8
     // policy, with its absolute URI as its base URI.
     let secondary = |output: &str, serialize: bool| {
         let compiled = Compiler::new(&names, &functions)
@@ -1198,7 +1197,7 @@ pub fn self_test() -> usize {
         "serialize absent: a secondary result's tree survives a serialization failure",
     );
 
-    // P2-3: a harness refusal is a harnessError, never an engine error that `<error
+    // a harness refusal is a harnessError, never an engine error that `<error
     // code="*"/>` would accept.
     let inputs = crate::compare::CaseInputs::default();
     let cx = crate::compare::CompareContext {
@@ -1227,7 +1226,7 @@ pub fn self_test() -> usize {
         "<error code=\"*\"/> is not satisfied by a harness refusal",
     );
 
-    // P2-4: `source/@select` cannot be honoured through the public API, so the case is refused
+    // `source/@select` cannot be honoured through the public API, so the case is refused
     // rather than run from the document node — whatever its assertions would have said.
     let mut selected = inline(Some("."), None, "<doc/>");
     selected.select = Some("/doc".into());
@@ -1251,7 +1250,7 @@ pub fn self_test() -> usize {
         );
     }
 
-    // M3c follow-up: `combinations_for_numbering` is asked of the processor, number by number
+    // `combinations_for_numbering` is asked of the processor, number by number
     // (`numbering_probe`), and the dependency's `range` must lie inside what it supports.
     use crate::catalog::Dependency;
     use crate::filter::{
@@ -1383,7 +1382,7 @@ pub fn self_test() -> usize {
         "satisfied=\"false\" of an unsupported range is runnable",
     );
 
-    // The implicit timezone the harness pins (review R12; the Wave B follow-up): UTC, the value the
+    // The implicit timezone the harness pins: UTC, the value the
     // catalog assumes ("we currently assume that an absent timezone means UTC", `date-012` …
     // `date-018`, `date-042`) — for `implicit-timezone()`, for `current-dateTime()`, and for comparing a
     // value without a timezone with one that has one. Twice: through the option every case's

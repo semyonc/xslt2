@@ -76,7 +76,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 DomNodeType::Root | DomNodeType::Element => {
                     // The built-in rule recurses into the children without a
                     // template invocation to count, so over a deep enough
-                    // document only the stack guard stops it (Q33).
+                    // document only the stack guard stops it.
                     self.check_stack()?;
                     let children = children_of(nav);
                     self.apply_to_items(children, mode.clone(), params.to_vec(), cx, out)

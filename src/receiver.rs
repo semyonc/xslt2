@@ -1,7 +1,7 @@
 //! The push pipeline: raw events → [`ComplexContentNormalizer`] → one
 //! destination.
 //!
-//! Design sketch §9.2–§9.3. The instruction evaluator emits **raw** events in
+//! The instruction evaluator emits **raw** events in
 //! evaluation order; all the rules of XSLT 2.0 §5.7.1 live in one component,
 //! the normalizer, which wraps every tree-shaped destination. Because
 //! [`ResultBuilder`] and the test-only `EventSerializer` consume the *same*
@@ -146,8 +146,8 @@ fn namespace_nodes_and_undeclarations_of(
 /// §5.7.3 leaves the choice open — "the actual namespace nodes that are added
 /// to the tree by the namespace fixup process are implementation-dependent" —
 /// so the only requirements are that the prefix be free and that the choice be
-/// deterministic. `p` becomes `p_0`, `p_1`, … , which is what the suite's
-/// reference results were produced with (`namespace-2614`, `namespace-2001`,
+/// deterministic. `p` becomes `p_0`, `p_1`, … , which is what the W3C XSLT test
+/// suite's reference results were produced with (`namespace-2614`, `namespace-2001`,
 /// `namespace-alias-1903`); an unprefixed name, which has no prefix to derive
 /// from, becomes `ns_0`.
 fn invented_prefix(requested: &str, keep: &[(String, String)], fixup: &NamespaceFixup) -> String {
@@ -1365,7 +1365,7 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
             // gives the element the same namespace node, and re-declaring it
             // on every element of a deep non-inheriting chain made the tree
             // carry one declaration per prefix per level, which upstream's
-            // namespace axis walks once per ancestor (review N2).
+            // namespace axis walks once per ancestor.
             self.fixup.pop_scope();
             self.fixup.pop_scope();
             let mut merged: Vec<(String, String)> = withheld

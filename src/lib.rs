@@ -21,7 +21,7 @@
 //! | run it | [`CompiledStylesheet::transformation`] makes a [`Transformation`], set up by [`TransformOptions`] and by [`Transformation::with_param`], [`with_initial_template`](Transformation::with_initial_template), [`with_initial_mode`](Transformation::with_initial_mode) ([`ModeKey`]), [`with_resolver`](Transformation::with_resolver) and [`with_message_sink`](Transformation::with_message_sink); [`transform_source`](Transformation::transform_source), [`transform_uri`](Transformation::transform_uri), [`transform_document`](Transformation::transform_document) and [`transform_without_source`](Transformation::transform_without_source) run it |
 //! | read the results | [`Outcome`]: the primary result, the [`SecondaryResult`]s of `xsl:result-document`, the [`Message`]s of `xsl:message` |
 //! | serialize them | [`CompiledStylesheet::serialize_primary`], [`serialize_secondary`](CompiledStylesheet::serialize_secondary) and their `_to_bytes` forms; the output definitions and the resolved serialization parameters are in [`output`] |
-//! | read stylesheet modules and documents | the [`Resolver`] trait, [`FileResolver`] (the default), [`MemoryResolver`]: [`Compiler::with_resolver`] for the stylesheet's modules and every run of it, [`Transformation::with_resolver`] for one run; URI helpers in [`resolver`] |
+//! | read stylesheet modules and documents | the [`Resolver`] trait, [`FileResolver`] (the default), [`MemoryResolver`]: [`Compiler::with_resolver`] for the stylesheet's modules and every run of it, [`SchemaContextBuilder::with_resolver`] for a schema-aware context and the compilers made from it, [`Transformation::with_resolver`] for one run; URI helpers in [`resolver`] |
 //! | validate against schemas | [`SchemaContext`], built by a [`SchemaContextBuilder`] ([`SchemaImport`], [`ImportSource`], [`XsdVersion`]); [`SourceValidation`] for the source documents |
 //! | handle errors | [`XsltError`] with its [`ErrorKind`], [`ErrorOrigin`] and [`Location`]; the error codes in [`error::codes`] and [`error::codes_internal`] |
 //! | add collations | [`XsltFunctions::register_collation`] and the [`collation`] module |
@@ -180,7 +180,9 @@
 //! The compiler reads `xsl:include` and `xsl:import` modules through a
 //! [`Resolver`], and every transformation of the compiled stylesheet reads
 //! `document()` and `doc()` targets through the same one, unless it is given
-//! another ([`Transformation::with_resolver`]). [`MemoryResolver`] serves text
+//! another ([`Transformation::with_resolver`]). A schema-aware compiler starts
+//! with the resolver its [`SchemaContext`] was built with
+//! ([`SchemaContextBuilder::with_resolver`]). [`MemoryResolver`] serves text
 //! given in advance, and can fall back to another resolver for everything
 //! else.
 //!
@@ -428,8 +430,15 @@
 //!
 //! In brief (the README's [Known limits](https://github.com/semyonc/xslt2#known-limits)
 //! and [Conformance](https://github.com/semyonc/xslt2#conformance) sections say
-//! more):
+//! more; [LIMITS.md](https://github.com/semyonc/xslt2/blob/main/doc/LIMITS.md)
+//! lists the limits and what a stylesheet may read, and
+//! [CONFORMANCE.md](https://github.com/semyonc/xslt2/blob/main/doc/CONFORMANCE.md)
+//! every W3C test case that does not pass, and why):
 //!
+//! - the default [`FileResolver`] reads any file the process can read: a host
+//!   that runs stylesheets it does not trust gives the compiler and the
+//!   transformation a resolver of its own (LIMITS.md,
+//!   [Advice](https://github.com/semyonc/xslt2/blob/main/doc/LIMITS.md#advice));
 //! - result trees stay in memory, and each one costs about 118 KB of the run's
 //!   arena however small it is;
 //! - no extension instructions; `xsl:number` and the date formatting functions
@@ -455,6 +464,8 @@ mod receiver;
 mod regex;
 pub mod resolver;
 mod runtime;
+#[cfg(test)]
+mod scaling;
 mod schema;
 mod serialize;
 mod store;

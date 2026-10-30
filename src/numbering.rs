@@ -1240,7 +1240,7 @@ mod tests {
         assert_eq!(ord("i", 0), "0th");
     }
 
-    /// Review F3: compound ordinal words as Saxon 9.1 writes them (its output
+    /// Compound ordinal words as Saxon 9.1 writes them (its output
     /// for each value, all three cases) — the final tens and units joined by
     /// a hyphen, title case capitalizing both parts, the rest as in the
     /// cardinal — while the cardinal words keep their spaces (the catalog
@@ -1366,7 +1366,7 @@ mod tests {
             );
             assert_eq!(fmt(token, &[3]), "3", "{token}");
         }
-        // Greek stays unsupported (user decision), whatever letter-value says.
+        // Greek is not supported, whatever letter-value says.
         assert_eq!(fmt("\u{3B1}", &[3]), "3");
         assert_eq!(fmt("\u{5D0}", &[3]), "3");
         assert_eq!(fmt("x", &[3]), "3");
@@ -1517,7 +1517,7 @@ mod tests {
         assert_eq!(fmt("1\u{301}1", &[2, 3]), "2\u{301}3");
     }
 
-    /// Review F4: the decimal-digit table and the alphanumeric test are of one
+    /// The decimal-digit table and the alphanumeric test are of one
     /// Unicode version, the one `regexml` implements: a digit is a decimal
     /// digit exactly when `\p{Nd}` matches it. Every character the standard
     /// library (a later Unicode) calls numeric is checked both ways, so a

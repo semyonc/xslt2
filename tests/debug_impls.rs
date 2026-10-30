@@ -122,11 +122,41 @@ fn the_debug_output_identifies_without_dumping_trees() {
 fn a_schema_aware_compiler_shows_its_xml_schema_version() {
     let functions = XsltFunctions::new();
     let context = SchemaContext::with_version(xslt2::XsdVersion::V1_1);
+    assert_eq!(
+        format!("{context:?}"),
+        "SchemaContext { imports: [], resolver: <dyn Resolver>, .. }"
+    );
     let compiler = Compiler::schema_aware(&context, &functions);
     assert_eq!(
         format!("{compiler:?}"),
         "Compiler { schema_aware: true, xsd_version: Some(V1_1), resolver: <dyn Resolver>, .. }"
     );
+}
+
+#[test]
+fn a_memory_resolver_shows_its_uris_and_never_its_text() {
+    let resolver = MemoryResolver::new()
+        .with("urn:example:b", "<b>second-text</b>")
+        .with("urn:example:a", "<a>first-text</a>");
+    let debug = format!("{resolver:?}");
+    assert_eq!(
+        debug,
+        "MemoryResolver { resources: 2, uris: [\"urn:example:a\", \"urn:example:b\"], \
+         fallback: None, .. }"
+    );
+    let with_fallback =
+        MemoryResolver::with_fallback(Arc::new(resolver)).with("urn:example:c", "third-text");
+    let fallback_debug = format!("{with_fallback:?}");
+    assert_eq!(
+        fallback_debug,
+        "MemoryResolver { resources: 1, uris: [\"urn:example:c\"], \
+         fallback: Some(<dyn Resolver>), .. }"
+    );
+    for text in [&debug, &fallback_debug, &format!("{with_fallback:#?}")] {
+        for content in ["first-text", "second-text", "third-text"] {
+            assert!(!text.contains(content), "{content} in {text}");
+        }
+    }
 }
 
 #[test]

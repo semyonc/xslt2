@@ -26,9 +26,11 @@ pub mod codes_internal {
     /// take, e.g. `the collation http://www.w3.org/2013/collation/UCA is not
     /// implemented (icu-collation)` for a UCA collation in a build without the
     /// `icu-collation` feature
-    /// ([`XsltError::not_implemented`](crate::XsltError::not_implemented)). The
-    /// conformance harness reports a case ending in this code as "not
-    /// implemented" rather than as a failure, grouped by that tag.
+    /// ([`XsltError::not_implemented`](crate::XsltError::not_implemented)). It
+    /// says that this processor lacks a feature, not that the stylesheet is
+    /// wrong ([`XsltError::is_not_implemented`](crate::XsltError::is_not_implemented)):
+    /// a conformance test run, for one, can count such a case as not
+    /// implemented rather than as failed.
     pub const NOT_IMPLEMENTED: &str = "XSLT2-NOTIMPL";
 
     /// An internal failure: a broken invariant, or an error from a lower layer
@@ -47,10 +49,11 @@ pub(crate) const XQT_ERRORS_NAMESPACE: &str = xsd_schema::xpath::error::XQT_ERRO
 
 /// Who raised an error, when its code alone does not say.
 ///
-/// Every classification that used to be read off the *spelling* of
-/// [`XsltError::code`] consults this first. The code of an error raised by the
-/// stylesheet is a name the stylesheet chose, and a stylesheet may choose
-/// `XSLT2-NOTIMPL`, `XSLT2-INTERNAL` or `XTMM9000` as easily as `boom`.
+/// Every classification of an error ([`XsltError::kind`],
+/// [`XsltError::is_not_implemented`], …) consults this before the *spelling*
+/// of [`XsltError::code`]. The code of an error raised by the stylesheet is a
+/// name the stylesheet chose, and a stylesheet may choose `XSLT2-NOTIMPL`,
+/// `XSLT2-INTERNAL` or `XTMM9000` as easily as `boom`.
 ///
 /// New variants may be added in a minor release (`#[non_exhaustive]`): a
 /// `match` on it outside this crate needs a wildcard arm.
@@ -61,11 +64,13 @@ pub enum ErrorOrigin {
     /// and [`ErrorKind::of_code`] classifies it.
     Processor,
     /// The stylesheet raised it, through `fn:error`, which identifies its error
-    /// by an `xs:QName` (F&O §3 — quoted from memory; the function's signatures
-    /// are `fn:error()`, `fn:error($error as xs:QName)`,
-    /// `fn:error($error as xs:QName?, $description as xs:string)` and the
-    /// three-argument form). Such an error is a **dynamic error** by
-    /// definition, whatever its QName is spelled like.
+    /// by an `xs:QName`: F&O §3 gives the signatures `fn:error()`,
+    /// `fn:error($error as xs:QName)`,
+    /// `fn:error($error as xs:QName?, $description as xs:string)` and
+    /// `fn:error($error as xs:QName?, $description as xs:string, $error-object
+    /// as item()*)`. Such an error is a **dynamic error** (XPath 2.0 §2.3.3: "A
+    /// dynamic error can also be raised explicitly by calling the fn:error
+    /// function"), whatever its QName is spelled like.
     Raised,
 }
 
@@ -184,11 +189,10 @@ impl XsltError {
     /// error QName.
     ///
     /// `namespace_uri` is the empty string for a QName in no namespace;
-    /// `local_name` becomes [`code`](Self::code), so every existing caller that
-    /// reads the code, and the conformance harness that compares it, keep
-    /// working. What changes is that the error now also carries its namespace
-    /// and its [`ErrorOrigin`], and so is classified as a dynamic error
-    /// ([`ErrorKind::Dynamic`]) whatever its local name happens to be.
+    /// `local_name` becomes [`code`](Self::code), so a program that compares
+    /// codes sees the local name the stylesheet chose. The error also carries
+    /// its namespace and its [`ErrorOrigin`], and so is classified as a dynamic
+    /// error ([`ErrorKind::Dynamic`]) whatever its local name happens to be.
     pub fn raised(
         namespace_uri: impl Into<String>,
         local_name: impl Into<String>,
@@ -253,8 +257,8 @@ impl XsltError {
     /// writes `error(QName('urn:x', 'x:XSLT2-NOTIMPL'), '…')` has raised an
     /// ordinary dynamic error that happens to be spelled like this crate's
     /// internal code, and treating it as a missing feature would both escape
-    /// §5.5.4's recovery and mislead the conformance harness — hence the
-    /// [`ErrorOrigin`] guard.
+    /// §5.5.4's recovery and report a missing feature where there is none —
+    /// hence the [`ErrorOrigin`] guard.
     pub fn is_not_implemented(&self) -> bool {
         !self.is_raised() && self.code == codes_internal::NOT_IMPLEMENTED
     }
@@ -353,9 +357,10 @@ impl XsltError {
     /// The error family.
     ///
     /// An error the stylesheet raised through `fn:error` is a **dynamic error**
-    /// by definition (F&O §3 — from memory: the function "raises a dynamic
-    /// error"), so it is classified by its [`ErrorOrigin`] and not by the
-    /// spelling of the QName the stylesheet chose.
+    /// (XPath 2.0 §2.3.3: "A dynamic error can also be raised explicitly by
+    /// calling the fn:error function"), so it is classified by its
+    /// [`ErrorOrigin`] and not by the spelling of the QName the stylesheet
+    /// chose.
     pub fn kind(&self) -> ErrorKind {
         match self.origin() {
             ErrorOrigin::Raised => ErrorKind::Dynamic,
@@ -497,11 +502,11 @@ mod tests {
 
     #[test]
     fn internal_codes_are_not_spec_codes() {
-        let e = XsltError::not_implemented("xsl:sort", "M2d");
+        let e = XsltError::not_implemented("xsl:sort", "some-feature");
         assert_eq!(e.code, codes_internal::NOT_IMPLEMENTED);
         assert_eq!(e.kind(), ErrorKind::Other);
         assert!(e.is_not_implemented());
-        assert_eq!(e.message, "xsl:sort is not implemented (M2d)");
+        assert_eq!(e.message, "xsl:sort is not implemented (some-feature)");
         assert!(codes::describe(codes_internal::NOT_IMPLEMENTED).is_none());
         assert!(codes::describe(codes_internal::INTERNAL).is_none());
         assert!(!XsltError::internal("boom").is_not_implemented());
@@ -532,7 +537,7 @@ mod tests {
             );
         }
         for e in [
-            XsltError::not_implemented("format-number()", "M3d"),
+            XsltError::not_implemented("a construct", "some-feature"),
             XsltError::internal("broken invariant"),
         ] {
             assert!(
@@ -621,10 +626,12 @@ mod tests {
         }
 
         // The processor's own two codes keep their meaning.
-        assert!(XsltError::not_implemented("format-number()", "M3d").is_not_implemented());
+        assert!(XsltError::not_implemented("a construct", "some-feature").is_not_implemented());
         assert!(XsltError::internal("broken").is_internal());
         assert!(XsltError::new(codes::XTMM9000, "stop").is_termination());
-        assert!(!XsltError::not_implemented("format-number()", "M3d").is_recoverable_in_pattern());
+        assert!(
+            !XsltError::not_implemented("a construct", "some-feature").is_recoverable_in_pattern()
+        );
         // A circularity the processor detects is signalled even inside a
         // pattern (§2.9 leaves signal-or-recover to the implementation); one a
         // stylesheet raises itself with `fn:error` keeps the general rule.
@@ -722,7 +729,7 @@ mod tests {
         assert!(back.is_raised());
 
         // A processor failure stays one.
-        let failure = XsltError::not_implemented("x", "M2k");
+        let failure = XsltError::not_implemented("x", "icu-collation");
         assert!(XsltError::from(failure.into_xpath_error()).is_not_implemented());
     }
 }

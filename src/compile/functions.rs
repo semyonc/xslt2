@@ -99,7 +99,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         let mut winners: Vec<usize> = won.into_values().collect();
         winners.sort_unstable();
 
-        // Decision D-A (user, 2026-10-20; `type-functions-0503`): a constructor function of a user
+        // (`type-functions-0503`.) A constructor function of a user
         // atomic type (XPath 2.0 §3.10.4: "For every atomic type in the in-scope schema types …, a
         // constructor function is implicitly defined") has arity 1 and the type's expanded name.
         // §10.3's `override` does not decide a clash with it — it "defines what happens if this

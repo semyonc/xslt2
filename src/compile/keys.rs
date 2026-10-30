@@ -59,7 +59,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
 
         let collation = self.key_collation(nav, ctx, &loc)?;
 
-        // DESIGN §9.1: the pattern and the key specifier see the global
+        // The pattern and the key specifier see the global
         // variables only — a top-level declaration has no other variables in
         // scope, and the sequence constructor's own locals live in a frame of
         // their own.

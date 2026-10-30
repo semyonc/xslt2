@@ -1020,7 +1020,7 @@ mod tests {
         assert_eq!(s.case_level, Some(false));
     }
 
-    /// F5: `&` separates parameters too, mixed with `;` or alone.
+    /// `&` separates parameters too, mixed with `;` or alone.
     #[test]
     fn an_ampersand_separates_parameters() {
         for uri in [
@@ -1100,7 +1100,7 @@ mod tests {
         ));
     }
 
-    /// F6: "The version number of the UCA to be used" — up to the data's.
+    /// "The version number of the UCA to be used" — up to the data's.
     #[test]
     fn versions_up_to_the_data_s_are_supported() {
         for version in ["15.1.0", "15.1", "15", "6.2.0", "1", "15.0.99", "15.1.0.0"] {
@@ -1121,7 +1121,7 @@ mod tests {
         }
     }
 
-    /// F3: UTS #10 blanked = shifted at tertiary strength at most.
+    /// UTS #10 blanked = shifted at tertiary strength at most.
     #[test]
     fn blanked_is_shifted_at_tertiary_strength() {
         for (query, strength) in [
@@ -1139,7 +1139,7 @@ mod tests {
         assert_eq!(t.settings.strength, Some(Level::Tertiary));
     }
 
-    /// F7: the collation keywords of `lang`; an explicit parameter wins.
+    /// the collation keywords of `lang`; an explicit parameter wins.
     #[test]
     fn lang_extensions_are_read_and_parameters_win() {
         let t = accepted(
@@ -1191,7 +1191,7 @@ mod tests {
         }
     }
 
-    /// F9: one collator per canonical tailoring.
+    /// one collator per canonical tailoring.
     #[test]
     fn equal_tailorings_share_one_collator() {
         let cache = UcaCollations::default();
@@ -1235,7 +1235,7 @@ mod tests {
         assert_eq!(UCA_VERSION, [15, 1, 0]);
     }
 
-    // ─── R2 (second review): the substring search ─────────────────────────
+    // ─── The substring search ─────────────────────────────────────────────
 
     /// A deterministic generator (xorshift64*), so a failure reproduces.
     struct Rng(u64);
@@ -1264,7 +1264,7 @@ mod tests {
     }
 
     /// The definition, unpruned and without a budget: every candidate
-    /// compared (the search before the second review).
+    /// compared.
     fn reference_find(c: &IcuCollation, h: &str, n: &str) -> Option<(usize, usize)> {
         if c.ignorable(n) {
             return Some((0, 0));

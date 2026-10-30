@@ -2,13 +2,18 @@
 //! resource comes from, and how a relative reference is resolved against a base
 //! URI (§5.8, §3.10.1).
 //!
-//! The suite hands the harness file paths and inline source text, so the crate
-//! needs both a file-system resolver and an in-memory one; a host with its own
-//! catalog implements [`Resolver`] instead. Everything the resolver sees is a
-//! *URI string*: a `file:` URI, an absolute path, or a relative reference. The
-//! helpers in this module normalize the three into one, because XSLT compares
-//! base URIs for equality (`xsl:include` cycles, `document()` identity) and two
-//! spellings of the same file must not become two documents.
+//! Two resolvers come with the crate: [`FileResolver`] reads the file system,
+//! and [`MemoryResolver`] serves text the program already holds — stylesheets
+//! and documents embedded in it, received from elsewhere or generated —
+//! optionally falling back to another resolver. A host that keeps its
+//! resources somewhere else, or maps URIs through a catalog, implements
+//! [`Resolver`] itself.
+//!
+//! A location reaches the processor as a `file:` URI, an absolute path, or a
+//! relative reference. The helpers in this module normalize the three into one
+//! spelling, because XSLT compares base URIs for equality (`xsl:include`
+//! cycles, `document()` identity) and two spellings of the same file must not
+//! become two documents.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,6 +40,14 @@ pub trait Resolver: std::fmt::Debug + Send + Sync {
 }
 
 /// Reads from the local file system.
+///
+/// It reads any file the process can read: a `file:` URI (whatever its
+/// authority) or a path, relative references resolved — `..` segments
+/// included — against the base URI. It reads no other scheme (`http:` and the
+/// rest fail). A host that runs stylesheets it does not trust gives the compiler
+/// and the transformation another resolver — a [`MemoryResolver`], or one of
+/// its own that allows only some locations; see
+/// [LIMITS.md](https://github.com/semyonc/xslt2/blob/main/doc/LIMITS.md).
 #[derive(Debug, Default, Clone)]
 pub struct FileResolver;
 
@@ -52,17 +65,40 @@ impl Resolver for FileResolver {
     }
 }
 
-/// Serves text registered in advance, and falls back to `next` for anything
-/// else.
+/// Serves text registered in advance under its URI, and falls back to another
+/// resolver for anything else.
 ///
-/// The conformance harness needs this: a test case may give its source document
-/// as inline `<content>` rather than as a file, and `xsl:include`/`document()`
-/// inside that stylesheet must still reach the real files of the test-set
-/// directory.
-#[derive(Debug, Default)]
+/// For stylesheets and documents that are not files: embedded in the program,
+/// received over the network, generated. A relative reference in a module
+/// (`xsl:include`, `document()`, `doc()`) is resolved against the module's base
+/// URI first, so text registered under `http://example.com/xsl/common.xsl` is
+/// what `href="common.xsl"` reaches from `http://example.com/xsl/main.xsl`.
+/// With a fallback ([`with_fallback`](Self::with_fallback)), a module or
+/// document given in memory can still reach files, through a [`FileResolver`],
+/// or the resources of a host's own resolver.
+///
+/// Its `Debug` output lists the URIs it serves, never their text.
+#[derive(Default)]
 pub struct MemoryResolver {
     entries: HashMap<String, String>,
     next: Option<Arc<dyn Resolver>>,
+}
+
+impl std::fmt::Debug for MemoryResolver {
+    /// How many resources it holds and their URIs, sorted; the fallback
+    /// resolver is a placeholder. Never the text.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut uris: Vec<&str> = self.entries.keys().map(String::as_str).collect();
+        uris.sort_unstable();
+        f.debug_struct("MemoryResolver")
+            .field("resources", &uris.len())
+            .field("uris", &uris)
+            .field(
+                "fallback",
+                &self.next.as_ref().map(|_| crate::Opaque("<dyn Resolver>")),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl MemoryResolver {
@@ -71,7 +107,8 @@ impl MemoryResolver {
         Self::default()
     }
 
-    /// An in-memory resolver that falls back to `next`.
+    /// An in-memory resolver that falls back to `next` for every URI it holds
+    /// no text for.
     pub fn with_fallback(next: Arc<dyn Resolver>) -> Self {
         Self {
             entries: HashMap::new(),
@@ -864,7 +901,7 @@ mod tests {
     }
 
     /// RFC 3986 §5.2.4's two published traces, and the rootless paths where a
-    /// segment stack and the RFC's buffers part ways (review 2, F2): step C
+    /// segment stack and the RFC's buffers part ways: step C
     /// replaces `/../` by `/` in the input buffer, so the slash before the
     /// next segment survives the removal of the first one.
     #[test]

@@ -467,7 +467,7 @@ impl<'a, 't> Transformation<'a, 't> {
         let absolute = resolver::resolve_uri(base, uri);
         let stored = self.store.borrow().id_of_uri(&absolute);
         if let Some(id) = stored {
-            // A tree the host inserted under this URI is admitted on this path too (review F1).
+            // A tree the host inserted under this URI is admitted on this path too.
             self.admit_stored(id)?;
             return Ok(id);
         }

@@ -1,4 +1,4 @@
-//! Dependency policy (design sketch §2.5) and the explicit exclusion list.
+//! Dependency policy and the explicit exclusion list.
 //!
 //! A test case is *applicable* when its effective `spec` dependency admits an XSLT 2.0
 //! processor. An applicable case is *runnable* when every other dependency is satisfied by
@@ -55,10 +55,10 @@ pub const APPLICABLE_SPECS: &[&str] = &["XSLT10+", "XSLT20", "XSLT20+", "XSLT10 
 
 /// Cases excluded with a documented reason: the expected result is wrong for a conformant XSLT
 /// **2.0** processor, or pins a choice the 2.0 specifications leave to the implementation, or —
-/// one entry, `regex-syntax-xslt20-0987`, by project decision — pins a dated (Unicode 2.0)
-/// character class that the regex backend does not implement. Every entry cites the text that
-/// makes it so (XSLT 2.0 = `xslt20.html`, XPath 2.0 = `xpath2.html`; the M2j reports have the
-/// full quotations and the evidence). Other processors' results are never the reason. `--all`
+/// one entry, `regex-syntax-xslt20-0987` — pins a dated (Unicode 2.0) character class that the
+/// regex backend does not implement. Every entry cites the text that makes it so (XSLT 2.0,
+/// XPath 2.0, and the other specifications it names). Other processors' results are never the
+/// reason. `--all`
 /// runs them anyway.
 pub const EXCLUDED: &[(&str, &str)] = &[
     // ── XPath 3.0 syntax evaluated by the stylesheet ──
@@ -92,18 +92,18 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     ("attribute-0004", "the expected assert-xml pins the invented prefix p_1: §11.3 \"this prefix may subsequently be added, changed, or removed during the namespace fixup process\", and §5.7.3 \"the actual namespace nodes that are added to the tree by the namespace fixup process are implementation-dependent\""),
     // ── expected results that §4.4 and §6.6 rule out (source whitespace that the stylesheet copies) ──
     ("for-each-group-085", "the source has whitespace-only text nodes before each <t> child of <c>; the template for /c is <xsl:apply-templates> with the default select (child::node()), so they reach the built-in rule, and §6.6: \"The built-in template rule for text and attribute nodes returns a text node containing the string value of the context node\"; the stylesheet has no xsl:strip-space, and §4.4 keeps them: an element name is whitespace-preserving \"if and only if there is no match or the best match is an xsl:preserve-space element\". The expected assert-xml has no whitespace, and the catalog compares assert-xml after canonicalization \"byte-for-byte\" (or by fn:deep-equal), in which whitespace text nodes count"),
-    // ── implementation-dependent cases, and expectations that are not XSLT 2.0's (M2e review) ──
+    // ── implementation-dependent cases, and expectations that are not XSLT 2.0's ──
     ("param-0301", "§9.8 uses this very stylesheet as its example of an implementation-dependent case: \"the function declares a local variable $b, but it returns a result that does not require the variable to be evaluated. It is implementation-dependent whether the value is actually evaluated, and it is therefore implementation-dependent whether the circularity is signaled as an error\"; this processor evaluates $b and signals XTDE0640 (\"In general, a circularity in a stylesheet is a non-recoverable dynamic error\"), which the case does not accept"),
     ("copy-4307", X_COPY_WITHOUT_FOCUS),
     ("copy-4309", X_COPY_WITHOUT_FOCUS),
-    // ── M3e residue: an expectation that is XSLT 3.0's ──
+    // ── residue: an expectation that is XSLT 3.0's ──────
     ("next-match-039", "the template rule matches one|one with two alternatives of the same default priority (0.5) and calls xsl:next-match; the case expects the rule to run twice. XSLT 2.0 §6.7 rules that out: xsl:next-match \"considers all template rules with lower import precedence than the current template rule, plus the template rules that are at the same import precedence that have lower priority than the current template rule\" (and earlier same-priority rules only after recovering from XTRE0540, which §6.4 says does not arise here: \"it is not an error if a node matches more than one of the alternatives\"), and its note: \"where the same node matches more than one alternative, and the alternatives have different priority, it is possible for an xsl:next-match instruction to cause the current template rule to be invoked recursively. This situation does not occur when the alternatives have the same priority.\" The stylesheet's own comment says the second alternative should be matched first, which is the XSLT 3.0 ordering"),
     ("format-number-070", "the catalog names <initial-template name=\"main\"/>, and the stylesheet declares no template named main, so §2.3 applies: \"[ERR XTDE0040] It is a non-recoverable dynamic error if the invocation of the stylesheet specifies a template name that does not match the expanded-QName of a named template defined in the stylesheet.\" (The catalog limits the case to XSLT20, yet the stylesheet says version=\"3.0\")"),
     // ── Unicode-version-dependent regex classes ──
     ("regex-syntax-xslt20-0984", "expects U+2308/U+2309 in \\w = [#x0000-#x10FFFF]-[\\p{P}\\p{Z}\\p{C}] (XSD 1.0 2E §F.1.1); in Unicode 16.0 they are Ps/Pe, i.e. \\p{P} (verified with Python unicodedata 16.0.0), so the case pins an older Unicode (that they were Sm until Unicode 6.3: INFERRED, not checked against the historical data). The Unicode version is implementation-defined, the latest recommended (F&O 1.0 §1.1; XSLT 2.0 [Unicode] reference)"),
     ("regex-syntax-xslt20-0985", "expects U+1369..U+1371 in \\d = \\p{Nd} (XSD 1.0 2E §F.1.1); in Unicode 16.0 they are No (verified with Python unicodedata 16.0.0), so the case pins an older Unicode (that they were Nd until Unicode 4.1: INFERRED, not checked against the historical data). The Unicode version is implementation-defined, the latest recommended (F&O 1.0 §1.1; XSLT 2.0 [Unicode] reference)"),
     ("regex-syntax-xslt20-0987", "Unicode-vintage character class, excluded together with 0984 and 0985. The case expects U+0346 outside \\c, which pins \\c to the NameChar of XML 1.0 Second Edition: F&O 1.0 2E §7.6.1 \"The regular expression syntax and semantics are identical to those defined in [XML Schema Part 2: Datatypes Second Edition]\", whose Appendix F reads \"\\c the set of name characters, those ·match·ed by NameChar\" with a dated link to XML 1.0 2E (WD-xml-2e-20000814); XML 1.0 2E (REC-xml-20001006): NameChar ::= Letter | Digit | '.' | '-' | '_' | ':' | CombiningChar | Extender, CombiningChar ::= [#x0300-#x0345] | …, classes that \"can be derived from the Unicode 2.0 character database\" (all read at w3.org; that the dated 2000-08-14 draft has the same production: INFERRED). U+0346 lies outside it. The regex backend (regexml) uses the XML 1.0 Fifth Edition name characters, [4a] NameChar ::= … [#x0300-#x036F] …, where U+0346 is a name character. Under that normative chain the expectation is the strict XPath 2.0 one, so this is a deliberate exclusion of a dated character class, not a wrong expectation; the strict alternative (\\c and \\i per XML 1.0 2E in the XPath 2.0 regex dialect) would change the regex dialect, so the case stays excluded"),
-    // ── misc/regex-classes: general categories checked against Unicode 3.1 / 5.2 / 6.0 data (user decision 2026-10-10) ──
+    // ── misc/regex-classes: general categories checked against Unicode 3.1 / 5.2 / 6.0 data ──
     ("regex-classes-001", X_REGEX_CLASSES_UNICODE_NONCHAR), // C
     ("regex-classes-003", X_REGEX_CLASSES_UNICODE), // Cf
     ("regex-classes-004", X_REGEX_CLASSES_UNICODE_NONCHAR), // Cn
@@ -135,7 +135,7 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     ("regex-classes-036", X_REGEX_CLASSES_UNICODE), // Zs
     // ── decl/character-map: XSLT 3.0 serialization in a stylesheet labelled XSLT20+ ──
     ("character-map-026", "a version=\"3.0\" stylesheet labelled XSLT20+: xsl:output method=\"adaptive\" is XTSE1570 in XSLT 2.0 (§20: an unprefixed method \"must be one of xml, html, xhtml, or text\"), the template is named xsl:initial-template (XTSE0080: \"It is a static error to use a reserved namespace in the name of a named template\"), and map { … } is an XPath 3.1 map constructor, absent from the XPath 2.0 grammar; the expected adaptive serialization cannot arise from an XSLT 2.0 processor"),
-    // ── M4g: schema-aware cases whose expected result is XSLT 3.0's, pins an implementation-dependent choice, or (attribute-1506, -1507) is wrong in both versions — XSLT 3.0 §25.4.1 also says "the transformation fails [see ERR XTTE1510], [see ERR XTTE1512]" (user decision pending, one entry each) ──
+    // ── schema-aware cases whose expected result is XSLT 3.0's, pins an implementation-dependent choice, or (attribute-1506, -1507) is wrong in both versions — XSLT 3.0 §25.4.1 also says "the transformation fails [see ERR XTTE1510], [see ERR XTTE1512]" (one entry each) ───────
     ("attribute-1506", X_XSI_TYPE_IS_NO_DECLARATION),
     ("attribute-1507", X_XSI_TYPE_IS_NO_DECLARATION),
     ("import-schema-087", X_XTTE1535),
@@ -295,7 +295,7 @@ pub fn applicability(set: &TestSet, case: &TestCase, policy: &Policy) -> Applica
     }
     // An exclusion is a verdict on the expected result of a case this processor would run, so it
     // is decided last: a case whose dependencies the configuration does not satisfy stays not run
-    // (a schema-aware case excluded since M4g is "not run" in a basic run, as before).
+    // (an excluded schema-aware case is "not run" in a basic run).
     if !policy.run_excluded {
         if let Some((_, reason)) = EXCLUDED.iter().find(|(n, _)| *n == case.name) {
             return Applicability::Excluded(reason);
@@ -310,7 +310,8 @@ fn dependency_supported(d: &Dependency, policy: &Policy) -> Option<bool> {
     let v = d.value.as_str();
     Some(match d.kind.as_str() {
         "feature" => match v {
-            // Implemented by M3 (serialization, BC mode, d-o-e) or given by the XPath engine.
+            // Implemented by this processor (serialization, backwards-compatible behaviour,
+            // disable-output-escaping) or given by the XPath engine.
             "serialization"
             | "backwards_compatibility"
             | "namespace_axis"
@@ -319,7 +320,7 @@ fn dependency_supported(d: &Dependency, policy: &Policy) -> Option<bool> {
             "schema_aware" => policy.schema_aware,
             "XSD_1.1" => policy.schema_aware && policy.xsd11,
             // dtd, XML_1.1, streaming, streaming-fallback, higher_order_functions, dynamic_evaluation,
-            // xquery_invocation, HTML4, HTML5, xsl-stylesheet-processing-instruction: not planned for v1.
+            // xquery_invocation, HTML4, HTML5, xsl-stylesheet-processing-instruction: not supported.
             _ => false,
         },
         // regexml uses ICU4X Unicode data (≥ 9.0); verify against misc/unicode-90 once the engine runs.
@@ -329,13 +330,13 @@ fn dependency_supported(d: &Dependency, policy: &Policy) -> Option<bool> {
         // unicode-normalization: NFC, NFD, NFKC, NFKD.
         "additional_normalization_form" => true,
         "default_output_encoding" => v.eq_ignore_ascii_case("UTF-8"),
-        // Q28: non-UTF encodings for unparsed-text() are not planned for the first cut.
+        // unparsed-text() decodes UTF-8 and UTF-16 only.
         "unparsed_text_encoding" => {
             v.eq_ignore_ascii_case("UTF-8") || v.eq_ignore_ascii_case("UTF-16")
         }
-        // Q23: English-only xsl:number words/ordinals in v1.
+        // xsl:number writes words and ordinals in English only.
         "default_language_for_numbering" | "languages_for_numbering" => v == "en",
-        // Q24: Gregorian ("AD") and ISO calendars only.
+        // Gregorian ("AD") and ISO calendars only.
         "supported_calendars_in_date_formatting_functions"
         | "default_calendar_in_date_formatting_functions" => v == "AD" || v == "ISO",
         // XTRE0540 policy: recover by default, signal in --strict mode.

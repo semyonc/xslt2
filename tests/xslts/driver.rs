@@ -1,9 +1,9 @@
 //! W3C XSLT conformance harness for `xslt2`.
 //!
 //! Runs the XSLT 2.0-applicable subset of the public W3C XSLT 3.0 test suite
-//! (https://github.com/w3c/xslt30-test, checked out at `../../xslt30-test`) — see
-//! `XSLT2_DESIGN_SKETCH.md` §2 for the suite landscape, dependency policy and assertion
-//! semantics. Always run in `--release`:
+//! (https://github.com/w3c/xslt30-test, checked out at `../../xslt30-test`); `filter.rs` holds
+//! the dependency policy and the exclusions, `compare.rs` the assertion semantics. Always run in
+//! `--release`:
 //!
 //! ```text
 //! cargo test --test xslts --release -- -s ../../xslt30-test
@@ -55,7 +55,7 @@ struct Options {
     strict: bool,
     report: Option<PathBuf>,
     expect_pass: Option<usize>,
-    /// Run against the M0 `StubEngine` instead of the processor.
+    /// Run against the `StubEngine`, which implements nothing, instead of the processor.
     stub: bool,
     /// Run the suite even in a debug build.
     force_debug: bool,
@@ -63,7 +63,39 @@ struct Options {
     skip: Vec<String>,
     /// Compare `assert-xml` leniently everywhere (as if `ignore-prefixes="true"`).
     lenient_xml: bool,
+    /// Arguments that are neither the harness's options nor the test-runner options `cargo test`
+    /// may forward to every test target: refused when the suite would run (`run_suite`).
+    unknown: Vec<String>,
 }
+
+/// The options of the standard test runner that `cargo test -- …` forwards to every test target,
+/// this one included: accepted and ignored. (`--list`, `--skip` and `--test` are the harness's
+/// own.) The first group takes no value, the second one value, as `--flag=value` or
+/// `--flag value`.
+const TEST_RUNNER_FLAGS: &[&str] = &[
+    "--include-ignored",
+    "--ignored",
+    "--force-run-in-process",
+    "--exclude-should-panic",
+    "--bench",
+    "--nocapture",
+    "--no-capture",
+    "-q",
+    "--quiet",
+    "--exact",
+    "--show-output",
+    "--report-time",
+    "--ensure-time",
+    "--shuffle",
+];
+const TEST_RUNNER_OPTIONS: &[&str] = &[
+    "--logfile",
+    "--test-threads",
+    "--color",
+    "--format",
+    "-Z",
+    "--shuffle-seed",
+];
 
 fn print_usage() {
     println!("W3C XSLT conformance harness (XSLT 2.0-applicable subset of xslt30-test)");
@@ -101,6 +133,14 @@ fn print_usage() {
 }
 
 fn parse_args() -> Options {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    parse(&args)
+}
+
+/// Reads the command line `args` (without the program name). `--help` and `--self-test` act at
+/// once; a missing or malformed value exits with status 2; anything unknown is collected in
+/// `Options::unknown`.
+fn parse(args: &[String]) -> Options {
     let mut o = Options {
         suite: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../xslt30-test"),
         groups: Vec::new(),
@@ -119,8 +159,8 @@ fn parse_args() -> Options {
         force_debug: false,
         skip: Vec::new(),
         lenient_xml: false,
+        unknown: Vec::new(),
     };
-    let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     let value = |i: &mut usize, flag: &str| -> String {
         *i += 1;
@@ -162,10 +202,11 @@ fn parse_args() -> Options {
             }
             "--self-test" => {
                 let n = compare::self_test::run();
+                let driver_checks = self_test();
                 println!(
                     "xslts: self-tests passed: {} compare functions, {} xpath30 checks, \
-                     {} engine checks",
-                    n.compare_functions, n.xpath30_checks, n.engine_checks
+                     {} engine checks, {} driver checks",
+                    n.compare_functions, n.xpath30_checks, n.engine_checks, driver_checks
                 );
                 exit(0)
             }
@@ -173,13 +214,73 @@ fn parse_args() -> Options {
                 print_usage();
                 exit(0)
             }
-            // `cargo test` forwards its own filters/flags when invoked without `--`; ignore them.
-            other if other.starts_with("--") => {}
-            other => eprintln!("ignoring argument {other:?}"),
+            flag if TEST_RUNNER_FLAGS.contains(&flag) => {}
+            option if TEST_RUNNER_OPTIONS.contains(&option) => {
+                value(&mut i, option);
+            }
+            option
+                if TEST_RUNNER_OPTIONS
+                    .iter()
+                    .any(|name| option.starts_with(&format!("{name}="))) => {}
+            // An unknown option, or a positional argument (`cargo test NAME` forwards its
+            // test-name filter to every target): kept, and refused if the suite would run.
+            other => o.unknown.push(other.to_string()),
         }
         i += 1;
     }
     o
+}
+
+/// The checks of the command line: the harness's options, the test runner's forwarded options
+/// and what is refused. Returns how many were made; panics on the first failure.
+fn self_test() -> usize {
+    let parse_str = |line: &[&str]| parse(&line.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+    let mut checks = 0;
+    let mut check = |ok: bool, what: &str| {
+        assert!(ok, "driver self-test: {what}");
+        checks += 1;
+    };
+    let o = parse_str(&[
+        "-t",
+        "lre-027",
+        "--test",
+        "lre-028",
+        "-g",
+        "value-of",
+        "--schema-aware",
+    ]);
+    check(
+        o.tests == ["lre-027", "lre-028"] && o.groups == ["value-of"] && o.schema_aware,
+        "the harness's options",
+    );
+    check(o.unknown.is_empty(), "the harness's options are known");
+    let o = parse_str(&[
+        "--nocapture",
+        "--test-threads",
+        "1",
+        "--test-threads=2",
+        "--color=never",
+        "-q",
+        "--skip",
+        "unicode-90",
+    ]);
+    check(
+        o.unknown.is_empty() && o.skip == ["unicode-90"],
+        "the test runner's forwarded options are accepted",
+    );
+    // One argument holding several options (a shell variable passed as one word) is not
+    // `-t`: refused, not read as a request to run everything.
+    let o = parse_str(&["-t lre-027 -t lre-028"]);
+    check(
+        o.unknown == ["-t lre-027 -t lre-028"] && o.tests.is_empty(),
+        "several options in one argument are refused",
+    );
+    let o = parse_str(&["--no-such-option", "lre-027"]);
+    check(
+        o.unknown == ["--no-such-option", "lre-027"],
+        "an unknown option and a positional argument are refused",
+    );
+    checks
 }
 
 fn suite_version(root: &std::path::Path) -> String {
@@ -199,22 +300,22 @@ fn suite_version(root: &std::path::Path) -> String {
 }
 
 fn main() {
-    // The implicit timezone (review R12). XSLT 2.0 §5.4.3.2: "The implicit timezone is
+    // The implicit timezone. XSLT 2.0 §5.4.3.2: "The implicit timezone is
     // implementation-defined"; this processor's default is the host's local offset, so a run's
     // results would depend on where and when it runs (`date-012` fails under CEST, +02:00, and
     // passes under CET). The harness pins UTC, the value the catalog assumes ("we currently assume
     // that an absent timezone means UTC", `date-012` … `date-018`, `date-042`): every case's
-    // transformation gets it as `TransformOptions::implicit_timezone` (`engine::implicit_timezone`,
-    // since the Wave B follow-up), and the process's `TZ` is still set to UTC here, as a guard for
+    // transformation gets it as `TransformOptions::implicit_timezone` (`engine::implicit_timezone`),
+    // and the process's `TZ` is set to UTC here too, as a guard for
     // the XPath the option does not reach, which reads the host's offset: the harness's own
     // `assert` evaluation and catalog parameters (the XPath engine, outside any transformation),
-    // XML Schema 1.1 assertions and type alternatives evaluated during validation (upstream C103),
+    // XML Schema 1.1 assertions and type alternatives evaluated during validation,
     // and `use-when` (evaluated at compile time). `--host-timezone` keeps the host's for both. Set
     // here, before the worker thread starts.
     if !std::env::args().any(|arg| arg == "--host-timezone") {
         std::env::set_var("TZ", "UTC");
     }
-    // Q33: no tail-call elimination in M1, so a deeply recursive named
+    // No tail-call elimination, so a deeply recursive named
     // template needs a bigger stack than a thread gets by default. The whole
     // run happens on one such thread; per-case panics are still caught by the
     // runner.
@@ -241,6 +342,17 @@ fn run_suite() {
             opts.suite.display()
         );
         return;
+    }
+
+    // An argument the harness does not know would otherwise run the whole suite, `unicode-90`
+    // included: refuse it. (A skipped debug build ignores it: `cargo test NAME` forwards its
+    // filter to every target.)
+    if !opts.unknown.is_empty() {
+        eprintln!(
+            "xslts: unknown argument(s) {:?}; nothing run. `--help` lists the options.",
+            opts.unknown
+        );
+        exit(2);
     }
 
     if !opts.suite.join("catalog.xml").is_file() {

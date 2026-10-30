@@ -84,7 +84,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 })?;
             frame.set(param.slot, value);
         }
-        // §9.1 / DESIGN §9.1, the stylesheet-function row:
+        // The dynamic context of a stylesheet function:
         // - focus absent — §10.3 "Within the body of a stylesheet function, the
         //   focus is initially undefined; this means that any attempt to
         //   reference the context item, context position, or context size is a

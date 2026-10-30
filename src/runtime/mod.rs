@@ -193,7 +193,7 @@ pub struct TransformOptions {
     /// `xsl:result-document`.
     ///
     /// A timezone is within -14:00 and +14:00 (XML Schema 1.1 Part 2 §3.3.7); a run given one
-    /// outside that range fails with FODT0003. Not affected: the XPath expressions upstream
+    /// outside that range fails with FODT0003. Not affected: the XPath expressions `xsd-schema`
     /// evaluates during schema validation — XML Schema 1.1 assertions and type alternatives on
     /// validated sources and constructed trees — which read the host's offset.
     pub implicit_timezone: Option<TimezoneOffset>,
@@ -514,8 +514,9 @@ enum GlobalSlot<'t> {
 /// It reads documents — `document()`, `doc()`, `unparsed-text()`,
 /// [`transform_uri`](Self::transform_uri) — through the resolver its
 /// stylesheet was compiled with
-/// ([`Compiler::with_resolver`](crate::Compiler::with_resolver), by default
-/// [`FileResolver`](crate::FileResolver)) unless it is given another
+/// ([`Compiler::with_resolver`](crate::Compiler::with_resolver); by default
+/// [`FileResolver`](crate::FileResolver), or for a schema-aware compiler the
+/// resolver its context was built with) unless it is given another
 /// ([`with_resolver`](Self::with_resolver)).
 pub struct Transformation<'a, 't> {
     sheet: &'a CompiledStylesheet<'a>,
@@ -688,7 +689,8 @@ impl<'a, 't> Transformation<'a, 't> {
     ///
     /// The default is the resolver the stylesheet was compiled with
     /// ([`Compiler::with_resolver`](crate::Compiler::with_resolver);
-    /// [`FileResolver`](crate::FileResolver) for a compiler given none).
+    /// for a compiler given none, [`FileResolver`](crate::FileResolver), or
+    /// the resolver of a schema-aware compiler's context).
     pub fn with_resolver(mut self, resolver: Arc<dyn Resolver>) -> Self {
         self.resolver = resolver;
         self
@@ -817,7 +819,7 @@ impl<'a, 't> Transformation<'a, 't> {
     }
 
     fn run(&self, initial: Option<Nav<'t>>) -> Result<Outcome<'t>, XsltError> {
-        // Q33: everything the run evaluates happens below this frame, so the
+        // Everything the run evaluates happens below this frame, so the
         // stack it uses is measured from here.
         let _stack = self.stack_scope(stack_position());
         // The implicit timezone the host fixed is a timezone: XML Schema 1.1 Part 2 §3.3.7
@@ -900,7 +902,7 @@ impl<'a, 't> Transformation<'a, 't> {
         // or `preserve`, neither of which validates (§19.2.2: "The values
         // validation="preserve" and validation="strip" do not request
         // validation"): the tree's nodes are untyped, or keep what they were
-        // given (decision D-d3).
+        // given.
         out.validation_boundary(match self.sheet.final_validation {
             crate::model::Validation::Preserve => crate::receiver::Boundary::Preserve,
             _ => crate::receiver::Boundary::Strip,

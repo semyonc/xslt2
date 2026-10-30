@@ -15,16 +15,16 @@ use crate::receiver::{
     ComplexContentNormalizer, CopyNamespaces, CopyValidation, Name, Receiver, ResultBuilder,
 };
 
-const XSD_URI: &str = "file:///m4e/m4e.xsd";
+const XSD_URI: &str = "file:///strip/strip.xsd";
 
-/// `urn:m4e`: `doc` (the source's root: `row`s, then `qe`, `qa`, `nums`); `row` (an `xs:ID`
+/// `urn:strip`: `doc` (the source's root: `row`s, then `qe`, `qa`, `nums`); `row` (an `xs:ID`
 /// attribute `id`, an `xs:IDREF` attribute `ref`, the global attribute `size`, an optional `n`);
 /// `n` (a nillable `xs:integer`); `qe` (an `xs:QName` element); `qa` (an `xs:QName` attribute `q`,
 /// an integer-or-QName union attribute `iq`, an attribute `code` of a restriction of `xs:ID`); `nums` (a list of integers); `table` (`row`s
 /// with an `xs:unique` on `@e:size`); the global attributes `size` (an integer range) and `qn`
 /// (an `xs:QName`); `w` (a sequence of `n`) and `ww` (a sequence of `w`).
-const M4E_XSD: &str = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns="urn:m4e"
-    xmlns:e="urn:m4e" targetNamespace="urn:m4e" elementFormDefault="qualified">
+const STRIP_XSD: &str = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns="urn:strip"
+    xmlns:e="urn:strip" targetNamespace="urn:strip" elementFormDefault="qualified">
   <xs:element name="doc">
     <xs:complexType>
       <xs:sequence>
@@ -75,9 +75,9 @@ const M4E_XSD: &str = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" 
   <xs:simpleType name="intOrQName"><xs:union memberTypes="xs:integer xs:QName"/></xs:simpleType>
 </xs:schema>"#;
 
-/// Valid against `M4E_XSD`: two rows (the second with a nilled `n` and an IDREF to the first), a
+/// Valid against `STRIP_XSD`: two rows (the second with a nilled `n` and an IDREF to the first), a
 /// QName element, a QName attribute, a list.
-const DOC: &str = r#"<e:doc xmlns:e="urn:m4e" xmlns:p="urn:p" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><e:row id="r1" e:size="3"><e:n>5</e:n></e:row><e:row id="r2" ref="r1"><e:n xsi:nil="true"/></e:row><e:qe>p:x</e:qe><e:qa q="p:y" iq="5" code="c1"/><e:nums>1 2  3</e:nums></e:doc>"#;
+const DOC: &str = r#"<e:doc xmlns:e="urn:strip" xmlns:p="urn:p" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><e:row id="r1" e:size="3"><e:n>5</e:n></e:row><e:row id="r2" ref="r1"><e:n xsi:nil="true"/></e:row><e:qe>p:x</e:qe><e:qa q="p:y" iq="5" code="c1"/><e:nums>1 2  3</e:nums></e:doc>"#;
 
 /// §19.2.1.1, `strip`: "the new node and each of the contained nodes will have the type annotation
 /// xs:untyped if it is an element, or xs:untypedAtomic if it is an attribute … The values of the is-id
@@ -87,7 +87,7 @@ const DOC: &str = r#"<e:doc xmlns:e="urn:m4e" xmlns:p="urn:p" xmlns:xsi="http://
 #[test]
 fn a_strip_copy_is_untyped_through_the_public_pipeline() {
     let set = SchemaSetBuilder::new()
-        .add_source(M4E_XSD, XSD_URI)
+        .add_source(STRIP_XSD, XSD_URI)
         .unwrap()
         .compile()
         .unwrap()

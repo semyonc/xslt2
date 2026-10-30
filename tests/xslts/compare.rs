@@ -1,4 +1,4 @@
-//! Assertion evaluation (design sketch §2.4) against a `RunOutput`.
+//! Assertion evaluation against a `RunOutput`.
 //!
 //! **Which text each assertion reads.** A `ResultDocument` holds the result tree twice: as the
 //! stylesheet's own `xsl:output` serializes it (`serialized`), and written with the catalog's
@@ -577,8 +577,7 @@ pub fn evaluate(a: &Assertion, out: &RunOutput, cx: &CompareContext<'_>) -> Verd
         }
         // `$result` is the *document node* of the re-parsed result tree, so atomizing it
         // yields the result's string value: right for a text-only result, an honest failure
-        // otherwise. The three below cannot be answered that way at all — see the audit in
-        // `HARNESS_FIX_REPORT.md`.
+        // otherwise. The three below cannot be answered that way at all.
         AssertEq { xpath, ns } => xpath_over_result(out, &format!("$result eq ({xpath})"), ns, cx),
         AssertDeepEq { .. } => Verdict::harness("assert-deep-eq needs a raw sequence result"),
         // `$result instance of document-node()` is true whatever the real result was.
@@ -704,7 +703,7 @@ fn xpath_over_result(
 /// annotations a re-parse of its serialization would lose (XSLT 2.0 §19.2.1.3: serialization
 /// "discards any existing type annotations"). The static context has the stylesheet's schema
 /// set, so that a type or a declaration the assertion names is known, with the set's name table
-/// as its names (M4 plan D-1), and the assertion's namespaces as `eval_xpath` gives them.
+/// as its names, and the assertion's namespaces as `eval_xpath` gives them.
 pub fn typed_asserts(
     doc: &BufferDocument<'_>,
     set: &xsd_schema::SchemaSet,
@@ -1491,7 +1490,7 @@ fn trim_trailing_newlines(s: &str) -> &str {
 ///
 /// The one difference ignored here is the representation of a newline. XSLT 2.0 and XQuery 1.0
 /// Serialization (Second Edition) (REC-xslt-xquery-serialization-20101214, the edition
-/// `xslt20.html` cites) §8, text output method: "A newline character in the instance of the data
+/// XSLT 2.0 cites) §8, text output method: "A newline character in the instance of the data
 /// model MAY be output using any character sequence that is conventionally used to represent a
 /// line ending in the chosen system environment"; §5.1.2, XML output method: "the serializer is
 /// free to represent it using any character sequence that will be normalized to a newline
@@ -1529,8 +1528,7 @@ fn serializations_equal(
 /// Whether two serializations by the `xhtml` or `html` method with `indent="yes"` differ only in
 /// whitespace an indenting serializer may add or remove — the catalog lets a driver "ignore
 /// differences in the serialization that are known to be irrelevant (that is, capable of being
-/// produced by a conformant implementation)" (`admin/catalog-schema.xsd`, `assert-serialization`;
-/// decision D-g12).
+/// produced by a conformant implementation)" (`admin/catalog-schema.xsd`, `assert-serialization`).
 ///
 /// Serialization 1.0 2E §6.1.3 (xhtml; §7.4.3 says the same of html, read at w3.org): "If the
 /// indent parameter has the value yes, the serializer MAY add or remove whitespace as it serializes
@@ -2277,18 +2275,15 @@ pub mod self_test {
     }
 
     /// The per-owner `notImplemented` table reads the owner off the engine's own
-    /// message, so the two formats must agree; a message without an owner is
-    /// not guessed at.
+    /// message, so the two formats must agree; a message without an owner, or
+    /// with one that is not a feature name, is not guessed at.
     fn notimpl_messages_name_their_owner() {
         use crate::report::notimpl_owner;
-        let engine = xslt2::XsltError::not_implemented("xsl:sort", "M2d");
-        assert_eq!(notimpl_owner(&engine.message), Some("M2d"));
-        let engine = xslt2::XsltError::not_implemented("the output method \"x (y)\"", "M3a");
-        assert_eq!(notimpl_owner(&engine.message), Some("M3a"));
-        assert_eq!(
-            notimpl_owner("xsl:sort is not implemented (M4)"),
-            Some("M4")
-        );
+        let engine = xslt2::XsltError::not_implemented("xsl:sort", "some-feature");
+        assert_eq!(notimpl_owner(&engine.message), Some("some-feature"));
+        let engine = xslt2::XsltError::not_implemented("the output method \"x (y)\"", "a-b");
+        assert_eq!(notimpl_owner(&engine.message), Some("a-b"));
+        assert_eq!(notimpl_owner("xsl:sort is not implemented (Later)"), None);
         let engine = xslt2::XsltError::not_implemented("the collation urn:x", "icu-collation");
         assert_eq!(notimpl_owner(&engine.message), Some("icu-collation"));
         assert_eq!(notimpl_owner("engine not implemented"), None);
@@ -2304,7 +2299,7 @@ pub mod self_test {
         }
     }
 
-    /// M2j (E-C7): a result that is not a well-formed document is a document node whose
+    /// A result that is not a well-formed document is a document node whose
     /// children are its top-level nodes. `/` must reach them directly — the `<harness-wrap>`
     /// element the parser needs must never be visible — and nothing about them may be lost on
     /// the way: names, prefixes, namespaces, attributes, text, comments, PIs.
@@ -2397,7 +2392,7 @@ pub mod self_test {
         );
     }
 
-    /// M2j (L-HARNESS-EQNAME, E-C8): assertions in XPath 3.0 syntax are rewritten exactly or
+    /// Assertions in XPath 3.0 syntax are rewritten exactly or
     /// not evaluated at all. The rewritten form must keep namespaces strict — a wrong namespace
     /// is a failure, never a pass.
     fn xpath30_assertions_are_rewritten_exactly() {
@@ -2438,7 +2433,7 @@ pub mod self_test {
         );
     }
 
-    /// M3a (F8): a stylesheet serialization that failed in a case not asking for
+    /// A stylesheet serialization that failed in a case not asking for
     /// serialization leaves the tree assertions to the tree; the serialization assertions see
     /// the failure, and `assert-serialization-error` can match it.
     fn a_failed_serialization_without_serialize_keeps_the_tree() {
@@ -2468,7 +2463,7 @@ pub mod self_test {
         );
     }
 
-    /// M3a: a `(?:…)` group of an XPath 3.0 regex is matched as a plain group, unless the
+    /// a `(?:…)` group of an XPath 3.0 regex is matched as a plain group, unless the
     /// regex has a back-reference; escaped and bracketed `(?:` stay as they are.
     fn non_capturing_groups() {
         assert_eq!(
@@ -2484,8 +2479,8 @@ pub mod self_test {
         );
     }
 
-    /// M2j (L-CRLF-OUTFILE): an expected serialization written with CRLF throughout matches
-    /// LF newlines, for the text, xml and xhtml methods only (xhtml since M3a: Serialization §6
+    /// An expected serialization written with CRLF throughout matches
+    /// LF newlines, for the text, xml and xhtml methods only (xhtml: Serialization §6
     /// gives it the XML method's newline rule), and never hides a carriage return.
     fn crlf_expected_serialization() {
         let text = Some("text");
@@ -2536,7 +2531,7 @@ pub mod self_test {
         );
     }
 
-    /// P2-5: the rebuilt document node is for cases that say their result may not be a
+    /// the rebuilt document node is for cases that say their result may not be a
     /// well-formed document. Elsewhere such a result fails every `assert` over it — negated or
     /// not — instead of letting a stray top-level node pass unseen.
     fn a_non_well_formed_result_must_be_declared() {
@@ -2598,7 +2593,7 @@ pub mod self_test {
             inner: Box::new(assert_("/r")),
         };
         check(evaluate(&rd, &o, &cx()), Outcome::Fail);
-        // M3b: `assert` over a result document sees the document's base URI — the URI it was
+        // `assert` over a result document sees the document's base URI — the URI it was
         // written to (XSLT 2.0 §19.1) — through `base-uri()`, with an `xml:base` resolved
         // against it (`result-document-0102`); a result without one has none.
         let mut based = ResultDocument::same(r#"<two><l xml:base="in/third.xml"/></two>"#);
@@ -2659,7 +2654,7 @@ pub mod self_test {
         )));
     }
 
-    /// P2-3: what the harness refuses is never an engine error; in particular `<error
+    /// what the harness refuses is never an engine error; in particular `<error
     /// code="*"/>` is not satisfied by it, and neither is a negated or alternative assertion.
     fn harness_refusals_are_harness_errors() {
         let refused = RunOutput {
@@ -2693,7 +2688,7 @@ pub mod self_test {
         }
     }
 
-    /// P2-1: the CRLF rule needs inputs that cannot put a carriage return into the result —
+    /// the CRLF rule needs inputs that cannot put a carriage return into the result —
     /// the text method writes a data CR as it is, so `"a\r\nb"` from the data model and a
     /// CRLF-written newline look the same.
     fn crlf_rule_needs_inputs_that_cannot_produce_cr() {
@@ -2792,7 +2787,7 @@ pub mod self_test {
         check(evaluate(&a, &out("a\nb"), &cr_cx), Outcome::Fail);
     }
 
-    /// P2-2: an EQName's braced URI may hold quotes, and a rewrite never turns an assertion
+    /// an EQName's braced URI may hold quotes, and a rewrite never turns an assertion
     /// that is invalid in XPath 3.0 into a valid XPath 2.0 one.
     fn xpath30_rewrites_respect_braced_uris_and_validity() {
         let quoted = |content: &str| out(&format!(r#"<x xmlns="urn:it's">{content}</x>"#));
@@ -3177,7 +3172,7 @@ pub mod self_test {
         assert!(!eq("<pre> x</pre>", "<pre>x</pre>"));
         assert!(!eq("<p>ab</p>", "<p>a b</p>"));
         assert!(!eq("<p a=\"1\">x</p>", "<p a=\"2\">x</p>"));
-        // Review R1: whitespace added next to a comment or processing instruction inside an
+        // Whitespace added next to a comment or processing instruction inside an
         // element, where there was none, is neither "before or after an element" nor "adjacent to
         // an existing whitespace character" (§6.1.3) — and taking one away changes rendering.
         assert!(!eq("<p>a<!--c-->b</p>", "<p>a <!--c--> b</p>"));
@@ -3187,7 +3182,7 @@ pub mod self_test {
         assert!(!eq("<p>a<![CDATA[b]]>c</p>", "<p>a <![CDATA[b]]> c</p>"));
         // … while at document level (outside the document element) whitespace is no content.
         assert!(eq("<!--c--><html/>", "<!--c-->\n<html/>"));
-        // Review R2: `script` (HTML 4.01 %special) and `ruby` (XHTML 1.1 %Ruby.class) are inline.
+        // `script` (HTML 4.01 %special) and `ruby` (XHTML 1.1 %Ruby.class) are inline.
         assert!(!indented_serializations_equal(
             "<p>a <script>x</script></p>",
             "<p>a<script>x</script></p>",

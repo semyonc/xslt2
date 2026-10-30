@@ -1157,7 +1157,8 @@ pub struct CompiledStylesheet<'a> {
     /// §4.3: some module says `input-type-annotations="strip"`, so the annotations of every source
     /// tree are stripped.
     pub(crate) strip_input_annotations: bool,
-    /// The resolver the stylesheet's modules were read through (`Compiler::with_resolver`), which
+    /// The resolver the stylesheet's modules were read through (`Compiler::with_resolver`; for a
+    /// schema-aware compiler given none, its context's), which
     /// every transformation of it reads documents through unless it is given another
     /// (`Transformation::with_resolver`).
     pub(crate) resolver: std::sync::Arc<dyn crate::resolver::Resolver>,

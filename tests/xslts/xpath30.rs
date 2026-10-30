@@ -471,7 +471,7 @@ pub fn self_test() -> usize {
     ] {
         check(t(x).is_none(), x);
     }
-    // P2-2: a BracedURILiteral is opaque — a quote or `(:` inside it starts nothing, so a real
+    // a BracedURILiteral is opaque — a quote or `(:` inside it starts nothing, so a real
     // literal after it is left alone.
     let r = t("/Q{urn:it's}x = 'Q{urn:y}z'").expect("quote inside the braces");
     check(
@@ -489,7 +489,7 @@ pub fn self_test() -> usize {
             == Some("/eqname1:x = 'Q{urn:y}z'".to_string()),
         "(: inside Q{…} does not start a comment",
     );
-    // P2-2: never where the rewrite would turn invalid XPath 3.0 into valid XPath 2.0.
+    // never where the rewrite would turn invalid XPath 3.0 into valid XPath 2.0.
     for x in [
         "/a Q{}div 2", // operator: 3.0 error, 2.0 division
         "/a Q{}and true()",

@@ -45,7 +45,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
                 // §9.10 row 1: a `version < 2.0` region keeps XPath 2.0 syntax
                 // and takes XPath 1.0 compatibility-mode semantics.
                 .with_xpath10_compatibility(sc.compat.is_backwards())
-                // DESIGN §9.5: every expression sees the collation registry and
+                // Every expression sees the collation registry and
                 // the `[xsl:]default-collation` in force (§3.6.1: "the default
                 // collation used by all XPath expressions appearing in the
                 // attributes of this element, or attributes of descendant
@@ -57,9 +57,8 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             }
             // §3.13 / §3.14: in schema-aware mode the in-scope schema
             // components — the built-in types and everything the context's set
-            // holds (M4 plan D-7) — are those of the caller's schema set,
-            // looked up by the ids of its own name table, which is
-            // `self.names` (D-1).
+            // holds — are those of the caller's schema set, looked up by the
+            // ids of its own name table, which is `self.names`.
             if let Some(set) = self.schema {
                 ctx = ctx.with_schema_set(set);
             }

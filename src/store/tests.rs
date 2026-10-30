@@ -109,7 +109,7 @@ fn store_reentrant_load_is_an_error_not_a_panic() {
 /// everywhere in a transformation *and* across two transformations driven by
 /// the same compiled stylesheet.
 #[test]
-fn q35_one_name_table_serves_every_document_and_every_run() {
+fn one_name_table_serves_every_document_and_every_run() {
     let names = NameTable::new();
     let functions = XsltFunctions::new();
     let compiled = Compiler::new(&names, &functions)

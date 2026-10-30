@@ -505,7 +505,7 @@ impl<'a, 't> Transformation<'a, 't> {
             }
             None => {}
         }
-        // Q33: a build can start another one — a pattern or key specifier
+        // A build can start another one — a pattern or key specifier
         // that calls `key()` for another key, or for this key over another
         // document — with no template invocation or function call in between
         // to check the stack, and a chain of them (dependent keys, or one key
@@ -795,7 +795,7 @@ pub(super) fn placement_of(
         // their starting instants, a value without a timezone at the implicit
         // timezone (F&O 1.0 §10.4.15 – §10.4.19: "Returns true if and only if
         // the xs:dateTimes representing the starting instants of $arg1 and
-        // $arg2 compare equal"; upstream since `wave-b` `be5fe3d`, C5) — so
+        // $arg2 compare equal", as `xsd-schema`'s `eq` does) — so
         // `---25-14:00` equals `---26+10:00`, and `2000` equals `2000Z` under
         // UTC. The components do not decide it; the values of one type share a
         // slot, each candidate confirmed by `eq` (a linear scan within the

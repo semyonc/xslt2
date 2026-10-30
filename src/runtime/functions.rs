@@ -140,7 +140,7 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                 // A node's base URI is XDM's `base-uri` accessor — its `xml:base`
                 // chain resolved against its document's base URI
                 // (`stylesheet::node_base_uri`); `DomNavigator::base_uri` is the
-                // unresolved `xml:base` in scope (upstream C7's contract).
+                // unresolved `xml:base` in scope (`xsd-schema`'s contract).
                 let node_base =
                     |nav: &Nav<'t>| crate::stylesheet::node_base_uri(nav, self.static_base_uri());
                 let explicit_base = args.get(1).and_then(|value| match value.first() {
@@ -209,8 +209,8 @@ impl<'t> XsltEvaluator<'_, '_, 't> {
                 // F&O `fn:doc-available`: "returns true if and only if the
                 // function call `fn:doc($uri)` would return a document node".
                 // A failure to retrieve or parse the resource is that answer —
-                // `false`. A failure of the *processor* (a feature this
-                // milestone lacks, a broken invariant in the tree builder) is
+                // `false`. A failure of the *processor* (a feature it does not
+                // implement, a broken invariant in the tree builder) is
                 // not: it means this call cannot tell, and answering `false`
                 // would silently send the stylesheet down its fallback path.
                 let available = match uris.first() {

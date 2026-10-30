@@ -97,6 +97,11 @@ cargo test --release --test xslts -- --self-test       # the harness's own check
 cargo test --release --test xslts -- --help            # every option
 ```
 
+The harness refuses an argument it does not know (exit status 2, nothing run): a mistyped option, or several options
+passed as one argument, would otherwise run the whole suite, `unicode-90` included. It accepts and ignores the options
+of the standard test runner that `cargo test -- …` forwards to every target (`--nocapture`, `--test-threads`, …), and
+a skipped debug build ignores everything, because `cargo test NAME` forwards its filter to every target.
+
 - `--schema-aware`: the `schema_aware` feature is satisfied, so the 584 cases that need a schema-aware processor run
   and the 16 that need a basic one do not. Every case is compiled with a schema-aware processor
   (`SchemaContext::builder()…stylesheet_file(…)…build()`, then `Compiler::schema_aware`): every basic case must keep
@@ -162,10 +167,27 @@ it are re-exported at the crate root.
 | `src/collation.rs` (**pub**), `src/collation/` | The collation registry, the collations of `xsl:sort lang` / `case-order`, the UCA collations of the `icu-collation` feature |
 | `src/schema.rs` | The schema-aware mode: `SchemaContext`, `SchemaContextBuilder`, `xsl:import-schema` (§3.14) |
 | `src/regex.rs` | Regular expressions (§15) in `regexml`'s XPath 2.0 dialect |
+| `src/scaling.rs` | Test-only (`#[cfg(test)]`, and included by `tests/common/mod.rs`): the check of the tests that guard against a quadratic cost |
 | `examples/` | `transform`, `schema_aware`, `in_memory`: small programs on the public API |
-| `tests/*.rs`, `tests/common/` | Integration tests (public API only) and their shared helpers |
+| `tests/*.rs`, `tests/common/` | Integration tests (public API only, one file per subject, below) and their shared helpers |
 | `tests/xslts/` | The W3C conformance harness: `driver`, `catalog`, `filter`, `environment`, `runner`, `engine`, `compare`, `report`, `xpath30` |
 | `tools/suite_diff.py` | Per-case diff of two harness reports |
+| `CHANGELOG.md` | The changes of each release |
+| `doc/CONFORMANCE.md` | Every W3C case that does not pass and every excluded one, with the reason. Update it, with the baselines, whenever a case changes status |
+| `doc/LIMITS.md` | What a transformation can read under each resolver, the resource limits, and advice for untrusted input |
+
+The integration tests, by subject:
+
+| Subject | Files |
+|---|---|
+| The core | `end_to_end`, `basic_semantics`, `dynamic_context`, `architecture_invariants`, `conformance_regressions`, `static_checks`, `use_when_and_not_implemented`, `compatibility`, `recursion_depth` |
+| Namespaces | `namespaces`, `ns_inherit` |
+| Patterns, keys, functions | `pattern_predicates`, `pattern_recovery_and_untyped_tests`, `keys`, `stylesheet_functions`, `fn_error` |
+| Sorting, grouping, collations | `sorting`, `grouping`, `grouping_patterns_and_keys`, `uca_collations`, `collations_without_icu`, `collation_indexes_and_uca_parameters`, `uca_case_order_and_substrings` |
+| Regular expressions, numbering, formatting | `regular_expressions`, `numbering`, `numbering_sequences_and_order`, `number_and_date_formatting` |
+| Serialization and result documents | `serialization`, `serialization_details`, `serialization_corner_cases`, `result_documents`, `result_uris_and_initial_result`, `zero_length_results_and_rootless_uris` |
+| The schema-aware mode | `schema_loading`, `schema_loading_details`, `typed_sources`, `typed_source_details`, `typed_patterns`, `construction_validation`, `copy_and_document_validation`, `type_driven_and_lax_validation`, `typed_ids_and_defaults`, `typed_qname_values`, `xml_schema_1_1`, `xpath_types_timezone_and_locations` |
+| The API | `default_resolvers`, `debug_impls` |
 
 ## Conventions
 
@@ -183,7 +205,8 @@ it are re-exported at the crate root.
   editing it by hand.
 - **This crate's own two codes** (`error::codes_internal`): `XSLT2-NOTIMPL` for a construct the processor recognizes
   but does not implement (`XsltError::not_implemented(feature, owner)`; the message ends in
-  `is not implemented (<owner>)`, and the harness counts such cases as notImplemented, grouped by the owner tag), and
+  `is not implemented (<owner>)`, the owner being what would provide it — a Cargo feature, `icu-collation` — and the
+  harness counts such cases as notImplemented, grouped by the owner), and
   `XSLT2-INTERNAL` for a broken invariant or a lower-layer failure that has no specification code
   (`XsltError::internal`). An error the stylesheet raises with `fn:error` is never one of these, whatever its name
   (`ErrorOrigin`).
@@ -199,6 +222,11 @@ it are re-exported at the crate root.
   `TransformOptions::stack_limit`). A job that recurses deeply runs whole (compile, transform, serialize) inside
   `xslt2::run_on_large_stack(xslt2::DEFAULT_STACK_SIZE, || …)`: the compiled stylesheet and the arena are `!Send`, so
   the closure has to own them.
+- **Tests name what they test.** A test file, a test and a comment say what the behaviour is and cite the rule;
+  they do not name the work item, plan or review that produced them.
+- **Timing tests compare work, not time.** A test that guards against a quadratic (or worse) cost uses
+  `scaling::assert_linear` (or `assert_quadratic`): the work at `8 n` against the work at `n` repeated eight times,
+  never a wall-clock bound, so that it neither fails on a busy machine nor passes a regression on a fast one.
 - **Results stay in memory.** A transformation writes nothing to disk: `Outcome::primary` and `Outcome::secondary`
   hold the trees, and `CompiledStylesheet::serialize_primary` / `serialize_secondary` (and their `_to_bytes` forms)
   serialize them.

@@ -112,7 +112,7 @@ impl<'a, 't> Transformation<'a, 't> {
         env: MatchEnv<'_, 't>,
     ) -> Result<bool, XsltError> {
         // A pattern's predicates may call stylesheet functions, so a direct
-        // call measures the stack it uses from here, as a run does (Q33).
+        // call measures the stack it uses from here, as a run does.
         let _stack = self.stack_scope(super::stack_position());
         for alternative in &pattern.alternatives {
             // The node handed in is both the candidate and, per §16.6.1, the
@@ -868,8 +868,7 @@ fn node_test_matches(
             // exactly one element node, optionally accompanied by one or more comment and
             // processing instruction nodes, if E is an ElementTest or SchemaElementTest that
             // matches the element node" — so a second element child, or any text child, and the
-            // test fails (`import-schema-055`; until M4g only the first element child was
-            // tested).
+            // test fails (`import-schema-055`).
             Some(inner) => {
                 let mut child = nav.clone();
                 if !child.move_to_first_child() {
@@ -1224,7 +1223,7 @@ mod tests {
 
             for e in [
                 XsltError::internal("a broken invariant inside a pattern"),
-                XsltError::not_implemented("format-number()", "M3d"),
+                XsltError::not_implemented("a construct", "some-feature"),
             ] {
                 assert_eq!(
                     run.guard_recoverable(Err(e.clone())),
@@ -1263,7 +1262,7 @@ mod tests {
             .expect("the stylesheet compiles");
         let arena = Bump::new();
         let run = sheet.transformation(&arena, TransformOptions::default());
-        let failure = XsltError::not_implemented("format-number()", "M3d");
+        let failure = XsltError::not_implemented("a construct", "some-feature");
         let back = run.xpath_error(failure.clone().into_xpath_error());
         assert_eq!(back, failure);
         assert!(back.is_processor_failure());

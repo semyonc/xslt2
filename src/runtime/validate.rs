@@ -441,7 +441,7 @@ impl<'a, 't> Transformation<'a, 't> {
                 out.attribute(&name, &value, binding)
             }
             // `xs:untyped` is a complex type (XDM 1.0 §2.6.2): no attribute is String Valid
-            // against it (decision D-f4).
+            // against it.
             CopyValidation::Untyped => Err(XsltError::new(
                 codes::XTTE1540,
                 format!(
@@ -737,7 +737,7 @@ impl ValueConstraints {
     }
 }
 
-// ── The validating receiver (M4 plan D-5) ────────────────────────────────────────────────────
+// ── The validating receiver ──────────────────────────────────────────────────────────────────
 
 /// The receiver between the normalizer and the [`ResultBuilder`] of a transformation's tree
 /// pipelines: it applies §19.2.1.1's annotation rule over the [`Boundary`] events and runs the

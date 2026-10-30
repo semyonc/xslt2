@@ -98,16 +98,20 @@ impl<'a> Compiler<'a> {
     /// that imports something the context did not load is refused
     /// (`XSLT2-INTERNAL`).
     ///
-    /// Like [`new`](Self::new), it reads modules from the file system unless
-    /// it is given a resolver ([`with_resolver`](Self::with_resolver)): as a
-    /// rule the one the context was built with
+    /// It reads modules through the resolver the context was built with
     /// ([`SchemaContextBuilder::with_resolver`](crate::SchemaContextBuilder::with_resolver)),
-    /// which the context does not keep.
+    /// the one that read them for the context, so a stylesheet the context
+    /// read from a [`MemoryResolver`](crate::MemoryResolver) is compiled from
+    /// it too; [`with_resolver`](Self::with_resolver) gives the compiler
+    /// another. A context made without a builder
+    /// ([`SchemaContext::new`], [`SchemaContext::with_version`]), or by a
+    /// builder given no resolver, reads from the file system
+    /// ([`FileResolver`]).
     pub fn schema_aware(context: &'a SchemaContext, functions: &'a XsltFunctions) -> Self {
         Self {
             names: context.names(),
             functions,
-            resolver: Arc::new(FileResolver),
+            resolver: context.resolver(),
             schema: Some(context),
         }
     }
@@ -124,7 +128,10 @@ impl<'a> Compiler<'a> {
     /// `doc()` and `unparsed-text()` targets and [`Transformation::transform_uri`]
     /// sources ([`Transformation::with_resolver`] gives one run another).
     ///
-    /// Without it the compiler reads from the file system ([`FileResolver`]).
+    /// Without it a basic compiler ([`new`](Self::new)) reads from the file
+    /// system ([`FileResolver`]), and a schema-aware one
+    /// ([`schema_aware`](Self::schema_aware)) through the resolver its context
+    /// was built with.
     ///
     /// [`Transformation::transform_uri`]: crate::Transformation::transform_uri
     /// [`Transformation::with_resolver`]: crate::Transformation::with_resolver
@@ -180,7 +187,7 @@ impl<'a> Compiler<'a> {
         let schema = self.schema.map(SchemaContext::schema_set);
         let mut builder = Builder::new(self.names, self.functions, &modules, &catalogs, schema);
         if let Some(context) = self.schema {
-            // D-1: the context must have been built from this stylesheet.
+            // The context must have been built from this stylesheet.
             crate::schema::check_coverage(context, &modules)?;
         }
         builder.build(Arc::clone(&self.resolver))
@@ -361,7 +368,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
     fn build(&mut self, resolver: Arc<dyn Resolver>) -> Result<CompiledStylesheet<'a>, XsltError> {
         // §3.4: the element table first, over every module, so that a misplaced
         // element or a content model the spec does not allow is reported even
-        // when it stands in a subtree nothing would compile (M2c).
+        // when it stands in a subtree nothing would compile.
         checks::check(self.modules, self.functions.collations(), self.schema)?;
         // §10.3: every stylesheet function is in the static context of every
         // expression, wherever it is declared — so they are all collected, and

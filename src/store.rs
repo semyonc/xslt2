@@ -346,7 +346,7 @@ impl<'t> DocumentStore<'t> {
     ///
     /// The navigator borrows `'t` — the arena — and **not** `&self`, so a
     /// caller may hold it across later [`insert`](Self::insert)s and loads
-    /// (the test `inv6_global_variable_spans_two_documents_through_a_recursive_function`
+    /// (the test `global_variable_spans_two_documents_through_a_recursive_function`
     /// checks it).
     ///
     /// # Panics

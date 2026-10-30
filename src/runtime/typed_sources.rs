@@ -405,13 +405,13 @@ impl<'a, 't> Transformation<'a, 't> {
                     }
                     // Nilled follows the PSVI, whatever the children: XML Schema leaves a nilled
                     // element its comments and processing instructions (cvc-elt.3.2.1 forbids
-                    // character and element children only; review F2).
+                    // character and element children only).
                     if has_xsi_nil && matches!(nav.typed_value(), TypedValue::Nilled) {
                         out.set_nil(elem);
                     }
                 }
                 if strip {
-                    // The element's own: the id its typed value is (C62), its is-idrefs (C54).
+                    // The element's own: the id its typed value is, its is-idrefs.
                     let kept = kept_of_element(nav);
                     ids.extend(kept.id);
                     if kept.idrefs {

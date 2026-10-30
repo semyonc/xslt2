@@ -1290,7 +1290,7 @@ pub fn static_context_of(
                 Some(uri) => uri.clone(),
                 // A UCA collation of F&O 3.1 is a missing feature, not a
                 // broken stylesheet, in a build without the `icu-collation`
-                // cargo feature (M2k, DESIGN §9.5), which brings its locale
+                // cargo feature, which brings its locale
                 // data.
                 None => match candidates.iter().find_map(|uri| uca_not_implemented(uri)) {
                     Some(missing) => return Err(missing.with_location(module.location(a))),

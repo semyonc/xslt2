@@ -86,7 +86,7 @@ fn allowed_attributes(local: &str) -> Option<&'static [&'static str]> {
         "key" => &["name", "match", "use", "collation"],
         "function" => &["name", "as", "override"],
         // Everything else (xsl:output, xsl:number, xsl:for-each-group, …) is
-        // checked where it is compiled, or not at all in M1.
+        // checked where it is compiled.
         _ => return None,
     })
 }

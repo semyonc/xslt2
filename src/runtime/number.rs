@@ -33,13 +33,13 @@
 //! | Shape | Time |
 //! |---|---|
 //! | Document order, N = 50,000, every level, `count="*"` or implied, flat or nested | 0.033–0.056 s |
-//! | Implied count over 200 / 1,000 / 5,000 random names, N = 50,000 (before the follow-up: `any` 0.47 / 1.8 / 8.3 s, `single` 0.15 / 0.48 / 2.4 s) | 0.037–0.042 s |
+//! | Implied count over 200 / 1,000 / 5,000 random names, N = 50,000 (before: `any` 0.47 / 1.8 / 8.3 s, `single` 0.15 / 0.48 / 2.4 s) | 0.037–0.042 s |
 //! | Reverse document order, N = 50,000, every level (before, at N = 10,000: `any` 2.5 s, `single` / `multiple` 0.64 s) | 0.036–0.060 s |
 //! | A pseudo-random `xsl:sort` order, N = 50,000, `any` / `single` (before: `single` 5.4 s) | 0.070 s |
 //! | `count="*[$yes]"`, a local variable, N = 50,000, every level (before, at N = 10,000: `any` 12.1 s, `single` 10.1 s) | 0.046–0.11 s |
-//! | Item k of each of S sections in turn (sorted by position), `single`, S × 1,500 / S × 4,000 items at S = 33 / 50 (before the review fixes, from 33 sections on: 0.77 / 8.0 s; baseline 0.059 / 0.24 s) | 0.064 / 0.26 s |
-//! | Element i of each of T copies of a document in turn, `any`, T × 2,000 at T = 33 / 40 (before the review fixes, from 33 trees on: 3.7 / 4.4 s; baseline 0.107 / 0.130 s) | 0.108 / 0.132 s |
-//! | 50,000 elements of one local name in 50,000 namespaces, implied, every level (before the review fixes: 1.8 s; baseline 0.047 s) | 0.056–0.061 s |
+//! | Item k of each of S sections in turn (sorted by position), `single`, S × 1,500 / S × 4,000 items at S = 33 / 50 (before, from 33 sections on: 0.77 / 8.0 s; baseline 0.059 / 0.24 s) | 0.064 / 0.26 s |
+//! | Element i of each of T copies of a document in turn, `any`, T × 2,000 at T = 33 / 40 (before, from 33 trees on: 3.7 / 4.4 s; baseline 0.107 / 0.130 s) | 0.108 / 0.132 s |
+//! | 50,000 elements of one local name in 50,000 namespaces, implied, every level (before: 1.8 s; baseline 0.047 s) | 0.056–0.061 s |
 //!
 //! What stays quadratic — each evaluation counts afresh from the start of
 //! the tree or of the siblings, for a measured reason:
@@ -1378,12 +1378,12 @@ mod tests {
         (text, measured)
     }
 
-    /// Review F1 and the follow-up: without `count` one walk counts every
+    /// Without `count` one walk counts every
     /// implied pattern at once (`Tally::Implied`), so numbering the elements
     /// of a document in document order tests the same number of nodes
     /// however many names are interleaved — 1, 40 or 2,000, cycled (the order
-    /// that defeats any table of fewer names). Before the follow-up each
-    /// evaluation walked back to the previous element of its own name (about
+    /// that defeats any table of fewer names). Walking back from each
+    /// evaluation to the previous element of its own name cost (about
     /// `elements × names` tests: 8 million here for 2,000 names); with its
     /// marks kept for only 16 names (an earlier version), about `elements²`.
     #[test]
@@ -1417,7 +1417,7 @@ mod tests {
         }
     }
 
-    /// Follow-up items 2 and 3: nodes numbered out of document order — in
+    /// Nodes numbered out of document order — in
     /// reverse, or in the order of an `xsl:sort` — are looked up in their
     /// walk's index (`Index`), made when the first node before the walk's
     /// frontier is asked for, so each node of a walk is visited at most
@@ -1457,7 +1457,7 @@ mod tests {
         }
     }
 
-    /// Follow-up item 4: a `count` / `from` pattern that reads a local
+    /// A `count` / `from` pattern that reads a local
     /// variable keeps the memo while the variable keeps its value
     /// (`NumberMemo::locals`); every evaluation used to count afresh (about
     /// `elements² / 2` tests). A variable whose value changes from one
@@ -1593,7 +1593,7 @@ mod tests {
         ));
     }
 
-    /// Review F5: the `level="any"` walks are kept per tree, for several
+    /// The `level="any"` walks are kept per tree, for several
     /// trees: one instruction numbering the elements of a document and of a
     /// copy of it in turn continues each tree's walk where it stopped, where
     /// one walk for all trees started again from the root at every switch
@@ -1631,7 +1631,7 @@ mod tests {
     /// `//node()` with `count="node()"` alternates between the children of
     /// `doc` and the text child of each, and a memo of one parent would
     /// count `doc`'s children from the first one again after every text node
-    /// (the review's surviving mutation M20: about `elements² / 2` tests).
+    /// (about `elements² / 2` tests).
     #[test]
     fn numbering_alternating_parents_in_document_order_is_linear() {
         const ELEMENTS: usize = 4_000;
@@ -1777,7 +1777,7 @@ mod tests {
     /// each time); a walk past `SHORT_WALK` nodes is kept from then on. So the
     /// numbers stay right, the first `SHORT_WALK` rounds cost at most
     /// `sections × SHORT_WALK² / 2` tests and the rest is linear — where
-    /// dropping every walk (or keeping 32 parents, as before the fix) costs
+    /// dropping every walk (or keeping only 32 parents) costs
     /// `sections × items² / 2` (2.3 million here).
     #[test]
     fn numbering_more_parents_than_kept_walks_in_turn() {

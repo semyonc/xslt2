@@ -83,7 +83,7 @@ fn play(pipe: &mut dyn Ops) -> Result<(), crate::XsltError> {
 /// Direct serialization of a transformation equals serialization of its
 /// materialized result tree, byte for byte, and both raise the same error codes.
 #[test]
-fn inv2_direct_serialization_equals_materialized_serialization() {
+fn direct_serialization_equals_materialized_serialization() {
     let arena = Bump::new();
     let names = NameTable::new();
 
@@ -261,7 +261,7 @@ fn nillable_schema() -> SchemaSet {
 /// Typed copy preserves the type annotation, the declaration binding and the
 /// nilled state; `strip` replaces them.
 #[test]
-fn inv5_typed_copy_preserves_or_strips_the_psvi_state() {
+fn typed_copy_preserves_or_strips_the_psvi_state() {
     let schema_set = nillable_schema();
     let arena = Bump::new();
     let source = xsd_schema::document::build_typed_document(
@@ -349,7 +349,7 @@ fn copy_through<'a>(
 
 /// A `DocumentKind::Full` document accepts several element children.
 #[test]
-fn q7_full_document_accepts_several_element_children() {
+fn full_document_accepts_several_element_children() {
     let arena = Bump::new();
     let names = NameTable::new();
     let builder = ResultBuilder::new(&arena, &names, None).expect("builder");
@@ -393,7 +393,7 @@ fn q7_full_document_accepts_several_element_children() {
 /// node is parentless (XDM: a node built by a sequence constructor evaluated
 /// with `as` has no parent).
 #[test]
-fn q6_a_constructed_node_in_a_sequence_is_parentless() {
+fn a_constructed_node_in_a_sequence_is_parentless() {
     let arena = Bump::new();
     let names = NameTable::new();
     let docs = store(&arena, &names);

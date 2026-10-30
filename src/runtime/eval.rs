@@ -709,7 +709,7 @@ impl<'a, 't> Transformation<'a, 't> {
                     format!("there is no attribute set named {name}"),
                 ));
             };
-            // Q33: a set that uses another recurses here with no template
+            // A set that uses another recurses here with no template
             // invocation to check the stack, so only the stack guard stops a
             // long enough chain of them from overflowing it.
             self.check_stack()?;
@@ -771,8 +771,8 @@ impl<'a, 't> Transformation<'a, 't> {
 /// The XMLNS namespace is named outright. The `xs:anyURI` half is two rules, and
 /// nothing more, because nothing more is derivable:
 ///
-/// 1. **Every character must match XML's `Char` production.** `datatypes.html`
-///    §3.3.17.2: "The ·lexical space· of `anyURI` is the set of finite-length
+/// 1. **Every character must match XML's `Char` production.** XML Schema 1.1
+///    Part 2 §3.3.17.2: "The ·lexical space· of `anyURI` is the set of finite-length
 ///    sequences of zero or more characters (as defined in \[XML\]) that ·match·
 ///    the `Char` production from \[XML\]." That is the *whole* constraint the
 ///    datatype imposes; the same section says so outright: "Because it is
@@ -789,12 +789,14 @@ impl<'a, 't> Transformation<'a, 't> {
 ///    `#xFFFE`/`#xFFFF` are out; a `char::is_control` test rejected far more
 ///    than that.
 ///
-/// 2. **At most one `#`.** This is *not* derivable from the local
-///    `datatypes.html`, which is XSD 1.1. It comes from XSD **1.0** Part 2
-///    §3.2.17, where `anyURI`'s lexical space is a URI reference "as defined in
-///    \[RFC 2396\], as amended by \[RFC 2732\]" — a grammar with at most one
-///    fragment separator. (That wording is from memory: no XSD 1.0 datatypes
-///    document is available locally.) The suite selects that reading explicitly:
+/// 2. **At most one `#`.** This is *not* derivable from XML Schema 1.1
+///    Part 2. It comes from XSD **1.0** Part 2
+///    §3.2.17.1, where `anyURI`'s lexical space is the "finite-length character
+///    sequences which, when the algorithm defined in Section 5.4 of \[XML
+///    Linking Language\] is applied to them, result in strings which are legal
+///    URIs according to \[RFC 2396\], as amended by \[RFC 2732\]" — a grammar
+///    with at most one fragment separator. The W3C XSLT test suite selects that
+///    reading explicitly:
 ///    `error-0905a` feeds `####` to `xsl:namespace` and requires XTDE0905, under
 ///    the dependency `<feature value="XSD_1.1" satisfied="false"/>`, while its
 ///    twin `error-0905b` runs the same stylesheet for an XSD 1.1 processor and
@@ -802,7 +804,7 @@ impl<'a, 't> Transformation<'a, 't> {
 ///    `xs:anyURI` is XML Schema 1.0's — a basic processor and a schema-aware one
 ///    with an XML Schema 1.0 context (`error-0905a`) — and not in an XML Schema
 ///    1.1 context (`xsd11`, `SchemaContextBuilder::xsd_version`),
-///    whose `xs:anyURI` is the local `datatypes.html`'s: rule 1 alone
+///    whose `xs:anyURI` is XML Schema 1.1 Part 2's: rule 1 alone
 ///    (`error-0905b`). (`xsd-schema`'s own `xs:anyURI` validation accepts `####`
 ///    in both versions.)
 ///

@@ -1,4 +1,4 @@
-//! `[xsl:]inherit-namespaces="no"` (harness review F9).
+//! `[xsl:]inherit-namespaces="no"`.
 //!
 //! XSLT 2.0 §5.7.1, the last rule of *Constructing Complex Content*:
 //!
@@ -16,23 +16,19 @@
 //! > `xmlns:p=""`) appearing on the child elements when a final result tree is
 //! > serialized.
 //!
-//! The processor used to withhold only the default namespace. A child of a
-//! non-inheriting element still had every **prefixed** namespace node of its
-//! parent — invisible in XML 1.0 output, which cannot undeclare a prefix
-//! (§5.7.3's note: "namespace declarations written for the parent element will
-//! be inherited by its child elements as if the corresponding namespace nodes
-//! were present on the child element"), but plain on the `namespace` axis and
-//! in `in-scope-prefixes()` of the tree. Every test below reads the tree, and
-//! every one failed before the fix (the `REPORT` says how that was checked).
+//! A child of a non-inheriting element has none of the namespace nodes its
+//! parent withholds, the **prefixed** ones included — which XML 1.0 output
+//! cannot show, as it cannot undeclare a prefix (§5.7.3's note: "namespace
+//! declarations written for the parent element will be inherited by its child
+//! elements as if the corresponding namespace nodes were present on the child
+//! element"), but which the `namespace` axis and `in-scope-prefixes()` of the
+//! tree do. Every test below reads the tree.
 //!
-//! The tests from `withholding_covers_bindings_the_parent_inherited` on come
-//! from the independent review of that fix (`XSLT2_NS_INHERIT_REVIEW.md`,
-//! findings N1, N2, N4 and O1): deep copies must not hand withheld bindings
-//! back, `copy-namespaces="no"` must not hand a copy's fixup-produced nodes
-//! down, and a deep non-inheriting chain must stay linear to serialize. The
-//! last one, `a_deep_non_inheriting_chain_is_linear_to_normalize`, comes from
-//! the follow-up review (`XSLT2_NS_INHERIT_REVIEW2.md`, finding R1): it must
-//! stay linear to normalize, too.
+//! From `withholding_covers_bindings_the_parent_inherited` on: deep copies must
+//! not hand withheld bindings back, `copy-namespaces="no"` must not hand a
+//! copy's fixup-produced nodes down, and a deep non-inheriting chain must stay
+//! linear to serialize — and to normalize
+//! (`a_deep_non_inheriting_chain_is_linear_to_normalize`).
 //!
 //! The two tests that drive the crate-internal push pipeline directly,
 //! `both_destinations_agree_on_a_non_inheriting_stream` and
@@ -42,7 +38,7 @@
 mod common;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bumpalo::Bump;
 use xsd_schema::namespace::NameTable;
@@ -344,15 +340,15 @@ fn a_deep_copy_under_a_non_inheriting_element_gets_only_its_own_namespaces() {
     assert_eq!(bare.tree, "a{z=urn:z} x{}");
 }
 
-// ═══ Review N4 — what the parent itself inherited is withheld too ═════════
+// ═══ what the parent itself inherited is withheld too ═════════════════════
 
 /// The shape every nested literal result element has: `m`'s stylesheet
 /// namespace `q` is already in scope — `n` declared it — so `m` does not
 /// declare it again, yet `q` is one of `m`'s namespace nodes, and §11.1.3
 /// says "these namespace nodes are not automatically copied to the
-/// children". Withholding only what the parent declares itself passed every
-/// test above and leaked `q` here (review N4). The second case pins the
-/// reading of review N5: `m` excludes `q` from its own nodes but still has it
+/// children". Withholding only what the parent declares itself would pass every
+/// test above and leak `q` here. The second case pins the reading that `m`
+/// excludes `q` from its own nodes but still has it
 /// by inheritance from `n`, and `d` gets neither `q` nor `m`'s own `p`.
 #[test]
 fn withholding_covers_bindings_the_parent_inherited() {
@@ -372,7 +368,7 @@ fn withholding_covers_bindings_the_parent_inherited() {
     assert_eq!(copied.tree, "n{q=urn:q} x{q=urn:q} d{}");
 }
 
-// ═══ Review N1 — a copy does not hand withheld bindings back ══════════════
+// ═══ a copy does not hand withheld bindings back ══════════════════════════
 
 /// §11.9.2: with `copy-namespaces="yes"` "all the namespace nodes of the
 /// original element are copied to the new element" — all of them, and so no
@@ -382,7 +378,7 @@ fn withholding_covers_bindings_the_parent_inherited() {
 /// element content), at the top level, in a temporary tree or as a parentless
 /// `as=` node. The new parent's own namespace nodes still reach the copy
 /// (§5.7.1's last rule is about the element the copy is attached to). The
-/// shape is the commonest way the fix is used: build in a variable, copy into
+/// shape is the commonest way the attribute is used: build in a variable, copy into
 /// the result. XML 1.0 output cannot tell.
 #[test]
 fn a_copy_does_not_give_a_withheld_child_its_bindings_back() {
@@ -416,7 +412,7 @@ fn a_copy_does_not_give_a_withheld_child_its_bindings_back() {
     assert_eq!(xpath.serialized, "<r>c{} c{} c{} d{}</r>");
 }
 
-// ═══ Review O1 — copy-namespaces="no" ═════════════════════════════════════
+// ═══ copy-namespaces="no" ═════════════════════════════════════════════════
 
 /// §11.9.2, `copy-namespaces="no"`: "none of the namespace nodes are copied:
 /// however, namespace nodes will still be created in the result tree as
@@ -471,15 +467,15 @@ fn copy_namespaces_no_hands_down_no_default_namespace_either() {
     );
 }
 
-// ═══ Review N2 — a deep non-inheriting chain stays linear ═════════════════
+// ═══ a deep non-inheriting chain stays linear ═════════════════════════════
 
 /// Runs `sheet` over `source` on a large stack (the chains below are
-/// thousands of levels deep) and returns the number of namespace declarations each element
-/// of the result carries itself (`NamespaceAxisScope::Local`), in document
-/// order, and how long transformation plus serialization took. A chain that
-/// re-declares on every level is reported without serializing it, which is
-/// what would take minutes.
-fn timed(sheet: String, source: String) -> (Vec<usize>, Option<Duration>) {
+/// thousands of levels deep) and returns the number of namespace declarations
+/// each element of the result carries itself (`NamespaceAxisScope::Local`), in
+/// document order, and how long serializing the result thirty times took. A
+/// chain that re-declares on every level is reported without serializing it,
+/// which is what would take minutes.
+fn serialized(sheet: String, source: String) -> (Vec<usize>, Option<Duration>) {
     xslt2::run_on_large_stack(xslt2::DEFAULT_STACK_SIZE, move || {
         let names = NameTable::new();
         let functions = XsltFunctions::new();
@@ -487,12 +483,10 @@ fn timed(sheet: String, source: String) -> (Vec<usize>, Option<Duration>) {
             .compile_str(&sheet, "file:///ns-inherit/deep.xsl")
             .expect("compile");
         let arena = Bump::new();
-        let started = Instant::now();
         let outcome = compiled
             .transformation(&arena, TransformOptions::default())
             .transform_source("file:///ns-inherit/deep.xml", &source)
             .expect("run");
-        let transformed = started.elapsed();
         let mut counts = Vec::new();
         let mut element = outcome
             .primary
@@ -513,75 +507,78 @@ fn timed(sheet: String, source: String) -> (Vec<usize>, Option<Duration>) {
         if counts.iter().skip(1).any(|&count| count > 0) {
             return (counts, None);
         }
-        let started = Instant::now();
-        compiled
-            .serialize_primary(&outcome)
-            .map(common::body)
-            .expect("serialize");
-        (counts, Some(transformed + started.elapsed()))
+        let elapsed = common::scaling::timed(|| {
+            for _ in 0..30 {
+                compiled
+                    .serialize_primary(&outcome)
+                    .map(common::body)
+                    .expect("serialize");
+            }
+        });
+        (counts, Some(elapsed))
     })
+}
+
+/// Asserts that the chain `make(depth)` gives — a stylesheet and a source —
+/// declares its five namespaces at its top only, and is linear to serialize
+/// from an eighth of the deepest chain to the whole of it
+/// (`common::scaling`).
+fn assert_linear_chain(what: &str, make: impl Fn(usize) -> (String, String)) {
+    // A debug build's frames are large enough for the identity chain to
+    // reach the stack guard at 2,000 levels.
+    const DEPTH: usize = if cfg!(debug_assertions) { 1_500 } else { 3_000 };
+    common::scaling::assert_linear(what, DEPTH / 8, 8, |depth| {
+        let (sheet, source) = make(depth);
+        let (counts, elapsed) = serialized(sheet, source);
+        assert_eq!(counts.len(), depth);
+        assert_eq!(counts[0], 5, "the top of the chain declares its five");
+        assert!(
+            counts[1..].iter().all(|&count| count == 0),
+            "no level below re-declares them: {:?}",
+            &counts[1..6]
+        );
+        elapsed.expect("serialized")
+    });
 }
 
 /// A non-inheriting element that carries namespace nodes of its own — a
 /// recursive literal result element with `xsl:inherit-namespaces="no"`, an
-/// identity `xsl:copy inherit-namespaces="no"` — used to re-declare them on
-/// every level, because they were withheld and then re-declared with the very
-/// URI the parent binds. Upstream's namespace axis walks the declaration chain
-/// from every ancestor that has declarations, so serializing such a chain was
-/// cubic: 47 s at 2,000 levels in a release build instead of 4 ms (review N2).
-/// Now only the top of the chain declares anything. The depth is 1,500 levels
-/// in a debug build, whose frames are large enough for the identity chain to
-/// reach the stack guard at 2,000, and 3,000 in a release build; the fixed
-/// code takes milliseconds either way, and the regression took about 230 s
-/// per chain at 1,500 levels in a debug build (20 s in a release one) and
-/// would take minutes at 3,000 in a release build — two orders of magnitude
-/// above the 2 s bound, which in turn is far above what the test needs.
+/// identity `xsl:copy inherit-namespaces="no"` — must not re-declare them on
+/// every level: they are withheld from its children, and a child that
+/// re-declared them with the very URI the parent binds would make every level
+/// declare five namespaces. The namespace axis of `xsd-schema`'s tree walks
+/// the declaration chain from every ancestor that has declarations, so
+/// serializing such a chain is cubic: 47 s at 2,000 levels in a release build
+/// instead of 4 ms, about 230 s per chain at 1,500 levels in a debug build.
+/// Only the top of the chain declares anything, and a chain is linear to
+/// serialize.
 #[test]
 fn a_deep_non_inheriting_chain_does_not_redeclare_its_namespaces() {
-    const DEPTH: usize = if cfg!(debug_assertions) { 1_500 } else { 3_000 };
-    const BOUND: Duration = Duration::from_secs(2);
     let declarations: String = (0..5)
         .map(|i| format!(r#" xmlns:n{i}="urn:n{i}""#))
         .collect();
 
-    let literal = format!(
-        r#"<xsl:stylesheet version="2.0" xmlns:xsl="{NS}">
-             <xsl:template match="/"><xsl:call-template name="r"><xsl:with-param name="d" select="{DEPTH}"/></xsl:call-template></xsl:template>
-             <xsl:template name="r"><xsl:param name="d"/>
-               <r{declarations} xsl:inherit-namespaces="no"><xsl:if test="$d gt 1"><xsl:call-template name="r"><xsl:with-param name="d" select="$d - 1"/></xsl:call-template></xsl:if></r>
-             </xsl:template>
-           </xsl:stylesheet>"#
-    );
-    let (counts, elapsed) = timed(literal, "<x/>".to_string());
-    assert_eq!(counts.len(), DEPTH);
-    assert_eq!(counts[0], 5, "the top of the chain declares its five");
-    assert!(
-        counts[1..].iter().all(|&count| count == 0),
-        "no level below re-declares them: {:?}",
-        &counts[1..6]
-    );
-    let elapsed = elapsed.expect("serialized");
-    assert!(
-        elapsed < BOUND,
-        "deep literal result chain took {elapsed:?}"
-    );
+    assert_linear_chain("a deep literal result chain", |depth| {
+        let literal = format!(
+            r#"<xsl:stylesheet version="2.0" xmlns:xsl="{NS}">
+                 <xsl:template match="/"><xsl:call-template name="r"><xsl:with-param name="d" select="{depth}"/></xsl:call-template></xsl:template>
+                 <xsl:template name="r"><xsl:param name="d"/>
+                   <r{declarations} xsl:inherit-namespaces="no"><xsl:if test="$d gt 1"><xsl:call-template name="r"><xsl:with-param name="d" select="$d - 1"/></xsl:call-template></xsl:if></r>
+                 </xsl:template>
+               </xsl:stylesheet>"#
+        );
+        (literal, "<x/>".to_string())
+    });
 
-    let mut source = format!("<e{declarations}>");
-    source.push_str(&"<e>".repeat(DEPTH - 1));
-    source.push_str(&"</e>".repeat(DEPTH));
-    let identity = format!(
-        r#"<xsl:stylesheet version="2.0" xmlns:xsl="{NS}">
-             <xsl:template match="*"><xsl:copy inherit-namespaces="no"><xsl:apply-templates/></xsl:copy></xsl:template>
-           </xsl:stylesheet>"#
-    );
-    let (counts, elapsed) = timed(identity, source);
-    assert_eq!(counts.len(), DEPTH);
-    assert_eq!(counts[0], 5);
-    assert!(
-        counts[1..].iter().all(|&count| count == 0),
-        "no level below re-declares them: {:?}",
-        &counts[1..6]
-    );
-    let elapsed = elapsed.expect("serialized");
-    assert!(elapsed < BOUND, "deep identity chain took {elapsed:?}");
+    assert_linear_chain("a deep identity chain", |depth| {
+        let mut source = format!("<e{declarations}>");
+        source.push_str(&"<e>".repeat(depth - 1));
+        source.push_str(&"</e>".repeat(depth));
+        let identity = format!(
+            r#"<xsl:stylesheet version="2.0" xmlns:xsl="{NS}">
+                 <xsl:template match="*"><xsl:copy inherit-namespaces="no"><xsl:apply-templates/></xsl:copy></xsl:template>
+               </xsl:stylesheet>"#
+        );
+        (identity, source)
+    });
 }

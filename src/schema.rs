@@ -5,7 +5,7 @@
 //! 1. The caller builds a [`SchemaContext`] — it owns the `SchemaSet` — from a **pre-scan** of the
 //!    stylesheet: [`SchemaContextBuilder::stylesheet_file`] (or `_uri`, `_str`) loads the module graph
 //!    with the compiler's own [`Loader`] (so `use-when` and the include / import precedence are exactly
-//!    the compiler's), collects every `xsl:import-schema`, keeps for each namespace only the
+//!    the compiler's) through the builder's resolver, collects every `xsl:import-schema`, keeps for each namespace only the
 //!    declarations of the highest import precedence, and [`SchemaContextBuilder::build`] loads them
 //!    into one schema set — together with the schemas the host adds
 //!    ([`SchemaContextBuilder::schema_uri`], `schema_file`, `schema_str`; §3.13: "An implementation
@@ -14,8 +14,9 @@
 //!    set per compiled stylesheet).
 //! 2. `Compiler::schema_aware(&context, &functions)` compiles the same stylesheet with the set's own
 //!    `NameTable` as its names (the XPath binder looks schema types up by the ids of its context's table)
-//!    and the set in every XPath static context. It parses the module graph a second time and checks
-//!    that every import it finds is one the context loaded.
+//!    and the set in every XPath static context. It parses the module graph a second time — through
+//!    the resolver the context was built with, unless it is given another — and checks that every
+//!    import it finds is one the context loaded.
 //!
 //! **Why the set first.** A `SchemaSet` owns its `NameTable` and is mutated while schemas load, so a
 //! compiler that runs first cannot borrow it; the compiled stylesheet, every document of every run and
@@ -24,7 +25,7 @@
 //! **§3.14's semantics**, defined by a synthetic schema document of `xs:import`s:
 //!
 //! * by location — `schema-location` resolved against the declaration's base URI, read through the
-//!   compiler's [`Resolver`]; a document that cannot be read is no error ("it is not intrinsically an
+//!   builder's [`Resolver`]; a document that cannot be read is no error ("it is not intrinsically an
 //!   error if no schema document can be located"), one that is not a valid schema is XTSE0220, and so
 //!   is one whose target namespace is not the declaration's (the synthetic `xs:import` names it,
 //!   src-import) — unless the set already holds a schema document of the declared namespace (a
@@ -63,7 +64,7 @@
 //! **Locations.** A `file:` URI is handed to `xsd-schema` as the file-system path it names
 //! (`schema_location`), so that every location the context reports — in a schema error, a warning,
 //! an inline schema's `<base URI>#schema-N` — is spelled one way, as a path; `ResolverLoader` turns a
-//! path back into a `file:` URI before asking the compiler's resolver. `xsd-schema` resolves every
+//! path back into a `file:` URI before asking the builder's resolver. `xsd-schema` resolves every
 //! directive by RFC 3986 and identifies a document however its location is spelled (`s/../x.xsd`
 //! and `x.xsd` are one document); it reads `file:` URIs too, so the path form is a choice of
 //! spelling. A location with a scheme reaches
@@ -126,12 +127,11 @@ const XSI_NS: &str = "http://www.w3.org/2001/XMLSchema-instance";
 /// let resolver = Arc::new(MemoryResolver::new().with("urn:sheet", sheet));
 /// let functions = XsltFunctions::new();
 /// let context = SchemaContext::builder()
-///     .with_resolver(resolver.clone())
+///     .with_resolver(resolver)
 ///     .stylesheet_uri("urn:sheet", &functions)?
 ///     .build()?;
-/// let compiled = Compiler::schema_aware(&context, &functions)
-///     .with_resolver(resolver)
-///     .compile_uri("urn:sheet")?;
+/// // The compiler reads the stylesheet through the context's resolver.
+/// let compiled = Compiler::schema_aware(&context, &functions).compile_uri("urn:sheet")?;
 /// let arena = bumpalo::Bump::new();
 /// let outcome = compiled
 ///     .transformation(&arena, TransformOptions::default())
@@ -146,12 +146,17 @@ pub struct SchemaContext {
     hosts: Vec<String>,
     /// See [`SchemaContext::warnings`].
     warnings: Vec<String>,
+    /// The resolver the builder read the stylesheet and the schemas through
+    /// ([`FileResolver`] for a context made without one): a schema-aware
+    /// compiler starts with it.
+    resolver: Arc<dyn Resolver>,
 }
 
 impl std::fmt::Debug for SchemaContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SchemaContext")
             .field("imports", &self.imports)
+            .field("resolver", &crate::Opaque("<dyn Resolver>"))
             .finish_non_exhaustive()
     }
 }
@@ -165,19 +170,22 @@ impl Default for SchemaContext {
 impl SchemaContext {
     /// A context with the built-in types only (§3.13: "A schema-aware XSLT processor additionally
     /// supports: All other built-in types defined in \[XML Schema Part 2\]"), XSD 1.0.
-    /// Enough for a stylesheet without `xsl:import-schema`.
+    /// Enough for a stylesheet without `xsl:import-schema`. A compiler made from it reads modules
+    /// from the file system ([`FileResolver`]) unless it is given a resolver.
     pub fn new() -> Self {
         Self::with_version(XsdVersion::V1_0)
     }
 
     /// A context with the built-in types of XML Schema `version` only — see
-    /// [`SchemaContextBuilder::xsd_version`] for what XML Schema 1.1 changes.
+    /// [`SchemaContextBuilder::xsd_version`] for what XML Schema 1.1 changes. Like
+    /// [`new`](Self::new), it reads from the file system.
     pub fn with_version(version: XsdVersion) -> Self {
         Self {
             set: SchemaSet::with_version(version),
             imports: Vec::new(),
             hosts: Vec::new(),
             warnings: Vec::new(),
+            resolver: Arc::new(FileResolver),
         }
     }
 
@@ -195,6 +203,11 @@ impl SchemaContext {
     /// 1.1 ([`SchemaContextBuilder::xsd_version`]).
     pub fn xsd_version(&self) -> XsdVersion {
         self.set.xsd_version
+    }
+
+    /// The resolver the context was built with, which `Compiler::schema_aware` starts with.
+    pub(crate) fn resolver(&self) -> Arc<dyn Resolver> {
+        Arc::clone(&self.resolver)
     }
 
     /// The compiled schema set.
@@ -413,8 +426,13 @@ impl std::fmt::Debug for SchemaContextBuilder {
 }
 
 impl SchemaContextBuilder {
-    /// Where stylesheet modules and schema documents are read from — the resolver the stylesheet
-    /// will be compiled with (default: [`FileResolver`]).
+    /// Where stylesheet modules and schema documents are read from (default: [`FileResolver`]).
+    ///
+    /// The context keeps it: a compiler made from the context
+    /// ([`Compiler::schema_aware`](crate::Compiler::schema_aware)) reads the stylesheet's modules
+    /// through it unless it is given another
+    /// ([`Compiler::with_resolver`](crate::Compiler::with_resolver)), and so does every
+    /// transformation of the compiled stylesheet read its documents.
     pub fn with_resolver(mut self, resolver: Arc<dyn Resolver>) -> Self {
         self.resolver = resolver;
         self
@@ -439,7 +457,7 @@ impl SchemaContextBuilder {
     /// - the built-in types are XML Schema 1.1's, which define three of the XPath 2.0 types of
     ///   §3.13 (`xs:anyAtomicType`, `xs:dayTimeDuration`, `xs:yearMonthDuration`) and add
     ///   `xs:dateTimeStamp`. (`[xsl:]type` may name all four XPath 2.0 types in either version:
-    ///   upstream has them, `xs:untypedAtomic` included, as components of every set —
+    ///   `xsd-schema` has them, `xs:untypedAtomic` included, as components of every set —
     ///   `SchemaSet::xpath_type`.)
     ///
     /// The XPath engine is the same in both versions.
@@ -1168,7 +1186,7 @@ impl Loading {
         // every document (depth first), fix the composition edges, and process the set. A directive
         // that cannot be read is not an error (it is a hint, as a location is); a document that is
         // read and is not a valid schema is.
-        // Every location goes to the compiler's resolver, which decides what can be read — the
+        // Every location goes to the builder's resolver, which decides what can be read — the
         // network included (`FileResolver` reads no `http:` URI); `xsd-schema`'s own network
         // switch would refuse an `http:` location before asking it.
         let config = ResolverConfig {
@@ -1203,6 +1221,7 @@ impl Loading {
             imports,
             hosts: host_locations,
             warnings: self.warnings,
+            resolver: self.resolver,
         };
         for index in 0..context.imports.len() {
             let import = &context.imports[index];
@@ -1275,8 +1294,8 @@ impl Loading {
                     // `xs:import` of it whose location cannot be read (its catalog) — §3.14: "The
                     // namespace attribute indicates that a schema for the given namespace is
                     // required by the stylesheet. This information may be enough on its own to
-                    // enable an implementation to locate the required schema components" (review
-                    // R6; `http://www.w3.org/2001/xml.xsd` is not read from the network).
+                    // enable an implementation to locate the required schema components"
+                    // (`http://www.w3.org/2001/xml.xsd` is not read from the network).
                     Err(_) if namespace.as_deref().is_some_and(has_embedded_schema) => {
                         return self.load_namespace(namespace, at, pending);
                     }
@@ -1291,7 +1310,7 @@ impl Loading {
                         return Ok(false);
                     }
                 };
-                // A hint that does not lead to the namespace's schema (M4g, decision D-g11): when the
+                // A hint that does not lead to the namespace's schema: when the
                 // set already holds a schema document of the declared namespace — a host schema's
                 // (§3.13's mechanism, loaded first), or an earlier import's — a document of another
                 // target namespace at the location is passed over (`found()` false), not XTSE0220.

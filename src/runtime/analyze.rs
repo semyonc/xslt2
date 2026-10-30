@@ -115,7 +115,7 @@ impl<'a, 't> Transformation<'a, 't> {
                     Some(avt) => self.avt(avt, frame, cx)?,
                     None => String::new(),
                 };
-                // Q33: compiling nests on the host stack as deep as the
+                // Compiling nests on the host stack as deep as the
                 // pattern does (the engine's nesting limit bounds that), and this
                 // instruction may itself sit deep in a body with no template
                 // invocation in between to check the stack guard.

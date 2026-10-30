@@ -80,10 +80,6 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             }
         }
 
-        // (Every XSLT 2.0 declaration is implemented since M4a: the pass that
-        // reported a declaration not implemented yet before any template body
-        // was compiled — so that the case was classified as a missing feature —
-        // had only `xsl:import-schema` left, which is the schema context's.)
         self.declare_globals(&global_decls)?;
         // §11.1.4 is a whole-stylesheet mapping resolved by import precedence,
         // so it is settled before the first literal result element compiles.
