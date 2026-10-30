@@ -330,52 +330,48 @@ impl<'a, 't> Transformation<'a, 't> {
     /// The stack guard: fails with the depth error once the run has used
     /// more stack, measured from where it started, than its limit allows.
     ///
-    /// Checked by [`Self::enter`] and wherever else the run nests on the host
-    /// stack with no template invocation or function call in between: the
-    /// built-in template rules, a key index build (`runtime/keys.rs`), the
-    /// evaluation of a global variable, the expansion of an attribute set
-    /// that uses another, the compilation of a computed regular expression
-    /// (`runtime/analyze.rs`).
+    /// Checked by [`Self::enter`], before every instruction
+    /// (`runtime/eval.rs`), and wherever else the run nests on the host stack
+    /// with neither in between: the built-in template rules, a key index build
+    /// (`runtime/keys.rs`), the evaluation of a global variable, the expansion
+    /// of an attribute set that uses another, the compilation of a computed
+    /// regular expression (`runtime/analyze.rs`). What runs between two
+    /// checks — one instruction's own work, an XPath expression's evaluation
+    /// (whose nesting `xsd-schema` bounds) — uses the room the limit leaves.
     ///
     /// A count of nested calls cannot stand in for this, because the stack one
     /// call uses depends on its body — an `xsl:variable` holding nested literal
     /// result elements, nested `xsl:if` / `xsl:for-each`, nested XPath `if` and
     /// `for` all deepen it — so a heavy enough body would overflow the stack
     /// before any fixed count is reached.
+    #[inline]
     pub(super) fn check_stack(&self) -> Result<(), XsltError> {
-        let guard = self.stack.get();
-        if guard.base == 0 {
-            return Ok(());
+        match self.stack.get().exceeded() {
+            None => Ok(()),
+            Some(used) => Err(self.stack_error(used)),
         }
-        let used = guard.base.abs_diff(super::stack_position());
-        if used > guard.limit {
-            return Err(XsltError::internal(format!(
-                "evaluation nested so deep that the run used {used} bytes of stack, \
-                 more than the {} it may use; the stylesheet is probably recursing without \
-                 end (TransformOptions::stack_limit, TransformOptions::max_recursion_depth)",
-                guard.limit
-            )));
-        }
-        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn stack_error(&self, used: usize) -> XsltError {
+        XsltError::internal(format!(
+            "evaluation nested so deep that the run used {used} bytes of stack, \
+             more than the {} it may use; the stylesheet is probably recursing without \
+             end, or nests deeper than this thread's stack allows \
+             (TransformOptions::stack_limit, TransformOptions::max_recursion_depth, \
+             run_on_large_stack)",
+            self.stack.get().limit()
+        ))
     }
 
     /// `TransformOptions::stack_limit` for a run whose stack is measured from
     /// `base`: the explicit option, else what the thread allows (see the
     /// option's documentation).
     pub(super) fn stack_limit_from(&self, base: usize) -> usize {
-        if let Some(limit) = self.options.stack_limit {
-            return limit;
-        }
-        match super::LARGE_STACK.with(std::cell::Cell::get) {
-            Some((top, size)) => {
-                let in_use = top.abs_diff(base);
-                // One eighth, at least 1 MiB — but never more than half, so
-                // that a small worker stack still runs shallow stylesheets.
-                let reserve = (size / 8).max(super::MIN_STACK_RESERVE.min(size / 2));
-                size.saturating_sub(in_use).saturating_sub(reserve)
-            }
-            None => super::OTHER_THREAD_STACK_LIMIT,
-        }
+        self.options
+            .stack_limit
+            .unwrap_or_else(|| super::thread_stack_limit(base))
     }
 
     fn invoke_body(

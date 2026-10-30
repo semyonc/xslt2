@@ -39,7 +39,9 @@ fn the_debug_output_identifies_without_dumping_trees() {
         format!("{compiler:?}"),
         "Compiler { schema_aware: false, xsd_version: None, resolver: <dyn Resolver>, .. }"
     );
-    let sheet = compiler.compile_uri("urn:example:sheet").expect("compiles");
+    let sheet = compiler
+        .compile_uri("urn:example:sheet")
+        .unwrap_or_else(|e| panic!("the stylesheet does not compile: {e}"));
     assert_eq!(
         format!("{sheet:?}"),
         "CompiledStylesheet { base_uri: \"urn:example:sheet\", modules: 1, templates: 1, \
@@ -67,7 +69,7 @@ fn the_debug_output_identifies_without_dumping_trees() {
             "urn:example:in",
             "<source-element>source-text</source-element>",
         )
-        .expect("runs");
+        .unwrap_or_else(|e| panic!("the transformation fails: {e}"));
     let run_debug = format!("{run:?}");
     assert!(
         run_debug.starts_with(
@@ -170,5 +172,5 @@ fn a_failed_compilation_unwraps_its_error() {
             "urn:example:sheet",
         )
         .unwrap_err();
-    assert_eq!(error.code, "XTSE0500");
+    assert_eq!(error.code, "XTSE0500", "{error}");
 }

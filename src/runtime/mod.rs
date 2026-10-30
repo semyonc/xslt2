@@ -97,15 +97,24 @@ pub struct TransformOptions {
     /// [`Self::max_recursion_depth`].
     ///
     /// Checked on entry to every template invocation (built-in template rules
-    /// included) and every stylesheet-function call, so a deep recursion ends
-    /// in that error however much stack each of its calls uses — and also
-    /// where evaluation nests without such an entry: before every key index
-    /// build (a key's pattern or key specifier may call `key()` for another
-    /// key, or for the same key over another document), every evaluation of
-    /// a global variable, every attribute set that another one uses, and
-    /// every compilation of a computed `xsl:analyze-string` regular
-    /// expression. What one body uses *between* two such entries is not
-    /// checked; the room left above the limit is for that.
+    /// included), every stylesheet-function call and every instruction, so a
+    /// deep recursion, or a template body whose instructions or literal result
+    /// elements nest deep, ends in that error however much stack each level
+    /// uses — and also where evaluation nests without such an entry: before
+    /// every key index build (a key's pattern or key specifier may call
+    /// `key()` for another key, or for the same key over another document),
+    /// every evaluation of a global variable, every attribute set that another
+    /// one uses, and every compilation of a computed `xsl:analyze-string`
+    /// regular expression. What runs *between* two checks — one instruction's
+    /// own work, the evaluation of one XPath expression, whose nesting the
+    /// XPath parser bounds — uses the room left above the limit. Copying,
+    /// whitespace-stripping and serializing a tree do not recurse, whatever
+    /// its depth.
+    ///
+    /// A compilation is guarded the same way, with the limit `None` gives
+    /// here: it checks the stack at every instruction, at every element of
+    /// the static checks and at every module of an `xsl:include` /
+    /// `xsl:import` chain.
     ///
     /// `None` (the default) derives the limit from the thread the run is on:
     ///
@@ -268,12 +277,15 @@ pub const DEFAULT_MAX_RECURSION_DEPTH: usize = 40_000;
 
 /// The [`TransformOptions::stack_limit`] a run uses by default on a thread that
 /// [`run_on_large_stack`] did not start: 1 MiB from the point where the run
-/// starts.
+/// starts. A compilation on such a thread has the same limit.
 ///
 /// The run cannot know the size of such a thread's stack. Rust gives a spawned
 /// thread 2 MiB by default (and a test thread the same), so this limit leaves
-/// half of that for what was in use before the run and for the stack one body
-/// uses between two checks.
+/// half of that for what was in use before the run and for what runs between
+/// two checks: one instruction, and the evaluation of one XPath expression.
+/// Measured in a release build, the deepest XPath expression the parser
+/// accepts still evaluates at the limit on a 2 MiB thread; a debug build uses
+/// several times more stack per level, for that evaluation too.
 pub const OTHER_THREAD_STACK_LIMIT: usize = 1024 * 1024;
 
 /// The smallest reserve the stack guard keeps on a [`run_on_large_stack`]
@@ -294,7 +306,7 @@ thread_local! {
 /// guard only ever takes the distance between two positions, so the direction
 /// does not matter.
 #[inline(always)]
-fn stack_position() -> usize {
+pub(crate) fn stack_position() -> usize {
     let marker = 0u8;
     std::hint::black_box(std::ptr::addr_of!(marker)) as usize
 }
@@ -307,9 +319,9 @@ fn stack_position() -> usize {
 /// serialize — has to happen inside the closure; only owned, `Send` values
 /// cross the boundary.
 ///
-/// The thread remembers its stack size, so a transformation run inside `job`
-/// knows how much stack it may use before it stops with the depth error
-/// rather than overflowing ([`TransformOptions::stack_limit`]).
+/// The thread remembers its stack size, so a compilation or a transformation
+/// run inside `job` knows how much stack it may use before it stops with the
+/// depth error rather than overflowing ([`TransformOptions::stack_limit`]).
 pub fn run_on_large_stack<R, F>(stack_size: usize, job: F) -> R
 where
     F: FnOnce() -> R + Send + 'static,
@@ -326,12 +338,88 @@ where
         .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
 }
 
-/// Where on the stack a run started, and how far below that it may go
-/// ([`TransformOptions::stack_limit`]). `base` is 0 outside a run.
+/// The stack a job that starts at `base` (a [`stack_position`]) may use on
+/// this thread when nothing sets a limit explicitly: on a thread
+/// [`run_on_large_stack`] started, its stack size less what is in use at
+/// `base` and less a reserve; on any other thread [`OTHER_THREAD_STACK_LIMIT`].
+/// The default of [`TransformOptions::stack_limit`], and the limit of every
+/// compilation.
+pub(crate) fn thread_stack_limit(base: usize) -> usize {
+    match LARGE_STACK.with(std::cell::Cell::get) {
+        Some((top, size)) => {
+            let in_use = top.abs_diff(base);
+            // One eighth, at least 1 MiB — but never more than half, so
+            // that a small worker stack still runs shallow stylesheets.
+            let reserve = (size / 8).max(MIN_STACK_RESERVE.min(size / 2));
+            size.saturating_sub(in_use).saturating_sub(reserve)
+        }
+        None => OTHER_THREAD_STACK_LIMIT,
+    }
+}
+
+/// Where on the stack a job started — a run, or a compilation — and how far
+/// below that it may go ([`TransformOptions::stack_limit`] for a run,
+/// [`thread_stack_limit`] for a compilation). `base` is 0 when no job is in
+/// progress, and the guard is then off.
 #[derive(Clone, Copy, Default)]
-struct StackGuard {
+pub(crate) struct StackGuard {
     base: usize,
     limit: usize,
+}
+
+impl StackGuard {
+    /// A guard measuring from the caller's frame, with the limit the thread
+    /// allows ([`thread_stack_limit`]). Inlined, so that the base is a
+    /// position in the caller's own frame.
+    #[inline(always)]
+    pub(crate) fn here() -> Self {
+        let base = stack_position();
+        Self {
+            base,
+            limit: thread_stack_limit(base),
+        }
+    }
+
+    /// The limit, in bytes.
+    pub(crate) fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// The stack used since the base, if that is more than the limit.
+    #[inline(always)]
+    pub(crate) fn exceeded(&self) -> Option<usize> {
+        if self.base == 0 {
+            return None;
+        }
+        let used = self.base.abs_diff(stack_position());
+        (used > self.limit).then_some(used)
+    }
+
+    /// The guard of a compilation: an error once the compilation has used
+    /// more stack than the thread allows. Loading the modules, checking them
+    /// and compiling their instructions recurse over the nesting of the
+    /// stylesheet (and of its `xsl:include` / `xsl:import` chain), which only
+    /// the stylesheet bounds. XSLT 2.0 §21: "A conforming processor may impose
+    /// limits on the processing resources consumed by the processing of a
+    /// stylesheet"; the error has the code of the run's stack guard.
+    #[inline]
+    pub(crate) fn check_compilation(&self) -> Result<(), XsltError> {
+        match self.exceeded() {
+            None => Ok(()),
+            Some(used) => Err(self.compilation_error(used)),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn compilation_error(&self, used: usize) -> XsltError {
+        XsltError::internal(format!(
+            "the stylesheet nests so deep that compiling it used {used} bytes of stack, more \
+             than the {} a compilation may use on this thread; compile it on a larger stack \
+             (run_on_large_stack, OTHER_THREAD_STACK_LIMIT)",
+            self.limit
+        ))
+    }
 }
 
 /// The extent of one public entry point that evaluates stylesheet code (a

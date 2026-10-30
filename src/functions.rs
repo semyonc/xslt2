@@ -1026,7 +1026,12 @@ impl<N: xsd_schema::navigator::DomNavigator> xsd_schema::xpath::functions::Funct
             XsltFn::Doc if args.first().is_none_or(XPathValue::is_empty) => Ok(XPathValue::empty()),
             // §3.12: "Statically known documents: None" and "Available
             // documents: None", so `fn:doc` can never find its document. F&O
-            // gives that FODC0002 (`use-when-0128`). It is the processor's
+            // 1.0 Second Edition §15.5.4 names FODC0005 for that ("If the
+            // Available documents provides no mapping for the string, an error
+            // is raised [err:FODC0005]"); this raises FODC0002 ("Error
+            // retrieving resource"), the code `fn:doc` reports for a document
+            // it cannot retrieve anywhere else and the code the W3C case
+            // `use-when-0128` expects. It is the processor's
             // error, not one the stylesheet raised through `fn:error`, so it
             // travels like the four name errors above, as the engine's host
             // error carrying the `XsltError` with `ErrorOrigin::Processor`.

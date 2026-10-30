@@ -125,6 +125,11 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         module_id: ModuleId,
     ) -> Result<Instruction, XsltError> {
         let module = self.modules.module(module_id);
+        // An instruction's content compiles below it, so the compilation
+        // recurses as deep as the instructions nest.
+        self.stack
+            .check_compilation()
+            .map_err(|e| e.with_location(module.location(nav)))?;
         let ctx = self.context_of(nav, module)?;
         if nav.namespace_uri() != XSLT_NS {
             let sc = self.static_contexts.get(ctx);

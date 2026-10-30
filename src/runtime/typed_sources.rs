@@ -323,6 +323,11 @@ impl<'a, 't> Transformation<'a, 't> {
         Ok(arena.alloc(copy))
     }
 
+    /// The copy of `nav` and everything below it into `out` ([`Self::copy_typed`]);
+    /// `preserve_space` is whether `xml:space="preserve"` is in force at `nav`'s parent.
+    ///
+    /// The walk is a loop with a cursor, not a recursion, so a source of any depth needs no more
+    /// host stack than a shallow one.
     fn copy_typed_node(
         &self,
         nav: &Nav<'t>,
@@ -334,125 +339,157 @@ impl<'a, 't> Transformation<'a, 't> {
         let refused = |e: BufferDocumentError| {
             XsltError::internal(format!("the source-tree builder refused: {e}"))
         };
-        match nav.node_type() {
-            DomNodeType::Element => {
-                let mut preserve = preserve_space;
-                let mut decls: Vec<(String, String)> = Vec::new();
-                let mut ns = nav.clone();
-                if ns.move_to_first_namespace(NamespaceAxisScope::Local) {
-                    loop {
-                        decls.push((ns.local_name().to_string(), ns.value()));
-                        if !ns.move_to_next_namespace(NamespaceAxisScope::Local) {
-                            break;
-                        }
+        // For each open element, from `nav` down to the cursor's parent: whether
+        // `xml:space="preserve"` is in force in it, and whether its whitespace text children are
+        // stripped.
+        let mut open: Vec<(bool, bool)> = Vec::new();
+        let mut cursor = nav.clone();
+        loop {
+            match cursor.node_type() {
+                DomNodeType::Element => {
+                    let inherited = open
+                        .last()
+                        .map_or(preserve_space, |&(preserve, _)| preserve);
+                    let (preserve, strip_children) =
+                        self.start_typed_copy(&cursor, inherited, strip, space_rules, out)?;
+                    let mut child = cursor.clone();
+                    if child.move_to_first_child()
+                        && super::documents::first_kept(&mut child, strip_children)
+                    {
+                        open.push((preserve, strip_children));
+                        cursor = child;
+                        continue;
                     }
+                    out.end_element().map_err(refused)?;
                 }
-                let decls: Vec<(&str, &str)> = decls
-                    .iter()
-                    .map(|(p, u)| (p.as_str(), u.as_str()))
-                    .collect();
-                let elem = out
-                    .start_element(nav.local_name(), nav.namespace_uri(), nav.prefix(), &decls)
-                    .map_err(refused)?;
-                // §4.3: "The values of the is-id and is-idrefs properties are not changed" — the
-                // ids the element answers to in the source (by its attributes and by its own typed
-                // value), registered on the copy, and the is-idrefs property of the element and its
-                // attributes.
-                let mut ids: Vec<String> = Vec::new();
-                // Whether the element carries `xsi:nil`: only then can it be nilled, so only then is
-                // its typed value asked for (it is computed, not stored).
-                let mut has_xsi_nil = false;
-                let mut attr = nav.clone();
-                if attr.move_to_first_attribute() {
-                    loop {
-                        let value = attr.value();
-                        if attr.local_name() == "space" && attr.namespace_uri() == XML_NS {
-                            preserve = whitespace::trim(&value) == "preserve";
-                        }
-                        if attr.local_name() == "nil" && attr.namespace_uri() == XSI_NS {
-                            has_xsi_nil = true;
-                        }
-                        let node = out
-                            .attribute(
-                                attr.local_name(),
-                                attr.namespace_uri(),
-                                attr.prefix(),
-                                &value,
-                            )
-                            .map_err(refused)?;
-                        if strip {
-                            let owner = nav.current_ref();
-                            if attr.is_idrefs() {
-                                out.register_idrefs(node);
-                            }
-                            if nav.document().get_element_by_id_in_tree(owner, &value)
-                                == Some(owner)
-                            {
-                                ids.push(value);
-                            }
-                        } else if let Some(binding) = attr.schema_binding() {
-                            out.set_node_binding(node, *binding).map_err(refused)?;
-                        }
-                        if !attr.move_to_next_attribute() {
-                            break;
-                        }
-                    }
-                }
-                out.end_of_attributes();
-                if !strip {
-                    if let Some(binding) = nav.schema_binding() {
-                        out.set_node_binding(elem, *binding).map_err(refused)?;
-                    }
-                    // Nilled follows the PSVI, whatever the children: XML Schema leaves a nilled
-                    // element its comments and processing instructions (cvc-elt.3.2.1 forbids
-                    // character and element children only).
-                    if has_xsi_nil && matches!(nav.typed_value(), TypedValue::Nilled) {
-                        out.set_nil(elem);
-                    }
-                }
-                if strip {
-                    // The element's own: the id its typed value is, its is-idrefs.
-                    let kept = kept_of_element(nav);
-                    ids.extend(kept.id);
-                    if kept.idrefs {
-                        out.register_idrefs(elem);
-                    }
-                }
-                for id in &ids {
-                    out.register_xml_id(id, elem).map_err(refused)?;
-                }
-                // §4.4: the simple-content exemption reads the annotation, which `strip` has
-                // already removed ("Stripping of type annotations happens before stripping of
-                // whitespace text nodes").
-                let strip_children = space_rules
-                    && !preserve
-                    && self.strips(nav)
-                    && (strip || !has_simple_content(nav));
-                let mut child = nav.clone();
-                if child.move_to_first_child() {
-                    loop {
-                        let drop = strip_children
-                            && child.node_type().is_text_like()
-                            && whitespace::is_all_xml_whitespace(&child.value());
-                        if !drop {
-                            self.copy_typed_node(&child, preserve, strip, space_rules, out)?;
-                        }
-                        if !child.move_to_next_sibling() {
-                            break;
-                        }
-                    }
-                }
-                out.end_element().map_err(refused)
+                DomNodeType::Comment => out.comment(&cursor.value()).map_err(refused)?,
+                DomNodeType::ProcessingInstruction => out
+                    .processing_instruction(cursor.local_name(), &cursor.value())
+                    .map_err(refused)?,
+                _ => out.text(&cursor.value()),
             }
-            DomNodeType::Comment => out.comment(&nav.value()).map_err(refused),
-            DomNodeType::ProcessingInstruction => out
-                .processing_instruction(nav.local_name(), &nav.value())
-                .map_err(refused),
-            _ => {
-                out.text(&nav.value());
-                Ok(())
+            // The next node: the next kept sibling of the cursor or of the nearest open element
+            // that has one, closing the elements left.
+            loop {
+                let Some(&(_, strip_children)) = open.last() else {
+                    return Ok(());
+                };
+                if cursor.move_to_next_sibling()
+                    && super::documents::first_kept(&mut cursor, strip_children)
+                {
+                    break;
+                }
+                cursor.move_to_parent();
+                open.pop();
+                out.end_element().map_err(refused)?;
             }
         }
+    }
+
+    /// The start of an element's copy in [`Self::copy_typed_node`]: its name, namespace
+    /// declarations, attributes, ids, binding and nilled property. Returns whether
+    /// `xml:space="preserve"` is in force in it, and whether its whitespace text children are
+    /// stripped.
+    fn start_typed_copy(
+        &self,
+        nav: &Nav<'t>,
+        preserve_space: bool,
+        strip: bool,
+        space_rules: bool,
+        out: &mut BufferDocumentBuilder<'t>,
+    ) -> Result<(bool, bool), XsltError> {
+        let refused = |e: BufferDocumentError| {
+            XsltError::internal(format!("the source-tree builder refused: {e}"))
+        };
+        let mut preserve = preserve_space;
+        let mut decls: Vec<(String, String)> = Vec::new();
+        let mut ns = nav.clone();
+        if ns.move_to_first_namespace(NamespaceAxisScope::Local) {
+            loop {
+                decls.push((ns.local_name().to_string(), ns.value()));
+                if !ns.move_to_next_namespace(NamespaceAxisScope::Local) {
+                    break;
+                }
+            }
+        }
+        let decls: Vec<(&str, &str)> = decls
+            .iter()
+            .map(|(p, u)| (p.as_str(), u.as_str()))
+            .collect();
+        let elem = out
+            .start_element(nav.local_name(), nav.namespace_uri(), nav.prefix(), &decls)
+            .map_err(refused)?;
+        // §4.3: "The values of the is-id and is-idrefs properties are not changed" — the
+        // ids the element answers to in the source (by its attributes and by its own typed
+        // value), registered on the copy, and the is-idrefs property of the element and its
+        // attributes.
+        let mut ids: Vec<String> = Vec::new();
+        // Whether the element carries `xsi:nil`: only then can it be nilled, so only then is
+        // its typed value asked for (it is computed, not stored).
+        let mut has_xsi_nil = false;
+        let mut attr = nav.clone();
+        if attr.move_to_first_attribute() {
+            loop {
+                let value = attr.value();
+                if attr.local_name() == "space" && attr.namespace_uri() == XML_NS {
+                    preserve = whitespace::trim(&value) == "preserve";
+                }
+                if attr.local_name() == "nil" && attr.namespace_uri() == XSI_NS {
+                    has_xsi_nil = true;
+                }
+                let node = out
+                    .attribute(
+                        attr.local_name(),
+                        attr.namespace_uri(),
+                        attr.prefix(),
+                        &value,
+                    )
+                    .map_err(refused)?;
+                if strip {
+                    let owner = nav.current_ref();
+                    if attr.is_idrefs() {
+                        out.register_idrefs(node);
+                    }
+                    if nav.document().get_element_by_id_in_tree(owner, &value) == Some(owner) {
+                        ids.push(value);
+                    }
+                } else if let Some(binding) = attr.schema_binding() {
+                    out.set_node_binding(node, *binding).map_err(refused)?;
+                }
+                if !attr.move_to_next_attribute() {
+                    break;
+                }
+            }
+        }
+        out.end_of_attributes();
+        if !strip {
+            if let Some(binding) = nav.schema_binding() {
+                out.set_node_binding(elem, *binding).map_err(refused)?;
+            }
+            // Nilled follows the PSVI, whatever the children: XML Schema leaves a nilled
+            // element its comments and processing instructions (cvc-elt.3.2.1 forbids
+            // character and element children only).
+            if has_xsi_nil && matches!(nav.typed_value(), TypedValue::Nilled) {
+                out.set_nil(elem);
+            }
+        }
+        if strip {
+            // The element's own: the id its typed value is, its is-idrefs.
+            let kept = kept_of_element(nav);
+            ids.extend(kept.id);
+            if kept.idrefs {
+                out.register_idrefs(elem);
+            }
+        }
+        for id in &ids {
+            out.register_xml_id(id, elem).map_err(refused)?;
+        }
+        // §4.4: the simple-content exemption reads the annotation, which `strip` has
+        // already removed ("Stripping of type annotations happens before stripping of
+        // whitespace text nodes").
+        let strip_children =
+            space_rules && !preserve && self.strips(nav) && (strip || !has_simple_content(nav));
+        Ok((preserve, strip_children))
     }
 }
 

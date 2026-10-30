@@ -373,11 +373,16 @@
 //!
 //! ## Running on a large stack
 //!
-//! Templates and stylesheet functions recurse on the native stack. A run
-//! measures the stack it uses and stops with an error instead of overflowing
+//! Templates, stylesheet functions and nested instructions recurse on the
+//! native stack, and so does the compilation of nested instructions. A run
+//! measures the stack it uses at every template, function and instruction, a
+//! compilation at every instruction and module, and either one stops with an
+//! `XSLT2-INTERNAL` error instead of overflowing
 //! ([`TransformOptions::stack_limit`], [`TransformOptions::max_recursion_depth`]);
 //! on a thread whose stack size it cannot know it allows itself
-//! [`OTHER_THREAD_STACK_LIMIT`]. A deeply recursive job runs whole — compile,
+//! [`OTHER_THREAD_STACK_LIMIT`]. Copying, whitespace-stripping and serializing a
+//! tree do not recurse, so a document of any depth needs no more stack than a
+//! shallow one. A deeply recursive job runs whole — compile,
 //! transform, serialize — on a thread with a large stack: the compiled
 //! stylesheet borrows the name table and the arena, which are not `Sync`, so
 //! it is not `Send`; the closure owns them all and returns owned values.
@@ -444,7 +449,8 @@
 //! - no extension instructions; `xsl:number` and the date formatting functions
 //!   write English, and the dates are Gregorian;
 //! - the output encodings are UTF-8, UTF-16, US-ASCII and ISO-8859-1;
-//! - deep recursion needs a large stack (above).
+//! - deep recursion and deep nesting need a large stack (above); on a smaller
+//!   thread the processor stops with an error, not an overflow.
 
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]

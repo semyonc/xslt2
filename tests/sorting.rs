@@ -1374,7 +1374,7 @@ fn uca_collations_are_not_implemented_without_the_feature() {
     }
 }
 
-// ── Lead-added: document() returns nodes in document order, no duplicates ──
+// ── document() returns nodes in document order, no duplicates ──
 
 /// §16.1: "The sequence of nodes returned by the function is in document order,
 /// with no duplicates. This order has no necessary relationship to the order in
@@ -1426,7 +1426,7 @@ fn document_returns_document_order_without_duplicates() {
     );
 }
 
-// ── Lead-added: an excluded element's default-collation is not checked ──
+// ── An excluded element's default-collation is not checked ──
 
 /// §3.12: "When a node is effectively excluded from a stylesheet module the
 /// stylesheet module has the same effect as if the node were not there. Among

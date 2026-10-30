@@ -180,7 +180,7 @@ The integration tests, by subject:
 
 | Subject | Files |
 |---|---|
-| The core | `end_to_end`, `basic_semantics`, `dynamic_context`, `architecture_invariants`, `conformance_regressions`, `static_checks`, `use_when_and_not_implemented`, `compatibility`, `recursion_depth` |
+| The core | `end_to_end`, `basic_semantics`, `dynamic_context`, `architecture_invariants`, `conformance_regressions`, `static_checks`, `use_when_and_not_implemented`, `compatibility`, `recursion_depth`, `stack_guard` |
 | Namespaces | `namespaces`, `ns_inherit` |
 | Patterns, keys, functions | `pattern_predicates`, `pattern_recovery_and_untyped_tests`, `keys`, `stylesheet_functions`, `fn_error` |
 | Sorting, grouping, collations | `sorting`, `grouping`, `grouping_patterns_and_keys`, `uca_collations`, `collations_without_icu`, `collation_indexes_and_uca_parameters`, `uca_case_order_and_substrings` |
@@ -219,9 +219,14 @@ The integration tests, by subject:
 - **Rustdoc**: public docs must not link to private items (`rustdoc::private_intra_doc_links`); name them in a code
   span instead.
 - **Recursion** uses the native stack, guarded by a depth and stack limit (`TransformOptions::max_recursion_depth`,
-  `TransformOptions::stack_limit`). A job that recurses deeply runs whole (compile, transform, serialize) inside
-  `xslt2::run_on_large_stack(xslt2::DEFAULT_STACK_SIZE, || …)`: the compiled stylesheet and the arena are `!Send`, so
-  the closure has to own them.
+  `TransformOptions::stack_limit`): a run checks the stack at every template, stylesheet function and instruction
+  (`Transformation::check_stack`), a compilation at every instruction, every element of the static checks and every
+  module of an include / import chain (`StackGuard::check_compilation`), both with the thread's limit
+  (`thread_stack_limit`). A new recursion over the stylesheet or over a document checks the guard on each level; a
+  walk over a whole tree (a copy, whitespace stripping, the serializer) is a loop with a cursor, not a recursion.
+  `tests/stack_guard.rs` runs each deep case in a child process on a 2 MiB thread. A job that recurses deeply runs
+  whole (compile, transform, serialize) inside `xslt2::run_on_large_stack(xslt2::DEFAULT_STACK_SIZE, || …)`: the
+  compiled stylesheet and the arena are `!Send`, so the closure has to own them.
 - **Tests name what they test.** A test file, a test and a comment say what the behaviour is and cite the rule;
   they do not name the work item, plan or review that produced them.
 - **Timing tests compare work, not time.** A test that guards against a quadratic (or worse) cost uses

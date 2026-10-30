@@ -40,6 +40,7 @@ use crate::names::QName;
 use crate::output::OutputDefinition;
 use crate::pattern::Pattern;
 use crate::resolver::{self, FileResolver, Resolver};
+use crate::runtime::StackGuard;
 use crate::schema::SchemaContext;
 use crate::stylesheet::{static_context_of, CompatMode, Loader, ModuleSet, StaticContexts};
 
@@ -168,6 +169,9 @@ impl<'a> Compiler<'a> {
     }
 
     fn run(&self, uri: &str, text: Option<String>) -> Result<CompiledStylesheet<'a>, XsltError> {
+        // Everything the compilation does happens below this frame, so the
+        // stack it uses is measured from here (`StackGuard::check_compilation`).
+        let stack = StackGuard::here();
         let arena = Bump::new();
         // SAFETY-free lifetime note: `modules` borrows `arena`, and every value
         // that escapes this function is owned, so the arena dies here.
@@ -185,7 +189,14 @@ impl<'a> Compiler<'a> {
             table: &table,
         };
         let schema = self.schema.map(SchemaContext::schema_set);
-        let mut builder = Builder::new(self.names, self.functions, &modules, &catalogs, schema);
+        let mut builder = Builder::new(
+            self.names,
+            self.functions,
+            &modules,
+            &catalogs,
+            schema,
+            stack,
+        );
         if let Some(context) = self.schema {
             // The context must have been built from this stylesheet.
             crate::schema::check_coverage(context, &modules)?;
@@ -296,6 +307,10 @@ struct Builder<'a, 'm, 't> {
     /// How many `xsl:number` instructions have been compiled: each gets the
     /// next slot of the run's numbering memo (`NumberInstruction::memo_slot`).
     number_instructions: usize,
+    /// The compilation's stack guard, checked by every recursion over the
+    /// stylesheet's nesting: the element table's pass and the compilation of
+    /// each instruction.
+    stack: StackGuard,
 }
 
 /// One winning `xsl:namespace-alias` declaration (§11.1.4).
@@ -319,6 +334,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         modules: &'m ModuleSet<'t>,
         catalogs: &'m CompileCatalogs<'a, 'm>,
         schema: Option<&'a xsd_schema::SchemaSet>,
+        stack: StackGuard,
     ) -> Self {
         Self {
             names,
@@ -361,6 +377,7 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
             losing_function_bodies: Vec::new(),
             function_handles: HashMap::new(),
             number_instructions: 0,
+            stack,
         }
     }
 
@@ -369,7 +386,12 @@ impl<'a, 'm, 't> Builder<'a, 'm, 't> {
         // §3.4: the element table first, over every module, so that a misplaced
         // element or a content model the spec does not allow is reported even
         // when it stands in a subtree nothing would compile.
-        checks::check(self.modules, self.functions.collations(), self.schema)?;
+        checks::check(
+            self.modules,
+            self.functions.collations(),
+            self.schema,
+            self.stack,
+        )?;
         // §10.3: every stylesheet function is in the static context of every
         // expression, wherever it is declared — so they are all collected, and
         // their winners settled, before the first expression is compiled.

@@ -96,38 +96,69 @@ side of it: documents that rely on DTD entities cannot be read ([Conformance](ht
 
 ### Recursion and the native stack
 
-Templates and stylesheet functions recurse on the native stack, and a stack overflow aborts the whole process; Rust
-cannot catch it. A run therefore counts its nesting and measures its stack, and stops with an `XSLT2-INTERNAL` error
-that names the option at whichever limit comes first:
+Templates, stylesheet functions and nested instructions recurse on the native stack, and so does the compilation of
+nested instructions. A stack overflow aborts the whole process; Rust cannot catch it. A run and a compilation
+therefore measure the stack they use (a run also counts its nesting), and stop with an `XSLT2-INTERNAL` error that
+names the option at whichever limit comes first:
 
 | Limit | Default |
 |---|---|
 | `TransformOptions::max_recursion_depth` | `DEFAULT_MAX_RECURSION_DEPTH` = 40,000: a template invocation counts 1, a stylesheet-function call 8 (so 5,000 nested function calls) |
-| `TransformOptions::stack_limit` | on a thread started by `run_on_large_stack`: its stack size, less what is in use when the run starts, less a reserve of one eighth (at least 1 MiB, at most half): about 224 MiB on `DEFAULT_STACK_SIZE` (256 MiB). On any other thread: `OTHER_THREAD_STACK_LIMIT` = 1 MiB |
+| `TransformOptions::stack_limit` | on a thread started by `run_on_large_stack`: its stack size, less what is in use when the run starts, less a reserve of one eighth (at least 1 MiB, at most half): about 224 MiB on `DEFAULT_STACK_SIZE` (256 MiB). On any other thread: `OTHER_THREAD_STACK_LIMIT` = 1 MiB. A compilation has no options; it always takes this default |
 
-The stack is checked on entry to every template (built-in rules included) and stylesheet function, and before every
-key index build, every evaluation of a global variable, every attribute set that another one uses, and every
-compilation of a computed `xsl:analyze-string` regular expression. A recursive named template 100,000 levels deep,
-and an identity transformation of a source 100,000 elements deep, both stop with the error after about 1 MiB of stack
-on a 2 MiB thread.
+Where the stack is checked:
 
-**What the check does not cover.** The stack a single template body uses between two such entries is not checked,
-and neither is the compilation. On a 2 MiB thread these abort the process:
+- **a run**: before every instruction (a literal result element, `xsl:if`, `xsl:for-each`, `xsl:variable` …), on
+  entry to every template (built-in rules included) and stylesheet function, and before every key index build,
+  every evaluation of a global variable, every attribute set that another one uses, and every compilation of a
+  computed `xsl:analyze-string` regular expression;
+- **a compilation**: at every instruction it compiles, at every element the static checks visit, and at every module
+  of an `xsl:include` / `xsl:import` chain.
 
-- compiling a stylesheet whose instructions nest a few hundred levels deep (400 nested `xsl:if` compiled, 500 did
-  not);
-- running a template body with about 200 nested instructions or literal result elements (`<xsl:if>` inside `<xsl:if>`
-  …: 185 worked, 200 did not);
-- `xsl:copy-of` of a source tree a few thousand elements deep (2,000 levels worked, 4,000 did not).
+Copying a tree (`xsl:copy-of`, or nodes that `xsl:sequence` adds to a result or a temporary tree, with or without
+validation), stripping whitespace from a source (`xsl:strip-space`), admitting a typed source, and serializing a
+result are loops, not recursions: they need no more stack for a document 100,000 elements deep than for a shallow
+one.
 
-On a `run_on_large_stack(DEFAULT_STACK_SIZE, …)` thread the same jobs worked with 5,000 nested instructions and a
-source 100,000 elements deep. Compiling deeply nested stylesheets is also slow, roughly quadratic in the nesting
-depth: 1,000 nested `xsl:if` compiled in 0.2 s, 5,000 in 5.6 s, 10,000 in 21.5 s, and 5,000 nested literal result
-elements in 14.3 s.
+What runs between two checks uses the room the limit leaves: one instruction's own work, and the evaluation of one
+XPath expression. XPath expressions nest at most 256 levels (see [Parsing](#parsing)), and the deepest one the parser
+accepts (253 nested `for`) still evaluated in a release build at the innermost of 104 nested literal result elements,
+where the run had used almost its whole limit, on a 2 MiB thread.
 
-**Advice.** Run every untrusted job whole (compile, transform, serialize) inside
-`xslt2::run_on_large_stack(xslt2::DEFAULT_STACK_SIZE, || …)`, and bound the nesting depth of stylesheet modules and
-source documents before the processor sees them ([Parsing](#parsing)).
+Measured in a release build on a 2 MiB thread, with its 1 MiB limit:
+
+| Input | Runs up to | Deeper |
+|---|---|---|
+| nested instructions or literal result elements in one template body (`xsl:if`, `xsl:for-each`, `xsl:analyze-string`, `<e>` …) | 103 to 104 levels (94 of `xsl:for-each-group`) | the error, at run time |
+| nested `xsl:variable` holding a temporary tree, one in each of nested literal result elements | 35 levels | the error, at run time |
+| nested instructions in a template that is never called (compilation only) | 234 levels | the error, at compile time |
+| a chain of `xsl:include` / `xsl:import`, each module including the next | 850 / 897 modules | the error, at compile time |
+| a small recursive named template (`xsl:choose` around `xsl:call-template`) | 67 calls | the error |
+| an identity transformation (`xsl:copy` and `xsl:apply-templates`) | a source 38 elements deep | the error |
+| the built-in template rules | a source 701 elements deep | the error |
+| `xsl:copy-of`, `xsl:strip-space`, a typed source, serialization | 100,000 elements deep, tried | — |
+
+The main thread of a program is "any other thread" too, so the same numbers hold there. On a
+`run_on_large_stack(DEFAULT_STACK_SIZE, …)` thread, 10,000 nested instructions, a chain of 10,000 included modules and
+a source 100,000 elements deep compiled and ran; nested temporary trees stopped with the error between 5,000 and
+10,000 levels, and an identity transformation between 5,000 and 10,000 levels of source.
+
+Compiling takes time linear in the nesting depth: 10,000 nested `xsl:if` compiled in 56 ms and 20,000 in 118 ms on
+the large stack.
+
+**A debug build** (the profile `cargo test` uses, for this crate as a dependency too) uses several times more stack per
+level: on a 2 MiB thread 19 nested `xsl:if` ran and 20 stopped with the error, as did 8 nested temporary trees, the
+compilation of 25 nested instructions, and an identity transformation of a source 7 elements deep. The XPath engine
+(`xsd-schema`) does not check the stack, and in a debug build its frames are large enough that an expression nested
+about 25 levels (26 nested parentheses ran, 27 overflowed; 23 nested predicates ran, 24 overflowed) overflows a 2 MiB
+thread on its own, well inside the parser's limit. Run deep work in a debug build on a large stack.
+
+**Advice.** Run every job whose depth you do not control whole (compile, transform, serialize) inside
+`xslt2::run_on_large_stack(xslt2::DEFAULT_STACK_SIZE, || …)`: in a release build the processor stops with an error
+instead of overflowing on any thread, but only a large stack lets deep but legitimate stylesheets and documents
+through. A host that wants
+smaller limits bounds the nesting depth of stylesheet modules and source documents before the processor sees them
+([Parsing](#parsing)), or sets `TransformOptions::stack_limit`.
 
 ### Memory per tree
 
@@ -155,7 +186,8 @@ the `Transformation` and the arena frees everything a run built.
 namespace-URI length, attributes and namespace declarations per element, namespaces in scope, attribute-value size,
 text size and node count), all off by default. **`xslt2` sets none of them and has no option for them**: every source
 document and stylesheet module is parsed without limits. Parsing itself does not recurse (a source 100,000 elements
-deep parses in about 12 ms on a 2 MiB thread), but what is built from it may ([above](#recursion-and-the-native-stack)).
+deep parses in about 10 ms on a 2 MiB thread), and neither do copying and serializing it; templates applied to a deep
+document and deeply nested stylesheets do, and stop at the stack limit ([above](#recursion-and-the-native-stack)).
 
 A host that needs the limits checks the text itself before the processor parses it: in its `Resolver`, and before it
 calls `transform_source` or `compile_str`. `xslt2::xsd_schema::document::BufferDocumentBuilder::with_parse_limits`
@@ -164,7 +196,9 @@ followed by `build` parses with the limits and refuses a document that breaks on
 Two limits do apply:
 
 - **XPath expressions** may nest 256 levels (`xslt2::xsd_schema::xpath::MAX_EXPRESSION_DEPTH`); a deeper expression
-  is a static error naming the limit (130 nested parentheses already count 263 levels).
+  is a static error naming the limit (130 nested parentheses already count 263 levels). The parser accepted 126
+  nested parentheses or function calls, 252 nested `if`, 253 nested `for` and 83 nested predicates, and a pattern
+  with 84 nested predicates (a deeper pattern is XTSE0340).
 - **Schema documents** are read with `xsd-schema`'s own nesting limits on elements, components and
   `xs:include` / `xs:import` chains.
 

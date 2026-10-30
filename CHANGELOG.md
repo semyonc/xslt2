@@ -96,6 +96,15 @@ on a thread with a large stack. The crate re-exports `xsd_schema` and
 - A schema-aware compiler reads through the resolver its `SchemaContext` was
   built with, and `MemoryResolver`'s `Debug` output lists its URIs, not their
   texts.
+<!-- CHECK BEFORE RELEASE: confirm the next item against the merged code (the stack guard at every instruction and in the compiler, copies without recursion, compilation linear in the nesting depth), then delete this comment. -->
+- Deep nesting ends in an error, not in a stack overflow: a run checks its
+  stack limit at every instruction as well as at every template and function,
+  and a compilation checks the same limit at every instruction and every
+  included or imported module, so a deeply nested stylesheet ends in an
+  `XSLT2-INTERNAL` error the host can handle. Copying,
+  whitespace-stripping and serializing a document need no more stack for a
+  deep document than for a shallow one, and compiling nested instructions
+  takes time linear in their depth.
 
 ### Cargo features and Rust version
 

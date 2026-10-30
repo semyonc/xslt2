@@ -180,67 +180,64 @@ impl<'a, 't> Transformation<'a, 't> {
         Ok(arena.alloc(doc))
     }
 
+    /// The copy of `nav` and everything below it, leaving out the whitespace
+    /// text nodes [`strips`](Self::strips) and `xml:space` say to strip;
+    /// `preserve_space` is whether `xml:space="preserve"` is in force at
+    /// `nav`'s parent.
+    ///
+    /// The walk is a loop with a cursor, not a recursion, so a source of any
+    /// depth needs no more host stack than a shallow one.
     fn copy_stripped(
         &self,
         nav: &Nav<'t>,
         preserve_space: bool,
         out: &mut dyn Receiver<'t>,
     ) -> Result<(), XsltError> {
-        match nav.node_type() {
-            DomNodeType::Element => {
-                let preserve = match attribute_value(nav, XML_NS, "space") {
-                    Some(value) => whitespace::trim(&value) == "preserve",
-                    None => preserve_space,
+        // For each open element, from `nav` down to the cursor's parent:
+        // whether `xml:space="preserve"` is in force in it, and whether its
+        // whitespace text children are stripped.
+        let mut open: Vec<(bool, bool)> = Vec::new();
+        let mut cursor = nav.clone();
+        loop {
+            match cursor.node_type() {
+                DomNodeType::Element => {
+                    let inherited = open
+                        .last()
+                        .map_or(preserve_space, |&(preserve, _)| preserve);
+                    let preserve = match attribute_value(&cursor, XML_NS, "space") {
+                        Some(value) => whitespace::trim(&value) == "preserve",
+                        None => inherited,
+                    };
+                    start_stripped_copy(&cursor, out)?;
+                    let strip_children = !preserve && self.strips(&cursor);
+                    let mut child = cursor.clone();
+                    if child.move_to_first_child() && first_kept(&mut child, strip_children) {
+                        open.push((preserve, strip_children));
+                        cursor = child;
+                        continue;
+                    }
+                    out.end_element()?;
+                }
+                DomNodeType::Comment => out.comment(&cursor.value())?,
+                DomNodeType::ProcessingInstruction => {
+                    let (target, data) = (cursor.local_name().to_string(), cursor.value());
+                    out.pi(&target, &data)?;
+                }
+                _ => out.text(&cursor.value(), false)?,
+            }
+            // The next node: the next kept sibling of the cursor or of the
+            // nearest open element that has one, closing the elements left.
+            loop {
+                let Some(&(_, strip_children)) = open.last() else {
+                    return Ok(());
                 };
-                out.start_element(&Name::of(nav), None, false)?;
-                let mut ns = nav.clone();
-                if ns.move_to_first_namespace(NamespaceAxisScope::ExcludeXml) {
-                    loop {
-                        let (prefix, uri) = (ns.local_name().to_string(), ns.value());
-                        out.namespace(&prefix, &uri)?;
-                        if !ns.move_to_next_namespace(NamespaceAxisScope::ExcludeXml) {
-                            break;
-                        }
-                    }
+                if cursor.move_to_next_sibling() && first_kept(&mut cursor, strip_children) {
+                    break;
                 }
-                let mut attr = nav.clone();
-                if attr.move_to_first_attribute() {
-                    loop {
-                        let value = attr.value();
-                        out.attribute(&Name::of(&attr), &value, None)?;
-                        if !attr.move_to_next_attribute() {
-                            break;
-                        }
-                    }
-                }
-                out.end_start_tag()?;
-                let strip_children = !preserve && self.strips(nav);
-                let mut child = nav.clone();
-                if child.move_to_first_child() {
-                    loop {
-                        // §4: a whitespace text node is one whose content is
-                        // *XML* whitespace — #x9, #xA, #xD, #x20 — and nothing
-                        // else. `char::is_whitespace` would also strip a
-                        // no-break space, which is ordinary character data.
-                        let drop = strip_children
-                            && child.node_type().is_text_like()
-                            && whitespace::is_all_xml_whitespace(&child.value());
-                        if !drop {
-                            self.copy_stripped(&child, preserve, out)?;
-                        }
-                        if !child.move_to_next_sibling() {
-                            break;
-                        }
-                    }
-                }
-                out.end_element()
+                cursor.move_to_parent();
+                open.pop();
+                out.end_element()?;
             }
-            DomNodeType::Comment => out.comment(&nav.value()),
-            DomNodeType::ProcessingInstruction => {
-                let (target, data) = (nav.local_name().to_string(), nav.value());
-                out.pi(&target, &data)
-            }
-            _ => out.text(&nav.value(), false),
         }
     }
 
@@ -512,41 +509,116 @@ impl<'a, 't> Transformation<'a, 't> {
 /// `xs:untyped` and for an attribute `xs:untypedAtomic` — exactly the two
 /// XTDE1665 permits. Every other node kind reports `None` unconditionally, so
 /// only elements and their attributes are worth visiting.
+///
+/// A loop with a cursor, not a recursion, like every walk over a whole tree.
 fn first_annotated<'t>(node: &Nav<'t>) -> Option<Nav<'t>> {
-    if matches!(
-        node.node_type(),
-        DomNodeType::Element | DomNodeType::Attribute
-    ) && node.type_annotation().is_some()
-    {
-        return Some(node.clone());
-    }
-    if node.node_type() == DomNodeType::Element {
-        let mut attr = node.clone();
-        if attr.move_to_first_attribute() {
-            loop {
-                if attr.type_annotation().is_some() {
-                    return Some(attr);
-                }
-                if !attr.move_to_next_attribute() {
-                    break;
+    // The node itself if it is an annotated element or attribute, else an
+    // annotated attribute of it.
+    let annotated_at = |nav: &Nav<'t>| -> Option<Nav<'t>> {
+        if matches!(
+            nav.node_type(),
+            DomNodeType::Element | DomNodeType::Attribute
+        ) && nav.type_annotation().is_some()
+        {
+            return Some(nav.clone());
+        }
+        if nav.node_type() == DomNodeType::Element {
+            let mut attr = nav.clone();
+            if attr.move_to_first_attribute() {
+                loop {
+                    if attr.type_annotation().is_some() {
+                        return Some(attr);
+                    }
+                    if !attr.move_to_next_attribute() {
+                        break;
+                    }
                 }
             }
         }
-    }
-    let mut child = node.clone();
-    if child.move_to_first_child() {
+        None
+    };
+    // Moves `nav` forward over its siblings, from itself, to the first element.
+    let to_element = |nav: &mut Nav<'t>| loop {
+        if nav.node_type() == DomNodeType::Element {
+            return true;
+        }
+        if !nav.move_to_next_sibling() {
+            return false;
+        }
+    };
+    // `node`, then the elements below it in document order; `depth` is how
+    // far below `node` the cursor is.
+    let mut cursor = node.clone();
+    let mut depth = 0usize;
+    loop {
+        if let Some(found) = annotated_at(&cursor) {
+            return Some(found);
+        }
+        let mut child = cursor.clone();
+        if child.move_to_first_child() && to_element(&mut child) {
+            cursor = child;
+            depth += 1;
+            continue;
+        }
         loop {
-            if child.node_type() == DomNodeType::Element {
-                if let Some(found) = first_annotated(&child) {
-                    return Some(found);
-                }
+            if depth == 0 {
+                return None;
             }
-            if !child.move_to_next_sibling() {
+            if cursor.move_to_next_sibling() && to_element(&mut cursor) {
+                break;
+            }
+            cursor.move_to_parent();
+            depth -= 1;
+        }
+    }
+}
+
+/// The start of an element's copy in [`Transformation::copy_stripped`]: its
+/// name, its namespace nodes and its attributes, untyped.
+fn start_stripped_copy<'t>(nav: &Nav<'t>, out: &mut dyn Receiver<'t>) -> Result<(), XsltError> {
+    out.start_element(&Name::of(nav), None, false)?;
+    let mut ns = nav.clone();
+    if ns.move_to_first_namespace(NamespaceAxisScope::ExcludeXml) {
+        loop {
+            let (prefix, uri) = (ns.local_name().to_string(), ns.value());
+            out.namespace(&prefix, &uri)?;
+            if !ns.move_to_next_namespace(NamespaceAxisScope::ExcludeXml) {
                 break;
             }
         }
     }
-    None
+    let mut attr = nav.clone();
+    if attr.move_to_first_attribute() {
+        loop {
+            let value = attr.value();
+            out.attribute(&Name::of(&attr), &value, None)?;
+            if !attr.move_to_next_attribute() {
+                break;
+            }
+        }
+    }
+    out.end_start_tag()
+}
+
+/// Moves `nav` forward over its siblings, from itself, to the first node the
+/// whitespace stripping keeps; `false` when there is none. With
+/// `strip_children` (the parent strips its whitespace text children) a text
+/// node of XML whitespace only is skipped. §4: a whitespace text node is one
+/// whose content is *XML* whitespace — #x9, #xA, #xD, #x20 — and nothing else;
+/// `char::is_whitespace` would also strip a no-break space, which is ordinary
+/// character data.
+pub(super) fn first_kept(nav: &mut Nav<'_>, strip_children: bool) -> bool {
+    loop {
+        let dropped = strip_children
+            && nav.node_type().is_text_like()
+            && whitespace::is_all_xml_whitespace(&nav.value());
+        if !dropped {
+            return true;
+        }
+        if !nav.move_to_next_sibling() {
+            return false;
+        }
+    }
 }
 
 /// The value of an attribute of `nav`, by expanded name.

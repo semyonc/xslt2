@@ -35,6 +35,12 @@ impl<'a, 't> Transformation<'a, 't> {
         Ok(())
     }
 
+    /// Evaluates one instruction, after the stack guard
+    /// (`TransformOptions::stack_limit`): instructions nest on the host stack
+    /// — a literal result element's content, an `xsl:if` body, an
+    /// `xsl:variable`'s sequence constructor — with no template invocation in
+    /// between, so a body nested deep enough would otherwise overflow it. An
+    /// error without a location takes the instruction's.
     fn eval(
         &self,
         instruction: &Instruction,
@@ -42,7 +48,8 @@ impl<'a, 't> Transformation<'a, 't> {
         cx: &XsltContext<'t>,
         out: &mut dyn Receiver<'t>,
     ) -> Result<(), XsltError> {
-        self.eval_inner(instruction, frame, cx, out)
+        self.check_stack()
+            .and_then(|()| self.eval_inner(instruction, frame, cx, out))
             .map_err(|e| e.or_location(&instruction.location(self.sheet)))
     }
 

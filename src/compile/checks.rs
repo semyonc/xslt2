@@ -57,6 +57,7 @@ use crate::error::{codes, XsltError};
 use crate::model::{Body, Instruction, InstructionKind, SortKey, ValueSource, VarValue};
 use crate::names::{resolve_qname, QName, XML_NS, XSLT_NS};
 use crate::receiver::Nav;
+use crate::runtime::StackGuard;
 use crate::stylesheet::{
     attr_local, attributes, in_scope_namespaces, is_stripped_stylesheet_text,
     move_to_document_element, static_context_of, text_run_value, CompatMode, Module, ModuleSet,
@@ -755,6 +756,7 @@ pub(super) fn check(
     modules: &ModuleSet<'_>,
     collations: &CollationRegistry,
     schema: Option<&xsd_schema::SchemaSet>,
+    stack: StackGuard,
 ) -> Result<(), XsltError> {
     for module in &modules.modules {
         let root = match module.root {
@@ -774,6 +776,7 @@ pub(super) fn check(
             module,
             collations,
             schema,
+            stack,
         }
         .element(&root)?;
     }
@@ -787,6 +790,9 @@ struct Checker<'m, 't> {
     /// The schema set of a schema-aware compilation (§21.2); `None` for a
     /// basic processor, which §21.1 restricts.
     schema: Option<&'m xsd_schema::SchemaSet>,
+    /// The compilation's stack guard: the pass recurses as deep as the
+    /// elements nest.
+    stack: StackGuard,
 }
 
 impl<'t> Checker<'_, 't> {
@@ -797,6 +803,9 @@ impl<'t> Checker<'_, 't> {
     /// Checks one element that is already known to be allowed where it stands:
     /// its attributes, then its content.
     fn element(&self, nav: &Nav<'t>) -> Result<(), XsltError> {
+        self.stack
+            .check_compilation()
+            .map_err(|e| e.with_location(self.module.location(nav)))?;
         let sc = static_context_of(nav, self.module, self.collations)?;
         if nav.namespace_uri() != XSLT_NS {
             // A literal result element or an extension instruction. Its own

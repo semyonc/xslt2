@@ -7,7 +7,8 @@
 //! local to one compilation: the module trees are discarded once the
 //! [`CompiledStylesheet`](crate::CompiledStylesheet) exists.
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 
 use bumpalo::Bump;
 use xsd_schema::document::{BufferDocument, BufferDocumentOptions};
@@ -23,6 +24,7 @@ use crate::functions::{StaticEvaluator, XsltFunctions};
 use crate::names::{CODEPOINT_COLLATION, XML_NS, XSLT_NS};
 use crate::receiver::Nav;
 use crate::resolver::{self, Resolver};
+use crate::runtime::StackGuard;
 use crate::whitespace;
 
 /// Identifies one loaded stylesheet module.
@@ -216,6 +218,12 @@ pub struct Module<'t> {
     /// children goes through [`Module::children`], and an excluded element —
     /// with its whole subtree — is simply not yielded.
     excluded: HashSet<u32>,
+    /// The standard attributes accumulated down to each element whose static
+    /// context has been asked for, by node reference: what
+    /// [`static_context_of`] folds over the element's ancestors, kept so that
+    /// each element is folded once, from its parent's, and the compilation
+    /// stays linear in the depth of the stylesheet.
+    inherited_contexts: RefCell<HashMap<u32, StaticContext>>,
 }
 
 impl<'t> Module<'t> {
@@ -397,6 +405,10 @@ pub struct Loader<'a, 't> {
     /// expression can observe through `system-property('xsl:is-schema-aware')`
     /// and `type-available()` (§3.12).
     schema_aware: bool,
+    /// The stack guard of the load, set by [`Self::load`]: a module's imports
+    /// and includes are loaded below it, so the load recurses as deep as the
+    /// chain of `xsl:import` / `xsl:include` goes.
+    guard: StackGuard,
 }
 
 impl<'a, 't> Loader<'a, 't> {
@@ -417,6 +429,7 @@ impl<'a, 't> Loader<'a, 't> {
             next_precedence: 0,
             input_type_annotations: HashSet::new(),
             schema_aware: false,
+            guard: StackGuard::default(),
         }
     }
 
@@ -432,6 +445,7 @@ impl<'a, 't> Loader<'a, 't> {
     /// Loads the principal module at `uri` and everything it imports or
     /// includes.
     pub fn load(mut self, uri: &str, text: Option<String>) -> Result<ModuleSet<'t>, XsltError> {
+        self.guard = StackGuard::here();
         let (principal, simplified) = self.visit(uri, text, Inclusion::Import, true)?;
         // > [ERR XTSE0265] It is a static error if there is a stylesheet module
         // > in the stylesheet that specifies input-type-annotations="strip" and
@@ -464,6 +478,7 @@ impl<'a, 't> Loader<'a, 't> {
         edge: Inclusion,
         principal: bool,
     ) -> Result<(ModuleId, bool), XsltError> {
+        self.guard.check_compilation()?;
         let identity = resolver::resource_identity(uri);
         if self.stack.iter().any(|(u, _)| *u == identity) {
             // §3.10.2 / §3.10.3: an include cycle is XTSE0180, an import cycle
@@ -554,6 +569,7 @@ impl<'a, 't> Loader<'a, 't> {
             line_starts: line_starts(&text),
             text,
             excluded: HashSet::new(),
+            inherited_contexts: RefCell::new(HashMap::new()),
         });
         // §3.12, as early as it can be: before `xsl:include`/`xsl:import` are
         // resolved (an excluded one must not load its module at all) and before
@@ -734,6 +750,7 @@ impl<'a, 't> Loader<'a, 't> {
         uri: &str,
         out: &mut Vec<(ModuleId, Nav<'t>, DeclKind)>,
     ) -> Result<(), XsltError> {
+        self.guard.check_compilation()?;
         let identity = resolver::resource_identity(uri);
         if self.stack.iter().any(|(u, _)| *u == identity) {
             return Err(XsltError::new(
@@ -1222,113 +1239,139 @@ pub fn static_context_of(
     module: &Module<'_>,
     collations: &CollationRegistry,
 ) -> Result<StaticContext, XsltError> {
-    let mut ancestors: Vec<Nav<'_>> = Vec::new();
+    // The memo is keyed by node reference, which only means something in the
+    // module's own tree.
+    debug_assert!(std::ptr::eq(nav.document(), module.doc));
+    // The elements from `nav` up whose accumulated attributes are not known
+    // yet, innermost first, and what is known above them.
+    let mut pending: Vec<Nav<'_>> = Vec::new();
     let mut cursor = nav.clone();
-    loop {
+    let mut ctx = loop {
         if cursor.node_type() == DomNodeType::Element {
-            ancestors.push(cursor.clone());
+            let known = module
+                .inherited_contexts
+                .borrow()
+                .get(&cursor.current_ref())
+                .cloned();
+            if let Some(known) = known {
+                break known;
+            }
+            pending.push(cursor.clone());
         }
         if !cursor.move_to_parent() {
-            break;
-        }
-    }
-    ancestors.reverse();
-
-    let namespaces = in_scope_namespaces(nav);
-    let mut ctx = StaticContext {
-        module: module.id,
-        namespaces,
-        xpath_default_namespace: String::new(),
-        default_collation: CODEPOINT_COLLATION.to_string(),
-        base_uri: module.uri.clone(),
-        compat: CompatMode::Xslt20,
-        excluded_namespaces: Vec::new(),
-        extension_namespaces: Vec::new(),
-    };
-    for a in &ancestors {
-        // The prefix lists resolve in the scope of the element that carries
-        // them, not in the scope of the element the context is being built
-        // for, so each ancestor's own in-scope namespaces are needed.
-        let in_scope = in_scope_namespaces(a);
-        if let Some(base) = attr_ns(a, XML_NS, "base") {
-            ctx.base_uri = resolver::resolve_uri(&ctx.base_uri, &base);
-        }
-        // §3.9: "These rules do not apply to the version attribute of the
-        // xsl:output element, which has an entirely different purpose: it is
-        // used to define the version of the output method to be used for
-        // serialization."
-        let is_output = a.namespace_uri() == XSLT_NS && a.local_name() == "output";
-        if let Some(v) = standard_attr(a, "version").filter(|_| !is_output) {
-            if !crate::compile::checks::is_xs_decimal(&v) {
-                return Err(XsltError::new(
-                    codes::XTSE0110,
-                    format!("version {v:?} is not an xs:decimal"),
-                ));
-            }
-            let n = whitespace::trim(&v).parse::<f64>().map_err(|_| {
-                XsltError::new(codes::XTSE0110, format!("version {v:?} is not a number"))
-            })?;
-            ctx.compat = CompatMode::of_version(n);
-        }
-        if let Some(v) = standard_attr(a, "xpath-default-namespace") {
-            ctx.xpath_default_namespace = v;
-        }
-        if let Some(v) = standard_attr(a, "default-collation") {
-            // §5.4.1: a whitespace-separated list of collation URIs, each
-            // resolved against the base URI of the attribute's parent element;
-            // the first one the processor recognizes is used.
-            //
-            // > [ERR XTSE0125] It is a static error if the value of an
-            // > [xsl:]default-collation attribute, after resolving against the
-            // > base URI, contains no URI that the implementation recognizes as
-            // > a collation URI.
-            let base = base_uri_of(a, &module.uri);
-            let candidates: Vec<String> = whitespace::tokens(&v)
-                .map(|token| resolver::resolve_uri(&base, token))
-                .collect();
-            ctx.default_collation = match candidates.iter().find(|uri| collations.recognizes(uri)) {
-                Some(uri) => uri.clone(),
-                // A UCA collation of F&O 3.1 is a missing feature, not a
-                // broken stylesheet, in a build without the `icu-collation`
-                // cargo feature, which brings its locale
-                // data.
-                None => match candidates.iter().find_map(|uri| uca_not_implemented(uri)) {
-                    Some(missing) => return Err(missing.with_location(module.location(a))),
-                    None => {
-                        return Err(XsltError::new(
-                            codes::XTSE0125,
-                            format!(
-                                "no collation URI in default-collation={v:?} is one this processor \
-                                 recognizes"
-                            ),
-                        )
-                        .with_location(module.location(a)))
-                    }
-                },
+            break StaticContext {
+                module: module.id,
+                namespaces: Vec::new(),
+                xpath_default_namespace: String::new(),
+                default_collation: CODEPOINT_COLLATION.to_string(),
+                base_uri: module.uri.clone(),
+                compat: CompatMode::Xslt20,
+                excluded_namespaces: Vec::new(),
+                extension_namespaces: Vec::new(),
             };
         }
-        if let Some(v) = standard_attr(a, "exclude-result-prefixes") {
-            for token in whitespace::tokens(&v) {
-                push_namespace(
-                    &mut ctx.excluded_namespaces,
-                    token,
-                    &in_scope,
-                    PrefixList::ExcludeResult,
-                )?;
-            }
+    };
+    for a in pending.iter().rev() {
+        apply_standard_attributes(&mut ctx, a, module, collations)?;
+        module
+            .inherited_contexts
+            .borrow_mut()
+            .insert(a.current_ref(), ctx.clone());
+    }
+    ctx.namespaces = in_scope_namespaces(nav);
+    Ok(ctx)
+}
+
+/// One step of [`static_context_of`]'s fold: the standard attributes of the
+/// ancestor-or-self element `a` applied to what its ancestors accumulated.
+fn apply_standard_attributes(
+    ctx: &mut StaticContext,
+    a: &Nav<'_>,
+    module: &Module<'_>,
+    collations: &CollationRegistry,
+) -> Result<(), XsltError> {
+    // The prefix lists resolve in the scope of the element that carries
+    // them, not in the scope of the element the context is being built
+    // for, so each ancestor's own in-scope namespaces are needed.
+    let in_scope = in_scope_namespaces(a);
+    if let Some(base) = attr_ns(a, XML_NS, "base") {
+        ctx.base_uri = resolver::resolve_uri(&ctx.base_uri, &base);
+    }
+    // §3.9: "These rules do not apply to the version attribute of the
+    // xsl:output element, which has an entirely different purpose: it is
+    // used to define the version of the output method to be used for
+    // serialization."
+    let is_output = a.namespace_uri() == XSLT_NS && a.local_name() == "output";
+    if let Some(v) = standard_attr(a, "version").filter(|_| !is_output) {
+        if !crate::compile::checks::is_xs_decimal(&v) {
+            return Err(XsltError::new(
+                codes::XTSE0110,
+                format!("version {v:?} is not an xs:decimal"),
+            ));
         }
-        if let Some(v) = standard_attr(a, "extension-element-prefixes") {
-            for token in whitespace::tokens(&v) {
-                push_namespace(
-                    &mut ctx.extension_namespaces,
-                    token,
-                    &in_scope,
-                    PrefixList::ExtensionElement,
-                )?;
-            }
+        let n = whitespace::trim(&v).parse::<f64>().map_err(|_| {
+            XsltError::new(codes::XTSE0110, format!("version {v:?} is not a number"))
+        })?;
+        ctx.compat = CompatMode::of_version(n);
+    }
+    if let Some(v) = standard_attr(a, "xpath-default-namespace") {
+        ctx.xpath_default_namespace = v;
+    }
+    if let Some(v) = standard_attr(a, "default-collation") {
+        // §5.4.1: a whitespace-separated list of collation URIs, each
+        // resolved against the base URI of the attribute's parent element;
+        // the first one the processor recognizes is used.
+        //
+        // > [ERR XTSE0125] It is a static error if the value of an
+        // > [xsl:]default-collation attribute, after resolving against the
+        // > base URI, contains no URI that the implementation recognizes as
+        // > a collation URI.
+        let base = base_uri_of(a, &module.uri);
+        let candidates: Vec<String> = whitespace::tokens(&v)
+            .map(|token| resolver::resolve_uri(&base, token))
+            .collect();
+        ctx.default_collation = match candidates.iter().find(|uri| collations.recognizes(uri)) {
+            Some(uri) => uri.clone(),
+            // A UCA collation of F&O 3.1 is a missing feature, not a
+            // broken stylesheet, in a build without the `icu-collation`
+            // cargo feature, which brings its locale
+            // data.
+            None => match candidates.iter().find_map(|uri| uca_not_implemented(uri)) {
+                Some(missing) => return Err(missing.with_location(module.location(a))),
+                None => {
+                    return Err(XsltError::new(
+                        codes::XTSE0125,
+                        format!(
+                            "no collation URI in default-collation={v:?} is one this processor \
+                             recognizes"
+                        ),
+                    )
+                    .with_location(module.location(a)))
+                }
+            },
+        };
+    }
+    if let Some(v) = standard_attr(a, "exclude-result-prefixes") {
+        for token in whitespace::tokens(&v) {
+            push_namespace(
+                &mut ctx.excluded_namespaces,
+                token,
+                &in_scope,
+                PrefixList::ExcludeResult,
+            )?;
         }
     }
-    Ok(ctx)
+    if let Some(v) = standard_attr(a, "extension-element-prefixes") {
+        for token in whitespace::tokens(&v) {
+            push_namespace(
+                &mut ctx.extension_namespaces,
+                token,
+                &in_scope,
+                PrefixList::ExtensionElement,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Which attribute a prefix list serves — and so which error an unusable token

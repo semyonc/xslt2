@@ -1815,7 +1815,8 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
         }
     }
 
-    /// The recursive half of [`copy_node`](Self::copy_node).
+    /// The walk of [`copy_node`](Self::copy_node): the node and, for an
+    /// element or a document node, everything below it, in document order.
     ///
     /// Every element it opens is marked `copied`, so that the flush gives it
     /// exactly the namespace nodes §11.9.2 does (`withheld_bindings` has the
@@ -1846,75 +1847,116 @@ impl<'t, R: Receiver<'t>> ComplexContentNormalizer<'t, R> {
     /// of its own) and `namespace-3004` (the same deep copy attached to a
     /// literal result element with a default namespace: the copy root has none
     /// of its own and inherits that one, and the undeclaration disappears).
+    ///
+    /// The walk is a loop with a cursor, not a recursion, so a copy of a
+    /// document of any depth needs no more host stack than a shallow one.
     fn copy_subtree(
         &mut self,
         nav: &Nav<'t>,
         namespaces: CopyNamespaces,
         carry: Carry,
     ) -> Result<(), XsltError> {
-        match nav.node_type() {
-            DomNodeType::Root => {
-                let mut child = nav.clone();
-                if child.move_to_first_child() {
-                    loop {
-                        self.copy_subtree(&child, namespaces, carry)?;
-                        if !child.move_to_next_sibling() {
-                            break;
-                        }
-                    }
-                }
-                Ok(())
-            }
+        let top_is_element = match nav.node_type() {
+            DomNodeType::Root => false,
             DomNodeType::Element => {
-                let binding = match carry {
-                    Carry::All => CopySource::schema_binding(nav),
-                    Carry::Ids | Carry::Nothing => None,
-                };
-                // Only a typed node can be nilled; asking an untyped one would
-                // still cost a typed-value computation.
-                let nilled = binding.is_some() && matches!(nav.typed_value(), TypedValue::Nilled);
-                self.start_element(&Name::of(nav), binding, nilled)?;
-                self.top().copied = true;
-                match carry {
-                    Carry::Ids => self.top().kept = kept_of_element(nav),
-                    // A `strip` boundary downstream may take the binding away (`Validating`):
-                    // the source's properties then stay, read from the source only then. A node
-                    // without a binding has nothing to lose but the is-idrefs a tree may give it by
-                    // registration (a strip copy's), a flag: kept at once.
-                    Carry::All if binding.is_some() => self.top().source = Some(nav.clone()),
-                    Carry::All => self.top().kept = kept_of_element(nav),
-                    Carry::Nothing => {}
-                }
-                // §11.9.2: with `copy-namespaces="no"` none of the namespace
-                // nodes are copied and fixup supplies what the names need.
-                if let Some(scope) = namespaces.scope() {
-                    let (nodes, undeclared) = namespace_nodes_and_undeclarations_of(nav, scope);
-                    for (prefix, uri) in &nodes {
-                        self.namespace(prefix, uri)?;
-                    }
-                    self.top().undeclared = undeclared;
-                }
-                let mut attr = nav.clone();
-                if attr.move_to_first_attribute() {
-                    loop {
-                        self.copy_attribute(&attr, carry)?;
-                        if !attr.move_to_next_attribute() {
-                            break;
-                        }
-                    }
-                }
-                self.end_start_tag()?;
-                let mut child = nav.clone();
-                if child.move_to_first_child() {
-                    loop {
-                        self.copy_subtree(&child, namespaces, carry)?;
-                        if !child.move_to_next_sibling() {
-                            break;
-                        }
-                    }
-                }
-                self.end_element()
+                self.open_copied_element(nav, namespaces, carry)?;
+                true
             }
+            _ => return self.copy_leaf(nav, carry),
+        };
+        // `depth` is how far below `nav` the cursor is; every element between
+        // the two is open.
+        let mut cursor = nav.clone();
+        let mut depth = 0usize;
+        let mut descend = true;
+        loop {
+            if descend && cursor.move_to_first_child() {
+                depth += 1;
+            } else {
+                // The next node: a following sibling of the cursor or of the
+                // nearest open element that has one, closing the elements left.
+                loop {
+                    if depth == 0 {
+                        return if top_is_element {
+                            self.end_element()
+                        } else {
+                            Ok(())
+                        };
+                    }
+                    if cursor.move_to_next_sibling() {
+                        break;
+                    }
+                    cursor.move_to_parent();
+                    depth -= 1;
+                    if depth > 0 {
+                        self.end_element()?;
+                    }
+                }
+            }
+            descend = cursor.node_type() == DomNodeType::Element;
+            if descend {
+                self.open_copied_element(&cursor, namespaces, carry)?;
+                if !cursor.clone().move_to_first_child() {
+                    self.end_element()?;
+                    descend = false;
+                }
+            } else {
+                self.copy_leaf(&cursor, carry)?;
+            }
+        }
+    }
+
+    /// The start of an element's copy: its name and binding, its namespace
+    /// nodes and its attributes ([`copy_subtree`](Self::copy_subtree)).
+    fn open_copied_element(
+        &mut self,
+        nav: &Nav<'t>,
+        namespaces: CopyNamespaces,
+        carry: Carry,
+    ) -> Result<(), XsltError> {
+        let binding = match carry {
+            Carry::All => CopySource::schema_binding(nav),
+            Carry::Ids | Carry::Nothing => None,
+        };
+        // Only a typed node can be nilled; asking an untyped one would
+        // still cost a typed-value computation.
+        let nilled = binding.is_some() && matches!(nav.typed_value(), TypedValue::Nilled);
+        self.start_element(&Name::of(nav), binding, nilled)?;
+        self.top().copied = true;
+        match carry {
+            Carry::Ids => self.top().kept = kept_of_element(nav),
+            // A `strip` boundary downstream may take the binding away (`Validating`):
+            // the source's properties then stay, read from the source only then. A node
+            // without a binding has nothing to lose but the is-idrefs a tree may give it by
+            // registration (a strip copy's), a flag: kept at once.
+            Carry::All if binding.is_some() => self.top().source = Some(nav.clone()),
+            Carry::All => self.top().kept = kept_of_element(nav),
+            Carry::Nothing => {}
+        }
+        // §11.9.2: with `copy-namespaces="no"` none of the namespace
+        // nodes are copied and fixup supplies what the names need.
+        if let Some(scope) = namespaces.scope() {
+            let (nodes, undeclared) = namespace_nodes_and_undeclarations_of(nav, scope);
+            for (prefix, uri) in &nodes {
+                self.namespace(prefix, uri)?;
+            }
+            self.top().undeclared = undeclared;
+        }
+        let mut attr = nav.clone();
+        if attr.move_to_first_attribute() {
+            loop {
+                self.copy_attribute(&attr, carry)?;
+                if !attr.move_to_next_attribute() {
+                    break;
+                }
+            }
+        }
+        self.end_start_tag()
+    }
+
+    /// The copy of a node that has no children to copy.
+    fn copy_leaf(&mut self, nav: &Nav<'t>, carry: Carry) -> Result<(), XsltError> {
+        match nav.node_type() {
             DomNodeType::Attribute => self.copy_attribute(nav, carry),
             DomNodeType::Namespace => {
                 let (prefix, uri) = (nav.local_name().to_string(), nav.value());
