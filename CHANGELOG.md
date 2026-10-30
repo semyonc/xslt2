@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-10-31
 
 First release: an XSLT 2.0 processor written in Rust, basic and schema-aware
 (XSLT 2.0 §21). It compiles stylesheets, runs them over XML documents and
@@ -92,11 +92,9 @@ on a thread with a large stack. The crate re-exports `xsd_schema` and
 `bumpalo`, so it is the only dependency a program needs. See the
 [API documentation](https://docs.rs/xslt2).
 
-<!-- CHECK BEFORE RELEASE: confirm the next item against the merged code (the schema-aware compiler's default resolver, the Debug output of MemoryResolver), then delete this comment. -->
 - A schema-aware compiler reads through the resolver its `SchemaContext` was
   built with, and `MemoryResolver`'s `Debug` output lists its URIs, not their
   texts.
-<!-- CHECK BEFORE RELEASE: confirm the next item against the merged code (the stack guard at every instruction and in the compiler, copies without recursion, compilation linear in the nesting depth), then delete this comment. -->
 - Deep nesting ends in an error, not in a stack overflow: a run checks its
   stack limit at every instruction as well as at every template and function,
   and a compilation checks the same limit at every instruction and every
@@ -124,6 +122,10 @@ schema-aware processor 6,313 of 6,343 (the figures are in the
 explains every case that does not pass and every exclusion, and
 [Limits and untrusted input](https://github.com/semyonc/xslt2/blob/main/doc/LIMITS.md)
 what a transformation can read and which resources a host has to bound.
+
+Known issue: `unparsed-text()` ignores its `$encoding` argument and decodes a
+resource without a byte order mark or an XML declaration as UTF-8
+([Conformance](https://github.com/semyonc/xslt2/blob/main/doc/CONFORMANCE.md#known-bugs-no-test-case-exercises)).
 
 [Unreleased]: https://github.com/semyonc/xslt2/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/semyonc/xslt2/releases/tag/v0.1.0

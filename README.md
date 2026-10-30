@@ -209,6 +209,13 @@ unifies features across a build, so if any crate in a build enables `icu-collati
 - **Results stay in memory.** Secondary result documents are returned in `Outcome::secondary` and nothing is written
   to disk. Every result tree and every temporary tree costs about 118 KB of the transformation's arena however small
   it is, kept until the arena is dropped, so tens of thousands of result documents need gigabytes.
+- **Untrusted stylesheets.** The default `FileResolver` reads any file the process can read, and a transformation
+  reads `document()`, `doc()` and `unparsed-text()` through the compiler's resolver. Give a stylesheet you do not
+  trust a `MemoryResolver` or a resolver of your own; nothing in the library bounds the time or the memory of a run.
+  [Limits and untrusted input](https://github.com/semyonc/xslt2/blob/main/doc/LIMITS.md) has the details.
+- **No DTD processing.** A document type declaration is read but not processed: entities other than the five
+  predefined ones are errors, and attribute types and defaults declared in a DTD are not applied (an `ID` declared
+  there is not an ID).
 - **No extension instructions.** An extension instruction with `xsl:fallback` children evaluates them; one without is
   XTDE1450 when, and only when, it is evaluated; `element-available()` answers false for it.
 - **English and Gregorian formatting.** `xsl:number` writes words and ordinals in English whatever `lang` says (the
@@ -219,12 +226,14 @@ unifies features across a build, so if any crate in a build enables `icu-collati
   case-insensitive, plus any the host registers; a UCA collation URI is the error `XSLT2-NOTIMPL`, and
   `xsl:sort lang` / `case-order` use a built-in case-order collation.
 - **Output encodings.** UTF-8, UTF-16, US-ASCII and ISO-8859-1; any other is SESU0007.
-- **Deep recursion.** Templates and stylesheet functions recurse on the native stack. A run measures the stack it
-  uses and stops with an error instead of overflowing; on a thread whose stack size it cannot know it allows itself
-  1 MiB (`OTHER_THREAD_STACK_LIMIT`), about a hundred nested template calls in a release build. Run a deeply
-  recursive job whole (compile, transform, serialize) inside
-  `xslt2::run_on_large_stack(xslt2::DEFAULT_STACK_SIZE, || …)` (256 MiB), or set `TransformOptions::stack_limit` for a
-  thread whose stack you know.
+- **Deep recursion.** Templates, stylesheet functions and nested instructions recurse on the native stack, and so
+  does compiling nested instructions. A run and a compilation measure the stack they use and stop with an error
+  instead of overflowing; on a thread whose stack size they cannot know they allow themselves 1 MiB
+  (`OTHER_THREAD_STACK_LIMIT`): in a release build about 65 calls of a small recursive template, about 100 nested
+  instructions in one template, or an identity transformation of a document about 40 elements deep. Copying,
+  whitespace stripping and serialization do not recurse, whatever the depth of the document. Run deep work whole
+  (compile, transform, serialize) inside `xslt2::run_on_large_stack(xslt2::DEFAULT_STACK_SIZE, || …)` (256 MiB), or
+  set `TransformOptions::stack_limit` for a thread whose stack you know.
 - **The `unicode-90` test-set** is left out of the figures below: it checks regular-expression character classes
   against every code point and runs for about 25 minutes, and its cases compare Unicode 9.0 data with the regex
   engine's Unicode 15.1 tables, the same version difference that excludes the `regex-classes` cases.

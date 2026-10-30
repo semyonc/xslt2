@@ -130,6 +130,18 @@ default resolver reads local files only and answers false; the other three resul
 wants `http:` resources supplies its own resolver
 ([Limits and untrusted input](https://github.com/semyonc/xslt2/blob/main/doc/LIMITS.md#what-a-transformation-can-read)).
 
+## Known bugs no test case exercises
+
+### `unparsed-text()` ignores its `$encoding` argument
+
+`unparsed-text($href, $encoding)` decodes a resource that has no byte order mark and no XML declaration as UTF-8,
+whatever `$encoding` says, and replaces bytes that are not UTF-8 with U+FFFD. §16.2 says that "the value of the
+$encoding argument is used if present", and that octets which "cannot be decoded into Unicode characters using the
+specified encoding" are the error XTDE1190; `unparsed-text-available()` answers true for such a resource where it
+should answer false. A resolver hands the function text, not bytes, so the fix needs a new `Resolver` method; it is
+planned for a 0.1.x release. A resource with a byte order mark, or with an XML declaration that names its encoding,
+is decoded correctly.
+
 ## Excluded cases
 
 An excluded case is one whose expected result is wrong for a conformant XSLT 2.0 processor, or pins a choice the
