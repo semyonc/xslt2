@@ -148,10 +148,9 @@ pub fn decode_xml(bytes: &[u8]) -> String {
 
 fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
     let units: Vec<u16> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|&pair| {
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = [pair[0], pair[1]];
             if little_endian {
                 u16::from_le_bytes(pair)
             } else {

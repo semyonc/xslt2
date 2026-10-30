@@ -10,3 +10,7 @@ target/
 *.pdb
 .codex/
 .claude/
+
+# Local Cargo configuration, e.g. a `[patch.crates-io]` override that builds
+# against a local xsd-schema checkout. Never committed.
+.cargo/

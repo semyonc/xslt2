@@ -122,7 +122,7 @@ fn joined(sizes: &[usize]) -> String {
 fn a_positional_predicate_after_a_local_variable_is_linear() {
     const N: usize = 5_000;
     let source = flat(N);
-    let matches = |i: usize| i.is_multiple_of(3) && (i / 3).is_multiple_of(100);
+    let matches = |i: usize| i % 3 == 0 && (i / 3) % 100 == 0;
     for (attribute, starting) in [("group-starting-with", true), ("group-ending-with", false)] {
         let main = sheet(&format!(
             r#"<xsl:template match="/">

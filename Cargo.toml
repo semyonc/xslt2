@@ -2,54 +2,76 @@
 name = "xslt2"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 authors = ["semyonc"]
 description = "Schema-aware XSLT 2.0 processor built on the xsd-schema validator and its XPath 2.0 engine"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/semyonc/xslt2"
+documentation = "https://docs.rs/xslt2"
 readme = "README.md"
 keywords = ["xslt", "xml", "xpath", "transformation", "schema-aware"]
 categories = ["parser-implementations", "text-processing"]
+# The published package holds the library and its documentation only. The
+# tests stay in the repository: the conformance harness needs the external
+# W3C XSLT test suite, and the integration tests are development checks.
+include = [
+    "src/**",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE-*",
+    "CHANGELOG.md",
+]
+
+[package.metadata.docs.rs]
+# Document the whole public API, including the optional `icu-collation`
+# feature.
+all-features = true
 
 [dependencies]
-# Foundation: XPath 2.0 engine, XDM type tower, PSVI, BufferDocument.
-# The `xsd11` feature is required for the XPath engine and BufferDocument.
-xsd-schema = { path = "../xsd-schema", features = ["xsd11"] }
+# The foundation: the XPath 2.0 engine, the XDM type hierarchy, schema
+# validation with its post-schema-validation infoset, and the in-memory
+# document model. The `xsd11` feature enables the XPath engine and the
+# document model.
+xsd-schema = { version = "0.3", features = ["xsd11"] }
 
-# The transformation arena (§6.1): nodes and the document structs themselves.
+# The arena that holds the nodes of documents built during a transformation.
 bumpalo = "3"
-# Typed keys for the document store (DocId).
+# Typed keys for the document store.
 slotmap = "1.0"
-# The regular-expression engine behind xsl:analyze-string (§15): the maintained
-# fork of `regexml`, published as `regexml-fork` and renamed back so the code
-# keeps the name `regexml`. The same requirement as xsd-schema's, so the graph
-# keeps one copy.
+# The regular-expression engine behind `xsl:analyze-string`, `fn:matches`,
+# `fn:replace` and `fn:tokenize`: the maintained fork of `regexml`, published
+# as `regexml-fork` and renamed back so the code keeps the name `regexml`.
+# It is the same requirement as `xsd-schema`'s, so the build has one copy.
 regexml = { package = "regexml-fork", version = "0.3" }
-# Serialization's `normalization-form` (NFC, NFD, NFKC, NFKD). Already in the
-# graph through `xsd-schema` (its `fn:normalize-unicode`), with the same
-# requirement, so no new build.
+# The serialization parameter `normalization-form` (NFC, NFD, NFKC, NFKD).
+# `xsd-schema` already depends on it (for `fn:normalize-unicode`) with the same
+# requirement, so it adds no build.
 unicode-normalization = "0.1"
-# The Unicode Collation Algorithm with locale tailorings (DESIGN §9.5), behind
-# the off-by-default `icu-collation` feature. Pinned to the ICU4X 1.5 line that
-# `regexml` already brings (icu_properties, icu_locid, icu_provider …), so the
-# feature adds the collator and its data, never a second ICU build.
-icu_collator = { version = "~1.5", optional = true }
-# `DataLocale`, the locale argument of the collator (already in the graph
-# through `regexml`'s ICU4X 1.5 crates: no new build).
-icu_provider = { version = "~1.5", optional = true }
-# `Locale`, to read the Unicode extension keywords of a UCA URI's `lang` (also
-# already in the graph through `regexml`'s ICU4X 1.5 crates).
-icu_locid = { version = "~1.5", optional = true }
-# The contraction and prefix tries of the collation data (`Char16TrieIterator`)
-# and the canonical decompositions, which the substring search of the UCA
-# collations reads to tell context-free characters (`collation/uca/search.rs`).
-# Both are already in the graph as dependencies of `icu_collator` 1.5: no new
+# The Unicode Collation Algorithm with locale tailorings, behind the optional
+# `icu-collation` feature. Pinned to the ICU4X 1.5 line that `regexml` already
+# brings, so the feature adds the collator and its data but never a second ICU
 # build.
+icu_collator = { version = "~1.5", optional = true }
+# `DataLocale`, the locale argument of the collator (already a dependency of
+# `regexml`'s ICU4X 1.5 crates).
+icu_provider = { version = "~1.5", optional = true }
+# `Locale`, to read the Unicode extension keywords in the `lang` parameter of a
+# UCA collation URI (already a dependency of `regexml`'s ICU4X 1.5 crates).
+icu_locid = { version = "~1.5", optional = true }
+# The contraction and prefix tries of the collation data and the canonical
+# decompositions, which the substring functions (`fn:contains`,
+# `fn:starts-with`, `fn:ends-with`, `fn:substring-before` …) read under a UCA
+# collation. Both are dependencies of `icu_collator` 1.5 already.
 icu_collections = { version = "~1.5", optional = true }
 icu_normalizer = { version = "~1.5", optional = true }
 
 [features]
 default = []
-# ICU/UCA collations: `http://www.w3.org/2013/collation/UCA?…` and
-# locale-tailored `xsl:sort lang` / `case-order` (DESIGN §9.5, milestone M2k).
+# ICU collations: the UCA collation URIs
+# (`http://www.w3.org/2013/collation/UCA?…`) and the locale-tailored
+# `lang` and `case-order` of `xsl:sort`. Without it, the codepoint collation,
+# the HTML ASCII case-insensitive collation and the collations a host registers
+# are available.
 icu-collation = [
     "dep:icu_collator",
     "dep:icu_provider",
@@ -60,14 +82,18 @@ icu-collation = [
 
 [dev-dependencies]
 pretty_assertions = "1.4"
-roxmltree = "0.19"           # W3C test-suite catalog parsing (same as xsd-schema's XQTS driver)
+roxmltree = "0.19"           # Reads the catalog of the W3C XSLT test suite
 
 [lib]
 name = "xslt2"
 path = "src/lib.rs"
 
-# W3C XSLT conformance harness (XSLT 2.0-applicable subset of the public XSLT 3.0 suite).
-# Always run in --release:  cargo test --test xslts --release -- -s ../../xslt30-test
+# The W3C XSLT conformance harness: the XSLT 2.0 subset of the public XSLT 3.0
+# test suite (https://github.com/w3c/xslt30-test), which is not part of this
+# repository. Run it in release mode:
+#   cargo test --release --test xslts -- -s <path to xslt30-test> --skip unicode-90
+# Without `-s` it looks for the suite at `../../xslt30-test` and skips with a
+# message when the suite is not there.
 [[test]]
 name = "xslts"
 path = "tests/xslts/driver.rs"
