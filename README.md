@@ -11,20 +11,19 @@ the 39,510 W3C XSD 1.0 tests, 2,313 of 2,319 XSD 1.1 tests and all 8,047 XQTS XP
 ```toml
 [dependencies]
 xslt2 = "0.1"
-xsd-schema = "0.3"   # the name table a basic compiler borrows
-bumpalo = "3"        # the arena a transformation builds its trees in
 ```
 
-[`xsd-schema` 0.3](https://crates.io/crates/xsd-schema) and `bumpalo` 3 come from crates.io. The minimum supported
-Rust version is 1.85. The API documentation is on [docs.rs](https://docs.rs/xslt2).
+`xslt2` re-exports the crates its API uses — [`xsd-schema`](https://crates.io/crates/xsd-schema) as
+`xslt2::xsd_schema` and `bumpalo` as `xslt2::bumpalo` — so it is the only dependency you need, and the versions always
+match. The minimum supported Rust version is 1.85. The API documentation, with more examples, is on
+[docs.rs](https://docs.rs/xslt2).
 
 ## Quick start
 
 A stylesheet and a source document given as strings:
 
 ```rust
-use xsd_schema::namespace::NameTable;
-use xslt2::{Compiler, TransformOptions, XsltFunctions};
+use xslt2::{Compiler, NameTable, TransformOptions, XsltFunctions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let names = NameTable::new();
@@ -38,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "urn:example:sheet", // the stylesheet's base URI
     )?;
 
-    let arena = bumpalo::Bump::new();
+    let arena = xslt2::bumpalo::Bump::new();
     let run = sheet.transformation(&arena, TransformOptions::default());
     let outcome = run.transform_source(
         "urn:example:order",
@@ -56,15 +55,14 @@ Files, and the extra result documents a stylesheet writes with `xsl:result-docum
 
 ```rust
 use std::path::Path;
-use xsd_schema::namespace::NameTable;
-use xslt2::{Compiler, TransformOptions, XsltFunctions};
+use xslt2::{Compiler, NameTable, TransformOptions, XsltFunctions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let names = NameTable::new();
     let functions = XsltFunctions::new();
     let sheet = Compiler::new(&names, &functions).compile_file(Path::new("report.xsl"))?;
 
-    let arena = bumpalo::Bump::new();
+    let arena = xslt2::bumpalo::Bump::new();
     let options = TransformOptions {
         // The base output URI: `xsl:result-document href="…"` resolves against it.
         base_output_uri: Some("file:///data/out/".into()),
@@ -84,6 +82,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Nothing is written to disk: the transformation returns its result trees, and the caller serializes and stores them
 (`serialize_primary_to_bytes` and `serialize_secondary_to_bytes` apply the output encoding). The messages of
 `xsl:message` are in `outcome.messages`.
+
+## Examples
+
+```bash
+cargo run --example transform -- sheet.xsl input.xml [name=value ...]   # the primary result to stdout
+cargo run --example schema_aware -- sheet.xsl input.xml [schema.xsd ...] [--xsd11]
+cargo run --example in_memory                                          # no files: a MemoryResolver
+```
 
 ## What is supported
 
@@ -132,7 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;                                              // XTSE0220 for an invalid schema
     let sheet = Compiler::schema_aware(&context, &functions).compile_file(Path::new("report.xsl"))?;
 
-    let arena = bumpalo::Bump::new();
+    let arena = xslt2::bumpalo::Bump::new();
     let options = TransformOptions {
         source_validation: SourceValidation::Strict, // also for doc() and document()
         ..Default::default()
