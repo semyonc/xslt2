@@ -18,6 +18,15 @@ xslt2 = "0.1"
 match. The minimum supported Rust version is 1.85. The API documentation, with more examples, is on
 [docs.rs](https://docs.rs/xslt2).
 
+## Documentation
+
+- [API documentation](https://docs.rs/xslt2) on docs.rs, with examples
+- [Changelog](https://github.com/semyonc/xslt2/blob/main/CHANGELOG.md)
+- [Conformance](https://github.com/semyonc/xslt2/blob/main/doc/CONFORMANCE.md): every W3C test case that does not
+  pass, and every excluded one, with the reason
+- [Limits and untrusted input](https://github.com/semyonc/xslt2/blob/main/doc/LIMITS.md): what a transformation can
+  read under each resolver, the resource limits, and how to run stylesheets you do not trust
+
 ## Quick start
 
 A stylesheet and a source document given as strings:
@@ -245,14 +254,17 @@ test-set left out (`--skip unicode-90`):
 - **Headline**: the runnable cases that need no optional feature (no schema-awareness, backwards compatibility or
   serialization), outside the regular-expression and Unicode test-sets (`regex`, `regex-classes`, `regex-syntax`,
   `regex-syntax-xslt20`), which exercise the regex engine more than XSLT.
-- The 25 failures and the 3 harness errors are the same cases in all four runs. The harness errors are cases whose
-  initial context item is a node inside the source document, where the public API starts only at a document node.
-  The 2 notImplemented cases use a UCA collation, which needs `icu-collation`.
+- The 25 failures and the 3 harness errors are the same cases in all four runs.
+  [Conformance](https://github.com/semyonc/xslt2/blob/main/doc/CONFORMANCE.md) gives the reason for each: 8 are a
+  known bug (zero-length text nodes in a typed variable or a function result are lost), 14 need DTD processing that
+  their catalog entries do not declare, 1 needs `collection()`, 1 German number words, 1 a resource on the web, and
+  the 3 harness errors start the transformation at a node inside the source document, where the public API starts
+  only at a document node. The 2 notImplemented cases use a UCA collation, which needs `icu-collation`.
 - **Excluded**: cases whose expected result is wrong for a conformant XSLT 2.0 processor (XSLT 3.0 syntax or
   behaviour in a 2.0 stylesheet, results that §4.2, §4.4, §5.7.3 or §6.6 rule out), or pins a choice the specification
   leaves to the implementation, including 32 regular-expression cases that pin an older Unicode version. Every entry
   of `EXCLUDED` in [`tests/xslts/filter.rs`](https://github.com/semyonc/xslt2/blob/main/tests/xslts/filter.rs) quotes the text that makes it so; the schema-aware runs add 12 schema-aware
-  cases.
+  cases. [Conformance](https://github.com/semyonc/xslt2/blob/main/doc/CONFORMANCE.md#excluded-cases) groups them.
 - **Not run** in the basic run: 584 cases that need a schema-aware processor, 61 that need DTD processing, 44 that
   need XML 1.1, 18 that need the `xsl-stylesheet` processing instruction, 12 that expect a recoverable error to be
   signalled (`on-multiple-match=error`; this processor recovers by default), and 44 whose other dependencies (optional

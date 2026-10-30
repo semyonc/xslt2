@@ -22,6 +22,7 @@ include = [
     "README.md",
     "LICENSE-*",
     "CHANGELOG.md",
+    "doc/**",
 ]
 
 [package.metadata.docs.rs]
