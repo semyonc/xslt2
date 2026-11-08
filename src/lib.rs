@@ -444,8 +444,8 @@
 //!   that runs stylesheets it does not trust gives the compiler and the
 //!   transformation a resolver of its own (LIMITS.md,
 //!   [Advice](https://github.com/semyonc/xslt2/blob/main/doc/LIMITS.md#advice));
-//! - result trees stay in memory, and each one costs about 118 KB of the run's
-//!   arena however small it is;
+//! - result trees stay in memory, and each one costs at least about 5.6 KB of
+//!   the run's arena;
 //! - no extension instructions; `xsl:number` and the date formatting functions
 //!   write English, and the dates are Gregorian;
 //! - the output encodings are UTF-8, UTF-16, US-ASCII and ISO-8859-1;

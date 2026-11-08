@@ -518,14 +518,13 @@ pub struct Outcome<'t> {
     /// host's business (`CompiledStylesheet::serialize_secondary`).
     ///
     /// **Memory.** Every result tree — and every temporary tree the run builds
-    /// (variables, `xsl:document`, messages) — costs about 118 KB of the run's
-    /// arena however small it is (the document builder reserves a 4,096-node
-    /// page and a 4,096-entry namespace page per tree), and the arena keeps it
-    /// until it is dropped; every secondary result is also kept here until the
-    /// run ends. Tens of thousands of result documents therefore need
-    /// gigabytes (10,000 trivial ones ≈ 1.2 GB). This version has no streaming
-    /// handler that would let the host serialize and drop each tree as it
-    /// completes.
+    /// (variables, `xsl:document`, messages) — costs at least about 5.6 KB of
+    /// the run's arena (the document builder reserves a 256-node page and a
+    /// 64-entry namespace page per tree), and the arena keeps it until it is
+    /// dropped; every secondary result is also kept here until the run ends.
+    /// 10,000 trivial result documents take about 56 MB. This version has no
+    /// streaming handler that would let the host serialize and drop each tree
+    /// as it completes.
     pub secondary: Vec<SecondaryResult<'t>>,
     /// The effective output definition of a primary result an
     /// `xsl:result-document` created; `None` for the tree created implicitly,

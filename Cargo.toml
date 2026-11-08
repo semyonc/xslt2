@@ -35,7 +35,7 @@ all-features = true
 # validation with its post-schema-validation infoset, and the in-memory
 # document model. The `xsd11` feature enables the XPath engine and the
 # document model.
-xsd-schema = { version = "0.3", features = ["xsd11"] }
+xsd-schema = { version = "0.3.1", features = ["xsd11"] }
 
 # The arena that holds the nodes of documents built during a transformation.
 bumpalo = "3"

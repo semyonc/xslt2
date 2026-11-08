@@ -63,7 +63,7 @@ the `unicode-90` test-set included, which takes about 25 minutes on its own. Run
 xsd-schema = { path = "/path/to/xsd-schema" }   # your checkout
 ```
 
-The checkout's version must satisfy the requirement in `Cargo.toml` (`0.3`): otherwise Cargo uses the crates.io release
+The checkout's version must satisfy the requirement in `Cargo.toml` (`0.3.1`): otherwise Cargo uses the crates.io release
 and only warns that the patch "was not used in the crate graph". Check with `cargo tree -i xsd-schema`, which shows
 the path of a patched crate. The patch rewrites `Cargo.lock`; restore it (`git checkout Cargo.lock`) before
 committing, and never commit the patch.

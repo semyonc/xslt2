@@ -207,8 +207,8 @@ unifies features across a build, so if any crate in a build enables `icu-collati
 ## Known limits
 
 - **Results stay in memory.** Secondary result documents are returned in `Outcome::secondary` and nothing is written
-  to disk. Every result tree and every temporary tree costs about 118 KB of the transformation's arena however small
-  it is, kept until the arena is dropped, so tens of thousands of result documents need gigabytes.
+  to disk. Every result tree and every temporary tree costs at least about 5.6 KB of the transformation's arena,
+  kept until the arena is dropped: 10,000 small result documents take about 56 MB.
 - **Untrusted stylesheets.** The default `FileResolver` reads any file the process can read, and a transformation
   reads `document()`, `doc()` and `unparsed-text()` through the compiler's resolver. Give a stylesheet you do not
   trust a `MemoryResolver` or a resolver of your own; nothing in the library bounds the time or the memory of a run.

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `xsd-schema` 0.3.1, whose documents are built in pages of 256
+  nodes instead of 4,096. Every result tree and every temporary tree now costs
+  at least about 5.6 KB of the transformation's arena instead of about 116 KB:
+  1,000 one-element result documents use 5.6 MB instead of 115.6 MB, and
+  10,000 about 56 MB instead of 1.2 GB. Conformance results are unchanged.
+
 ## [0.1.0] - 2026-10-31
 
 First release: an XSLT 2.0 processor written in Rust, basic and schema-aware

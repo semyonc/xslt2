@@ -162,11 +162,12 @@ smaller limits bounds the nesting depth of stylesheet modules and source documen
 
 ### Memory per tree
 
-Every result tree and every temporary tree (a variable's document, `xsl:document`, an `xsl:result-document`) takes about
-115 KB of the transformation's arena however small it is, and the arena keeps it until it is dropped. Measured: 1,000
-one-element result documents, or 1,000 one-element temporary trees, used 115.6 MB of the arena, and the arena had
-reserved 218 MB (it grows in chunks that double). Tens of thousands of trees need gigabytes. Dropping the `Outcome`,
-the `Transformation` and the arena frees everything a run built.
+Every result tree and every temporary tree (a variable's document, `xsl:document`, an `xsl:result-document`) takes at
+least about 5.6 KB of the transformation's arena, and the arena keeps it until it is dropped; a larger tree takes more,
+in pages of 256 nodes. Measured with `xsd-schema` 0.3.1: 1,000 one-element result documents, or 1,000 one-element
+temporary trees, used 5.6 MB of the arena, which had reserved 8.4 MB (it grows in chunks that double); 10,000 used
+55.5 MB (67.1 MB reserved). With `xsd-schema` 0.3.0, whose document pages held 4,096 nodes, the same 1,000 trees used
+115.6 MB. Dropping the `Outcome`, the `Transformation` and the arena frees everything a run built.
 
 ### Regular expressions and collations
 
